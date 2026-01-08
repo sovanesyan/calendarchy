@@ -3,7 +3,7 @@ Version=1.0
 Type=Application
 Name=Calendarchy
 Comment=A terminal-based calendar for omarchy
-Exec=xdg-terminal-exec --title Calendarchy -e calendarchy
+Exec=xdg-terminal-exec --title=Calendarchy calendarchy
 Icon=calendar
 Terminal=false
 Categories=Office;Calendar;

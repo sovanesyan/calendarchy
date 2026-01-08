@@ -28,15 +28,13 @@ impl Calendar {
 
         // Get first day of month
         let first_day = self.current_date.with_day(1).unwrap();
-        let last_day = self.current_date.with_day(self.days_in_month()).unwrap();
 
         // Calculate starting weekday (Monday = 0, Sunday = 6)
         let start_weekday = first_day.weekday().num_days_from_monday();
 
         // Print header
-        print!("\r\n");
         execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
-        print!("         {} {}\r\n",
+        print!(" {} {}\r\n",
             self.current_date.format("%B").to_string().to_uppercase(),
             self.current_date.year()
         );
@@ -44,52 +42,44 @@ impl Calendar {
 
         // Weekday header
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("  Mo Tu We Th Fr Sa Su\r\n");
+        print!(" Mon Tue Wed Thu Fri Sat Sun\r\n");
         execute!(out, ResetColor).unwrap();
 
-        // Print leading spaces for first week
-        print!("  ");
-        for _ in 0..start_weekday {
-            print!("   ");
-        }
-
-        // Print days
+        // Print 6 rows (max weeks in a month view)
         let mut current_day = first_day;
-        let mut day_count = 0;
+        let days_in_month = self.days_in_month();
 
-        while current_day <= last_day {
-            let day = current_day.day();
-            let is_today = current_day == today;
-            let is_weekend = current_day.weekday().num_days_from_monday() >= 5;
+        for row in 0..6 {
+            print!(" ");
+            for col in 0..7 {
+                let cell = row * 7 + col;
+                if cell < start_weekday || cell >= start_weekday + days_in_month {
+                    print!("    ");
+                } else {
+                    let day = (cell - start_weekday + 1) as u32;
+                    current_day = first_day.with_day(day).unwrap();
+                    let is_today = current_day == today;
+                    let is_weekend = col >= 5;
 
-            if is_today {
-                execute!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold)).unwrap();
-                print!("{:2} ", day);
-                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-            } else if is_weekend {
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!("{:2} ", day);
-                execute!(out, ResetColor).unwrap();
-            } else {
-                print!("{:2} ", day);
-            }
-
-            day_count += 1;
-            current_day = current_day + Duration::days(1);
-
-            // New line after Sunday
-            if (day_count + start_weekday) % 7 == 0 {
-                print!("\r\n");
-                if current_day <= last_day {
-                    print!("  ");
+                    if is_today {
+                        execute!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold)).unwrap();
+                        print!(" {:2} ", day);
+                        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+                    } else if is_weekend {
+                        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                        print!(" {:2} ", day);
+                        execute!(out, ResetColor).unwrap();
+                    } else {
+                        print!(" {:2} ", day);
+                    }
                 }
             }
+            print!("\r\n");
         }
 
         // Controls
-        print!("\r\n\r\n");
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("  j/k navigate  t today  q quit\r\n");
+        print!(" j/k t q\r\n");
         execute!(out, ResetColor).unwrap();
 
         out.flush().unwrap();
