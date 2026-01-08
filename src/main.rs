@@ -21,6 +21,13 @@ use std::time::Duration as StdDuration;
 use tokio::sync::mpsc;
 use ui::AuthDisplay;
 
+/// View mode for the calendar
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    Month,
+    Week,
+}
+
 /// Google authentication state
 #[derive(Debug, Clone)]
 pub enum GoogleAuthState {
@@ -84,6 +91,8 @@ impl AuthDisplay for ICloudAuthState {
 struct App {
     current_date: NaiveDate,
     selected_date: NaiveDate,
+    view_mode: ViewMode,
+    show_weekends: bool,
     events: EventCache,
     google_auth: GoogleAuthState,
     icloud_auth: ICloudAuthState,
@@ -105,6 +114,8 @@ impl App {
         Self {
             current_date: today,
             selected_date: today,
+            view_mode: ViewMode::Month,
+            show_weekends: false,
             events,
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
@@ -271,6 +282,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let render_state = ui::RenderState {
             current_date: app.current_date,
             selected_date: app.selected_date,
+            view_mode: app.view_mode,
+            show_weekends: app.show_weekends,
             events: &app.events,
             google_auth: &app.google_auth,
             icloud_auth: &app.icloud_auth,
@@ -492,6 +505,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.google_needs_fetch = true;
                             app.icloud_needs_fetch = true;
                             app.status_message = Some("Refreshing...".to_string());
+                        }
+                        KeyCode::Char('v') => {
+                            // Toggle between month and week view
+                            app.view_mode = match app.view_mode {
+                                ViewMode::Month => ViewMode::Week,
+                                ViewMode::Week => ViewMode::Month,
+                            };
+                        }
+                        KeyCode::Char('s') => {
+                            // Toggle weekends (only meaningful in week view)
+                            app.show_weekends = !app.show_weekends;
                         }
                         KeyCode::Char('g') => {
                             // Start Google auth flow (only if not already authenticated)

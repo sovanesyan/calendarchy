@@ -1,6 +1,6 @@
 use crate::cache::{DisplayEvent, EventCache};
-use crate::{GoogleAuthState, ICloudAuthState};
-use chrono::{Datelike, Local, NaiveDate, NaiveTime};
+use crate::{GoogleAuthState, ICloudAuthState, ViewMode};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 use crossterm::{
     cursor,
     execute,
@@ -15,6 +15,8 @@ const MIN_PANEL_WIDTH: u16 = 25;
 pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
+    pub view_mode: ViewMode,
+    pub show_weekends: bool,
     pub events: &'a EventCache,
     pub google_auth: &'a GoogleAuthState,
     pub icloud_auth: &'a ICloudAuthState,
@@ -29,50 +31,12 @@ pub fn render(state: &RenderState) {
 
     // Get terminal size
     let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
-    let right_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
-    let panel_height = term_height.saturating_sub(3) / 2; // Split right side in two
 
     execute!(out, Clear(ClearType::All), cursor::Hide).unwrap();
 
-    // Render calendar on left
-    render_calendar(&mut out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
-
-    // Render Work (Google) panel on right top
-    if right_panel_width >= MIN_PANEL_WIDTH {
-        let now = Local::now();
-        let current_time = now.time();
-        let is_today = state.selected_date == today;
-
-        render_event_panel(
-            &mut out,
-            CALENDAR_WIDTH + 1,
-            0,
-            right_panel_width,
-            panel_height,
-            "Work (Google)",
-            state.events.google.get(state.selected_date),
-            state.google_auth,
-            state.google_loading,
-            Color::Blue,
-            is_today,
-            current_time,
-        );
-
-        // Render Personal (iCloud) panel on right bottom
-        render_event_panel(
-            &mut out,
-            CALENDAR_WIDTH + 1,
-            panel_height + 1,
-            right_panel_width,
-            panel_height,
-            "Personal (iCloud)",
-            state.events.icloud.get(state.selected_date),
-            state.icloud_auth,
-            state.icloud_loading,
-            Color::Magenta,
-            is_today,
-            current_time,
-        );
+    match state.view_mode {
+        ViewMode::Month => render_month_view(&mut out, state, today, term_width, term_height),
+        ViewMode::Week => render_week_view(&mut out, state, today, term_width, term_height),
     }
 
     // Render status bar at bottom
@@ -88,7 +52,10 @@ pub fn render(state: &RenderState) {
     // Render controls - only show g/i if not authenticated
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    let mut controls = String::from(" hjkl:nav t:today r:refresh");
+    let mut controls = String::from(" hjkl:nav t:today r:refresh v:view");
+    if state.view_mode == ViewMode::Week {
+        controls.push_str(" s:weekends");
+    }
     if !state.google_auth.is_authenticated() {
         controls.push_str(" g:work");
     }
@@ -100,6 +67,316 @@ pub fn render(state: &RenderState) {
     execute!(out, ResetColor).unwrap();
 
     out.flush().unwrap();
+}
+
+fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
+    let right_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
+    let panel_height = term_height.saturating_sub(3) / 2;
+
+    // Render calendar on left
+    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
+
+    // Render Work (Google) panel on right top
+    if right_panel_width >= MIN_PANEL_WIDTH {
+        let now = Local::now();
+        let current_time = now.time();
+        let is_today = state.selected_date == today;
+
+        render_event_panel(
+            out,
+            CALENDAR_WIDTH + 1,
+            0,
+            right_panel_width,
+            panel_height,
+            "Work (Google)",
+            state.events.google.get(state.selected_date),
+            state.google_auth,
+            state.google_loading,
+            Color::Blue,
+            is_today,
+            current_time,
+        );
+
+        // Render Personal (iCloud) panel on right bottom
+        render_event_panel(
+            out,
+            CALENDAR_WIDTH + 1,
+            panel_height + 1,
+            right_panel_width,
+            panel_height,
+            "Personal (iCloud)",
+            state.events.icloud.get(state.selected_date),
+            state.icloud_auth,
+            state.icloud_loading,
+            Color::Magenta,
+            is_today,
+            current_time,
+        );
+    }
+}
+
+fn render_week_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
+    let now = Local::now();
+    let current_time = now.time();
+
+    // Calculate the week (Monday to Sunday) containing selected_date
+    let days_from_monday = state.selected_date.weekday().num_days_from_monday();
+    let week_start = state.selected_date - Duration::days(days_from_monday as i64);
+
+    // Determine which days to show
+    let days_to_show: Vec<i64> = if state.show_weekends {
+        (0..7).collect() // Mon-Sun
+    } else {
+        (0..5).collect() // Mon-Fri
+    };
+    let num_days = days_to_show.len() as u16;
+
+    // Calculate column width
+    let col_width = term_width / num_days;
+    let panel_height = term_height.saturating_sub(3); // Leave room for status and controls
+    let half_height = panel_height / 2;
+
+    // Render header row with day names and dates
+    for (col_idx, &day_offset) in days_to_show.iter().enumerate() {
+        let date = week_start + Duration::days(day_offset);
+        let x = (col_idx as u16) * col_width;
+        let is_selected = date == state.selected_date;
+        let is_today = date == today;
+
+        execute!(out, cursor::MoveTo(x, 0)).unwrap();
+
+        // Day name
+        let day_name = match date.weekday() {
+            Weekday::Mon => "Mon",
+            Weekday::Tue => "Tue",
+            Weekday::Wed => "Wed",
+            Weekday::Thu => "Thu",
+            Weekday::Fri => "Fri",
+            Weekday::Sat => "Sat",
+            Weekday::Sun => "Sun",
+        };
+
+        if is_selected {
+            execute!(out, SetForegroundColor(Color::Black)).unwrap();
+            execute!(out, crossterm::style::SetBackgroundColor(Color::White)).unwrap();
+        } else if is_today {
+            execute!(out, SetForegroundColor(Color::Green)).unwrap();
+        } else if date.weekday() == Weekday::Sat || date.weekday() == Weekday::Sun {
+            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        } else {
+            execute!(out, SetForegroundColor(Color::White)).unwrap();
+        }
+
+        let header = format!("{} {:02}", day_name, date.day());
+        print!("{:^width$}", header, width = col_width as usize);
+        execute!(out, ResetColor, crossterm::style::SetBackgroundColor(Color::Reset)).unwrap();
+    }
+
+    // Render each day column
+    for (col_idx, &day_offset) in days_to_show.iter().enumerate() {
+        let date = week_start + Duration::days(day_offset);
+        let x = (col_idx as u16) * col_width;
+        let is_today = date == today;
+        let is_past_day = date < today;
+
+        // Work (Google) - top half
+        render_week_day_panel(
+            out,
+            x,
+            1,
+            col_width.saturating_sub(1),
+            half_height,
+            state.events.google.get(date),
+            Color::Blue,
+            is_today,
+            is_past_day,
+            current_time,
+        );
+
+        // Separator line
+        execute!(out, cursor::MoveTo(x, 1 + half_height)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("{}", "─".repeat(col_width.saturating_sub(1) as usize));
+        execute!(out, ResetColor).unwrap();
+
+        // Personal (iCloud) - bottom half
+        render_week_day_panel(
+            out,
+            x,
+            2 + half_height,
+            col_width.saturating_sub(1),
+            half_height.saturating_sub(1),
+            state.events.icloud.get(date),
+            Color::Magenta,
+            is_today,
+            is_past_day,
+            current_time,
+        );
+    }
+}
+
+fn render_week_day_panel(
+    out: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    events: &[DisplayEvent],
+    _color: Color,
+    is_today: bool,
+    is_past_day: bool,
+    current_time: NaiveTime,
+) {
+    let max_lines = height as usize;
+    let (current_event_idx, next_event_idx) = if is_today {
+        find_current_and_next_events(events, current_time)
+    } else {
+        (None, None)
+    };
+
+    let mut current_line = 0;
+    let mut events_shown = 0;
+    let usable_width = width.saturating_sub(1) as usize; // Leave space for indicator
+
+    for (i, event) in events.iter().enumerate() {
+        if current_line >= max_lines {
+            break;
+        }
+
+        let is_current = current_event_idx == Some(i);
+        let is_next = next_event_idx == Some(i);
+        let is_past_event = is_today && is_event_past(event, current_time) && !is_current;
+        let is_unaccepted = !event.accepted;
+
+        // Gray out: past days, past events today, or unaccepted
+        let event_color = if is_past_day || is_unaccepted || is_past_event {
+            Color::DarkGrey
+        } else if is_current {
+            Color::Green
+        } else if is_next {
+            Color::Yellow
+        } else {
+            Color::Reset
+        };
+
+        // Format: "[icon] HH:MM Title" with wrapping
+        // Reserve 2 chars at start for meeting icon (consistent spacing whether link exists or not)
+        let icon_space = 2;
+        let adjusted_width = usable_width.saturating_sub(icon_space);
+        let time_title = format!("{} {}", event.time_str, event.title);
+        let wrapped_lines = wrap_text(&time_title, adjusted_width);
+
+        for (line_idx, line) in wrapped_lines.iter().enumerate() {
+            if current_line >= max_lines {
+                break;
+            }
+
+            execute!(out, cursor::MoveTo(x, y + current_line as u16)).unwrap();
+
+            // Show indicator only on first line of event
+            if line_idx == 0 {
+                if is_current && !is_unaccepted {
+                    execute!(out, SetForegroundColor(Color::Green)).unwrap();
+                    print!("\u{25CF}");
+                } else if is_next && !is_unaccepted {
+                    execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
+                    print!("\u{25CB}");
+                } else {
+                    print!(" ");
+                }
+
+                // Meeting icon to the left of time (consistent spacing)
+                if let Some(ref url) = event.meeting_url {
+                    print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url);
+                } else {
+                    print!("  "); // Reserve space for alignment
+                }
+            } else {
+                print!("   "); // Indent continuation lines (indicator + icon space)
+            }
+
+            execute!(out, SetForegroundColor(event_color)).unwrap();
+            print!("{}", line);
+            execute!(out, ResetColor).unwrap();
+
+            current_line += 1;
+        }
+
+        events_shown += 1;
+    }
+
+    // Show overflow indicator if there are more events
+    if events_shown < events.len() && current_line < max_lines {
+        execute!(out, cursor::MoveTo(x, y + current_line as u16)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("+{}", events.len() - events_shown);
+        execute!(out, ResetColor).unwrap();
+    }
+}
+
+/// Wrap text to fit within a given width
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![];
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+
+        if current_width == 0 {
+            // First word on line
+            if word_width > max_width {
+                // Word is too long, force break it
+                for ch in word.chars() {
+                    if current_width >= max_width {
+                        lines.push(current_line);
+                        current_line = String::new();
+                        current_width = 0;
+                    }
+                    current_line.push(ch);
+                    current_width += 1;
+                }
+            } else {
+                current_line = word.to_string();
+                current_width = word_width;
+            }
+        } else if current_width + 1 + word_width <= max_width {
+            // Word fits on current line
+            current_line.push(' ');
+            current_line.push_str(word);
+            current_width += 1 + word_width;
+        } else {
+            // Word doesn't fit, start new line
+            lines.push(current_line);
+            if word_width > max_width {
+                // Word is too long, force break it
+                current_line = String::new();
+                current_width = 0;
+                for ch in word.chars() {
+                    if current_width >= max_width {
+                        lines.push(current_line);
+                        current_line = String::new();
+                        current_width = 0;
+                    }
+                    current_line.push(ch);
+                    current_width += 1;
+                }
+            } else {
+                current_line = word.to_string();
+                current_width = word_width;
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    lines
 }
 
 fn render_calendar(
@@ -278,12 +555,19 @@ fn render_event_panel<A: AuthDisplay>(
             // Dot indicator for current (green) or next (orange) event
             if is_current && !is_unaccepted {
                 execute!(out, SetForegroundColor(Color::Green)).unwrap();
-                print!("\u{25CF} "); // Filled circle
+                print!("\u{25CF}"); // Filled circle
             } else if is_next && !is_unaccepted {
                 execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
-                print!("\u{25CB} "); // Empty circle
+                print!("\u{25CB}"); // Empty circle
             } else {
-                print!("  ");
+                print!(" ");
+            }
+
+            // Meeting icon to the left of time (consistent spacing)
+            if let Some(ref url) = event.meeting_url {
+                print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url); // 📹 camera emoji
+            } else {
+                print!("  "); // Reserve space for alignment
             }
 
             execute!(out, SetForegroundColor(event_color)).unwrap();
@@ -298,19 +582,10 @@ fn render_event_panel<A: AuthDisplay>(
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
 
-            // Calculate title width, leaving room for video emoji if present
-            let has_meeting = event.meeting_url.is_some();
-            let join_width = if has_meeting { 3 } else { 0 }; // " 📹"
-            let title_width = width.saturating_sub(11 + join_width as u16) as usize;
+            // Calculate title width (icon space now at start)
+            let title_width = width.saturating_sub(13) as usize; // indicator + icon + time + space
             print!("{}", truncate_str(&event.title, title_width));
             execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-            // Show clickable video call link if meeting URL available
-            if let Some(ref url) = event.meeting_url {
-                print!(" ");
-                // OSC 8 hyperlink using ST terminator: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
-                print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url); // 📹 camera emoji
-            }
         }
 
         if events.len() > max_events {
