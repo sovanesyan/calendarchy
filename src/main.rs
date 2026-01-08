@@ -485,39 +485,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Event::Key(key_event) = event::read()? {
                 if key_event.kind == KeyEventKind::Press {
                     match key_event.code {
-                        KeyCode::Char('j') | KeyCode::Down => {
+                        // Navigation keys (with Bulgarian Phonetic equivalents)
+                        KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
                             app.next_week();
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
+                        KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
                             app.prev_week();
                         }
-                        KeyCode::Char('h') | KeyCode::Left => {
+                        KeyCode::Char('h') | KeyCode::Char('х') | KeyCode::Left => {
                             app.prev_day();
                         }
-                        KeyCode::Char('l') | KeyCode::Right => {
+                        KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right => {
                             app.next_day();
                         }
-                        KeyCode::Char('t') => {
+                        KeyCode::Char('t') | KeyCode::Char('т') => {
                             app.goto_today();
                         }
-                        KeyCode::Char('r') => {
+                        KeyCode::Char('r') | KeyCode::Char('р') => {
                             app.events.clear();
                             app.google_needs_fetch = true;
                             app.icloud_needs_fetch = true;
                             app.status_message = Some("Refreshing...".to_string());
                         }
-                        KeyCode::Char('v') => {
+                        KeyCode::Char('v') | KeyCode::Char('ж') => {
                             // Toggle between month and week view
                             app.view_mode = match app.view_mode {
                                 ViewMode::Month => ViewMode::Week,
                                 ViewMode::Week => ViewMode::Month,
                             };
                         }
-                        KeyCode::Char('s') => {
+                        KeyCode::Char('s') | KeyCode::Char('с') => {
                             // Toggle weekends (only meaningful in week view)
                             app.show_weekends = !app.show_weekends;
                         }
-                        KeyCode::Char('g') => {
+                        KeyCode::Char('g') | KeyCode::Char('г') => {
                             // Start Google auth flow (only if not already authenticated)
                             if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                 // Already authenticated, ignore
@@ -543,7 +544,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        KeyCode::Char('i') => {
+                        KeyCode::Char('i') | KeyCode::Char('и') => {
                             // Start iCloud discovery (only if not already authenticated)
                             if matches!(app.icloud_auth, ICloudAuthState::Authenticated { .. }) {
                                 // Already authenticated, ignore
@@ -574,7 +575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        KeyCode::Char('q') | KeyCode::Esc => {
+                        KeyCode::Char('q') | KeyCode::Char('я') | KeyCode::Esc => {
                             break;
                         }
                         _ => {}
