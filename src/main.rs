@@ -146,7 +146,6 @@ impl App {
 
 /// Messages from async tasks to main loop
 enum AsyncMessage {
-    TokensLoaded(Option<TokenInfo>),
     DeviceCodeReceived {
         user_code: String,
         verification_url: String,
@@ -234,13 +233,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Handle async messages (non-blocking)
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                AsyncMessage::TokensLoaded(Some(tokens)) => {
-                    app.auth_state = AuthState::Authenticated(tokens);
-                    app.needs_fetch = true;
-                }
-                AsyncMessage::TokensLoaded(None) => {
-                    app.auth_state = AuthState::NotAuthenticated;
-                }
                 AsyncMessage::DeviceCodeReceived {
                     user_code,
                     verification_url,

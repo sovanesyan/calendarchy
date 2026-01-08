@@ -1,4 +1,4 @@
-use crate::error::{CalendarchyError, Result};
+use crate::error::Result;
 use crate::google::TokenInfo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -91,10 +91,3 @@ pub fn load_tokens() -> Result<Option<TokenInfo>> {
     Ok(Some(stored.tokens))
 }
 
-pub fn clear_tokens() -> Result<()> {
-    let path = Config::token_path();
-    if path.exists() {
-        fs::remove_file(&path)?;
-    }
-    Ok(())
-}

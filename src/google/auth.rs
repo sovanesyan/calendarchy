@@ -93,6 +93,7 @@ impl GoogleAuth {
     }
 
     /// Refresh an expired token
+    #[allow(dead_code)]
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenInfo> {
         let response = self
             .client

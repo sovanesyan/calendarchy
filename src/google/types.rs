@@ -23,6 +23,7 @@ pub struct DeviceCodeResponse {
     pub user_code: String,
     pub verification_url: String,
     pub expires_in: u64,
+    #[allow(dead_code)]
     pub interval: u64,
 }
 
