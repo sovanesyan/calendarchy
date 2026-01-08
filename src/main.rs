@@ -1,176 +1,385 @@
-use crossterm::{
-    execute,
-    terminal::{Clear, ClearType, enable_raw_mode, disable_raw_mode},
-    event::{self, Event, KeyCode, KeyEventKind},
-    cursor,
-    style::{Color, SetForegroundColor, ResetColor, SetAttribute, Attribute},
-};
-use std::io::{stdout, Write};
-use chrono::{Datelike, NaiveDate, Duration, Local};
+mod cache;
+mod config;
+mod error;
+mod google;
+mod ui;
 
-struct Calendar {
-    current_date: NaiveDate,
+use cache::EventCache;
+use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, Utc};
+use config::Config;
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+};
+use google::{CalendarClient, GoogleAuth, TokenInfo};
+use std::io::stdout;
+use std::time::Duration as StdDuration;
+use tokio::sync::mpsc;
+
+/// Authentication state
+#[derive(Debug, Clone)]
+pub enum AuthState {
+    NotAuthenticated,
+    AwaitingUserCode {
+        user_code: String,
+        verification_url: String,
+        device_code: String,
+        expires_at: DateTime<Utc>,
+    },
+    Authenticated(TokenInfo),
+    Refreshing,
+    Error(String),
 }
 
-impl Calendar {
+/// Application state
+struct App {
+    current_date: NaiveDate,
+    selected_date: NaiveDate,
+    events: EventCache,
+    auth_state: AuthState,
+    status_message: Option<String>,
+    config: Option<Config>,
+    needs_fetch: bool,
+}
+
+impl App {
     fn new() -> Self {
-        Self {
-            current_date: Local::now().date_naive(),
-        }
-    }
-
-    fn render(&self) {
-        let mut out = stdout();
         let today = Local::now().date_naive();
-
-        // Clear screen, hide cursor, move to top
-        execute!(out, Clear(ClearType::All), cursor::Hide, cursor::MoveTo(0, 0)).unwrap();
-
-        // Get first day of month
-        let first_day = self.current_date.with_day(1).unwrap();
-
-        // Calculate starting weekday (Monday = 0, Sunday = 6)
-        let start_weekday = first_day.weekday().num_days_from_monday();
-
-        // Print header
-        execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
-        print!(" {} {}\r\n",
-            self.current_date.format("%B").to_string().to_uppercase(),
-            self.current_date.year()
-        );
-        execute!(out, ResetColor).unwrap();
-
-        // Weekday header
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!(" Mon Tue Wed Thu Fri Sat Sun\r\n");
-        execute!(out, ResetColor).unwrap();
-
-        // Print 6 rows (max weeks in a month view)
-        let mut current_day = first_day;
-        let days_in_month = self.days_in_month();
-
-        for row in 0..6 {
-            print!(" ");
-            for col in 0..7 {
-                let cell = row * 7 + col;
-                if cell < start_weekday || cell >= start_weekday + days_in_month {
-                    print!("    ");
-                } else {
-                    let day = (cell - start_weekday + 1) as u32;
-                    current_day = first_day.with_day(day).unwrap();
-                    let is_today = current_day == today;
-                    let is_weekend = col >= 5;
-
-                    if is_today {
-                        execute!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold)).unwrap();
-                        print!(" {:2} ", day);
-                        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-                    } else if is_weekend {
-                        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                        print!(" {:2} ", day);
-                        execute!(out, ResetColor).unwrap();
-                    } else {
-                        print!(" {:2} ", day);
-                    }
-                }
-            }
-            print!("\r\n");
+        Self {
+            current_date: today,
+            selected_date: today,
+            events: EventCache::new(),
+            auth_state: AuthState::NotAuthenticated,
+            status_message: None,
+            config: None,
+            needs_fetch: false,
         }
-
-        // Controls
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!(" j/k t q\r\n");
-        execute!(out, ResetColor).unwrap();
-
-        out.flush().unwrap();
-    }
-
-    fn goto_today(&mut self) {
-        self.current_date = Local::now().date_naive();
-    }
-
-    fn days_in_month(&self) -> u32 {
-        match self.current_date.month() {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            2 => {
-                if self.is_leap_year() {
-                    29
-                } else {
-                    28
-                }
-            }
-            _ => 30,
-        }
-    }
-
-    fn is_leap_year(&self) -> bool {
-        let year = self.current_date.year();
-        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
     }
 
     fn next_month(&mut self) {
         if self.current_date.month() == 12 {
             self.current_date = self.current_date
-                .with_year(self.current_date.year() + 1).unwrap()
-                .with_month(1).unwrap()
-                .with_day(1).unwrap();
+                .with_year(self.current_date.year() + 1)
+                .unwrap()
+                .with_month(1)
+                .unwrap()
+                .with_day(1)
+                .unwrap();
         } else {
             self.current_date = self.current_date
-                .with_month(self.current_date.month() + 1).unwrap()
-                .with_day(1).unwrap();
+                .with_month(self.current_date.month() + 1)
+                .unwrap()
+                .with_day(1)
+                .unwrap();
         }
+        self.selected_date = self.current_date;
+        self.needs_fetch = true;
     }
 
     fn prev_month(&mut self) {
         if self.current_date.month() == 1 {
             self.current_date = self.current_date
-                .with_year(self.current_date.year() - 1).unwrap()
-                .with_month(12).unwrap()
-                .with_day(1).unwrap();
+                .with_year(self.current_date.year() - 1)
+                .unwrap()
+                .with_month(12)
+                .unwrap()
+                .with_day(1)
+                .unwrap();
         } else {
             self.current_date = self.current_date
-                .with_month(self.current_date.month() - 1).unwrap()
-                .with_day(1).unwrap();
+                .with_month(self.current_date.month() - 1)
+                .unwrap()
+                .with_day(1)
+                .unwrap();
         }
+        self.selected_date = self.current_date;
+        self.needs_fetch = true;
+    }
+
+    fn next_day(&mut self) {
+        self.selected_date = self.selected_date + Duration::days(1);
+        if self.selected_date.month() != self.current_date.month()
+            || self.selected_date.year() != self.current_date.year()
+        {
+            self.current_date = self.selected_date.with_day(1).unwrap();
+            self.needs_fetch = true;
+        }
+    }
+
+    fn prev_day(&mut self) {
+        self.selected_date = self.selected_date - Duration::days(1);
+        if self.selected_date.month() != self.current_date.month()
+            || self.selected_date.year() != self.current_date.year()
+        {
+            self.current_date = self.selected_date.with_day(1).unwrap();
+            self.needs_fetch = true;
+        }
+    }
+
+    fn goto_today(&mut self) {
+        let today = Local::now().date_naive();
+        let month_changed = today.month() != self.current_date.month()
+            || today.year() != self.current_date.year();
+        self.current_date = today;
+        self.selected_date = today;
+        if month_changed {
+            self.needs_fetch = true;
+        }
+    }
+
+    fn month_range(&self) -> (NaiveDate, NaiveDate) {
+        let first = self.current_date.with_day(1).unwrap();
+        let last = if self.current_date.month() == 12 {
+            NaiveDate::from_ymd_opt(self.current_date.year() + 1, 1, 1)
+                .unwrap()
+                - Duration::days(1)
+        } else {
+            NaiveDate::from_ymd_opt(self.current_date.year(), self.current_date.month() + 1, 1)
+                .unwrap()
+                - Duration::days(1)
+        };
+        (first, last)
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut calendar = Calendar::new();
+/// Messages from async tasks to main loop
+enum AsyncMessage {
+    TokensLoaded(Option<TokenInfo>),
+    DeviceCodeReceived {
+        user_code: String,
+        verification_url: String,
+        device_code: String,
+        expires_at: DateTime<Utc>,
+    },
+    TokenReceived(TokenInfo),
+    AuthPending,
+    AuthError(String),
+    EventsFetched(Vec<google::CalendarEvent>, NaiveDate, NaiveDate),
+    FetchError(String),
+}
 
-    // Enable raw mode for single-keypress input
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::new();
+
+    // Load config
+    match Config::load() {
+        Ok(Some(cfg)) => {
+            app.config = Some(cfg);
+            // Try to load saved tokens
+            if let Ok(Some(tokens)) = config::load_tokens() {
+                if !tokens.is_expired() {
+                    app.auth_state = AuthState::Authenticated(tokens);
+                    app.needs_fetch = true;
+                } else if tokens.refresh_token.is_some() {
+                    app.auth_state = AuthState::Refreshing;
+                    app.needs_fetch = true;
+                }
+            }
+        }
+        Ok(None) => {
+            app.status_message = Some("No config found. Create ~/.config/calendarchy/config.json".to_string());
+        }
+        Err(e) => {
+            app.status_message = Some(format!("Config error: {}", e));
+        }
+    }
+
+    // Channel for async messages
+    let (tx, mut rx) = mpsc::channel::<AsyncMessage>(32);
+
+    // Enable raw mode
     enable_raw_mode()?;
 
+    // Main loop
     loop {
-        calendar.render();
+        // Render
+        ui::render(
+            app.current_date,
+            app.selected_date,
+            &app.events,
+            &app.auth_state,
+            app.status_message.as_deref(),
+        );
 
-        // Wait for a key event
-        if let Event::Key(key_event) = event::read()? {
-            // Only handle key press events (not release)
-            if key_event.kind == KeyEventKind::Press {
-                match key_event.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        calendar.next_month();
+        // Check if we need to fetch events
+        if app.needs_fetch {
+            if let AuthState::Authenticated(ref tokens) = app.auth_state {
+                let (start, end) = app.month_range();
+                if !app.events.has_range(start, end) || app.events.is_stale() {
+                    let tokens = tokens.clone();
+                    let calendar_id = app.config.as_ref()
+                        .map(|c| c.calendar_id.clone())
+                        .unwrap_or_else(|| "primary".to_string());
+                    let tx = tx.clone();
+
+                    tokio::spawn(async move {
+                        let client = CalendarClient::new();
+                        match client.list_events(&tokens, &calendar_id, start, end).await {
+                            Ok(events) => {
+                                let _ = tx.send(AsyncMessage::EventsFetched(events, start, end)).await;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AsyncMessage::FetchError(e.to_string())).await;
+                            }
+                        }
+                    });
+                }
+            }
+            app.needs_fetch = false;
+        }
+
+        // Handle async messages (non-blocking)
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                AsyncMessage::TokensLoaded(Some(tokens)) => {
+                    app.auth_state = AuthState::Authenticated(tokens);
+                    app.needs_fetch = true;
+                }
+                AsyncMessage::TokensLoaded(None) => {
+                    app.auth_state = AuthState::NotAuthenticated;
+                }
+                AsyncMessage::DeviceCodeReceived {
+                    user_code,
+                    verification_url,
+                    device_code,
+                    expires_at,
+                } => {
+                    app.auth_state = AuthState::AwaitingUserCode {
+                        user_code,
+                        verification_url,
+                        device_code,
+                        expires_at,
+                    };
+                }
+                AsyncMessage::TokenReceived(tokens) => {
+                    let _ = config::save_tokens(&tokens);
+                    app.auth_state = AuthState::Authenticated(tokens);
+                    app.needs_fetch = true;
+                    app.status_message = Some("Connected to Google Calendar!".to_string());
+                }
+                AsyncMessage::AuthPending => {
+                    // Still waiting, do nothing
+                }
+                AsyncMessage::AuthError(msg) => {
+                    app.auth_state = AuthState::Error(msg);
+                }
+                AsyncMessage::EventsFetched(events, start, end) => {
+                    app.events.store(events, start, end);
+                    app.status_message = None;
+                }
+                AsyncMessage::FetchError(msg) => {
+                    app.status_message = Some(format!("Fetch error: {}", msg));
+                }
+            }
+        }
+
+        // Poll for device code if awaiting
+        if let AuthState::AwaitingUserCode { ref device_code, expires_at, .. } = app.auth_state {
+            if Utc::now() < expires_at {
+                if let Some(ref cfg) = app.config {
+                    let auth = GoogleAuth::new(cfg.clone());
+                    let device_code = device_code.clone();
+                    let tx = tx.clone();
+
+                    tokio::spawn(async move {
+                        tokio::time::sleep(StdDuration::from_secs(5)).await;
+                        match auth.poll_for_token(&device_code).await {
+                            Ok(google::auth::PollResult::Success(tokens)) => {
+                                let _ = tx.send(AsyncMessage::TokenReceived(tokens)).await;
+                            }
+                            Ok(google::auth::PollResult::Pending) => {
+                                let _ = tx.send(AsyncMessage::AuthPending).await;
+                            }
+                            Ok(google::auth::PollResult::Denied) => {
+                                let _ = tx.send(AsyncMessage::AuthError("Access denied".to_string())).await;
+                            }
+                            Ok(google::auth::PollResult::Expired) => {
+                                let _ = tx.send(AsyncMessage::AuthError("Code expired".to_string())).await;
+                            }
+                            Ok(google::auth::PollResult::SlowDown) => {
+                                let _ = tx.send(AsyncMessage::AuthPending).await;
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AsyncMessage::AuthError(e.to_string())).await;
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
+        // Handle keyboard input with timeout
+        if event::poll(StdDuration::from_millis(100))? {
+            if let Event::Key(key_event) = event::read()? {
+                if key_event.kind == KeyEventKind::Press {
+                    match key_event.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.next_month();
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.prev_month();
+                        }
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            app.prev_day();
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => {
+                            app.next_day();
+                        }
+                        KeyCode::Char('t') => {
+                            app.goto_today();
+                        }
+                        KeyCode::Char('r') => {
+                            app.events.clear();
+                            app.needs_fetch = true;
+                            app.status_message = Some("Refreshing...".to_string());
+                        }
+                        KeyCode::Char('a') => {
+                            // Start auth flow
+                            if let Some(ref cfg) = app.config {
+                                let auth = GoogleAuth::new(cfg.clone());
+                                let tx = tx.clone();
+
+                                tokio::spawn(async move {
+                                    match auth.request_device_code().await {
+                                        Ok(resp) => {
+                                            let expires_at = Utc::now() + chrono::Duration::seconds(resp.expires_in as i64);
+                                            let _ = tx.send(AsyncMessage::DeviceCodeReceived {
+                                                user_code: resp.user_code,
+                                                verification_url: resp.verification_url,
+                                                device_code: resp.device_code,
+                                                expires_at,
+                                            }).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(AsyncMessage::AuthError(e.to_string())).await;
+                                        }
+                                    }
+                                });
+                            } else {
+                                app.status_message = Some("No config file found".to_string());
+                            }
+                        }
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            break;
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        calendar.prev_month();
-                    }
-                    KeyCode::Char('t') => {
-                        calendar.goto_today();
-                    }
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        break;
-                    }
-                    _ => {}
                 }
             }
         }
     }
 
-    // Cleanup: restore cursor, clear screen, disable raw mode
+    // Cleanup
     disable_raw_mode()?;
-    execute!(stdout(), cursor::Show, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+    execute!(
+        stdout(),
+        cursor::Show,
+        Clear(ClearType::All),
+        cursor::MoveTo(0, 0)
+    )?;
 
     Ok(())
 }
