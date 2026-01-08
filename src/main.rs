@@ -98,10 +98,14 @@ struct App {
 impl App {
     fn new() -> Self {
         let today = Local::now().date_naive();
+        let mut events = EventCache::new();
+        // Load cached events from disk for instant display
+        events.load_from_disk();
+
         Self {
             current_date: today,
             selected_date: today,
-            events: EventCache::new(),
+            events,
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
             status_message: None,
@@ -184,6 +188,8 @@ enum AsyncMessage {
     GoogleAuthError(String),
     GoogleEvents(Vec<google::CalendarEvent>, NaiveDate),
     GoogleFetchError(String),
+    GoogleTokenRefreshed(TokenInfo),
+    GoogleRefreshFailed(String),
 
     // iCloud messages
     ICloudDiscovered { calendar_urls: Vec<String> },
@@ -200,6 +206,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.config = Config::load().unwrap_or_default();
 
     // Initialize auth states based on config
+    // Track if we need to refresh Google token
+    let mut google_needs_refresh: Option<String> = None;
+
     if app.config.google.is_some() {
         app.google_auth = GoogleAuthState::NotAuthenticated;
         // Try to load saved Google tokens
@@ -207,6 +216,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !tokens.is_expired() {
                 app.google_auth = GoogleAuthState::Authenticated(tokens);
                 app.google_needs_fetch = true;
+            } else if let Some(ref refresh_token) = tokens.refresh_token {
+                // Token expired but we have a refresh token - will refresh after channel is created
+                google_needs_refresh = Some(refresh_token.clone());
+                app.google_loading = true;
             }
         }
     }
@@ -230,6 +243,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Channel for async messages
     let (tx, mut rx) = mpsc::channel::<AsyncMessage>(32);
+
+    // Spawn Google token refresh if needed
+    if let Some(refresh_token) = google_needs_refresh {
+        if let Some(ref google_config) = app.config.google {
+            let auth = GoogleAuth::new(google_config.clone());
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                match auth.refresh_token(&refresh_token).await {
+                    Ok(new_tokens) => {
+                        let _ = tx.send(AsyncMessage::GoogleTokenRefreshed(new_tokens)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AsyncMessage::GoogleRefreshFailed(e.to_string())).await;
+                    }
+                }
+            });
+        }
+    }
 
     // Enable raw mode
     enable_raw_mode()?;
@@ -349,10 +380,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .collect();
                     app.events.google.store(display_events, month_date);
+                    app.events.save_to_disk();
                     app.google_loading = false;
                 }
                 AsyncMessage::GoogleFetchError(msg) => {
                     app.status_message = Some(format!("Google: {}", msg));
+                    app.google_loading = false;
+                }
+                AsyncMessage::GoogleTokenRefreshed(tokens) => {
+                    let _ = config::save_google_tokens(&tokens);
+                    app.google_auth = GoogleAuthState::Authenticated(tokens);
+                    app.google_needs_fetch = true;
+                    app.google_loading = false;
+                }
+                AsyncMessage::GoogleRefreshFailed(msg) => {
+                    app.google_auth = GoogleAuthState::NotAuthenticated;
+                    app.status_message = Some(format!("Token refresh failed: {}", msg));
                     app.google_loading = false;
                 }
 
@@ -379,6 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .collect();
                     app.events.icloud.store(display_events, month_date);
+                    app.events.save_to_disk();
                     app.icloud_loading = false;
                 }
                 AsyncMessage::ICloudFetchError(msg) => {
