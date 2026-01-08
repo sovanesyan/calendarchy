@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::GoogleConfig;
 use crate::error::{CalendarchyError, Result};
 use crate::google::types::{DeviceCodeResponse, TokenInfo, TokenResponse};
 use chrono::Utc;
@@ -10,7 +10,7 @@ const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly"
 
 pub struct GoogleAuth {
     client: Client,
-    config: Config,
+    config: GoogleConfig,
 }
 
 #[derive(Debug)]
@@ -23,7 +23,7 @@ pub enum PollResult {
 }
 
 impl GoogleAuth {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: GoogleConfig) -> Self {
         Self {
             client: Client::new(),
             config,

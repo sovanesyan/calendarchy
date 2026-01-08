@@ -21,6 +21,12 @@ pub enum CalendarchyError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("XML error: {0}")]
+    Xml(#[from] quick_xml::Error),
+
+    #[error("CalDAV error: {0}")]
+    CalDav(String),
+
     #[error("Token expired")]
     TokenExpired,
 

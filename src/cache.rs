@@ -1,51 +1,50 @@
-use crate::google::CalendarEvent;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate};
 use std::collections::{HashMap, HashSet};
 
-pub struct EventCache {
-    by_date: HashMap<NaiveDate, Vec<CalendarEvent>>,
-    fetched_months: HashSet<(i32, u32)>, // (year, month)
-    last_fetch: Option<DateTime<Utc>>,
+/// Unified event representation for display
+#[derive(Debug, Clone)]
+pub struct DisplayEvent {
+    pub title: String,
+    pub time_str: String,
+    pub date: NaiveDate,
+    pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
 }
 
-impl EventCache {
+/// Source-specific event cache
+pub struct SourceCache {
+    by_date: HashMap<NaiveDate, Vec<DisplayEvent>>,
+    fetched_months: HashSet<(i32, u32)>,
+}
+
+impl SourceCache {
     pub fn new() -> Self {
         Self {
             by_date: HashMap::new(),
             fetched_months: HashSet::new(),
-            last_fetch: None,
         }
     }
 
-    /// Check if we have events cached for this month
-    pub fn has_range(&self, start: NaiveDate, _end: NaiveDate) -> bool {
-        self.fetched_months.contains(&(start.year(), start.month()))
+    pub fn has_month(&self, date: NaiveDate) -> bool {
+        self.fetched_months.contains(&(date.year(), date.month()))
     }
 
-    /// Store events, indexed by date (appends to existing cache)
-    pub fn store(&mut self, events: Vec<CalendarEvent>, start: NaiveDate, _end: NaiveDate) {
+    pub fn store(&mut self, events: Vec<DisplayEvent>, month_date: NaiveDate) {
         for event in events {
-            if let Some(date) = event.start_date() {
-                self.by_date
-                    .entry(date)
-                    .or_insert_with(Vec::new)
-                    .push(event);
-            }
+            self.by_date
+                .entry(event.date)
+                .or_insert_with(Vec::new)
+                .push(event);
         }
-
-        self.fetched_months.insert((start.year(), start.month()));
-        self.last_fetch = Some(Utc::now());
+        self.fetched_months.insert((month_date.year(), month_date.month()));
     }
 
-    /// Get events for a specific date
-    pub fn get(&self, date: NaiveDate) -> &[CalendarEvent] {
+    pub fn get(&self, date: NaiveDate) -> &[DisplayEvent] {
         self.by_date
             .get(&date)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Check if a date has any events
     pub fn has_events(&self, date: NaiveDate) -> bool {
         self.by_date
             .get(&date)
@@ -53,11 +52,41 @@ impl EventCache {
             .unwrap_or(false)
     }
 
-    /// Clear all cached data
     pub fn clear(&mut self) {
         self.by_date.clear();
         self.fetched_months.clear();
-        self.last_fetch = None;
+    }
+}
+
+impl Default for SourceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Combined event cache for all sources
+pub struct EventCache {
+    pub google: SourceCache,
+    pub icloud: SourceCache,
+}
+
+impl EventCache {
+    pub fn new() -> Self {
+        Self {
+            google: SourceCache::new(),
+            icloud: SourceCache::new(),
+        }
+    }
+
+    /// Check if any source has events on this date
+    pub fn has_events(&self, date: NaiveDate) -> bool {
+        self.google.has_events(date) || self.icloud.has_events(date)
+    }
+
+    /// Clear all caches
+    pub fn clear(&mut self) {
+        self.google.clear();
+        self.icloud.clear();
     }
 }
 

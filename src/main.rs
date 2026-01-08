@@ -2,9 +2,10 @@ mod cache;
 mod config;
 mod error;
 mod google;
+mod icloud;
 mod ui;
 
-use cache::EventCache;
+use cache::{DisplayEvent, EventCache};
 use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, Utc};
 use config::Config;
 use crossterm::{
@@ -14,13 +15,16 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
 use google::{CalendarClient, GoogleAuth, TokenInfo};
+use icloud::{CalDavClient, ICalEvent, ICloudAuth};
 use std::io::stdout;
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc;
+use ui::AuthDisplay;
 
-/// Authentication state
+/// Google authentication state
 #[derive(Debug, Clone)]
-pub enum AuthState {
+pub enum GoogleAuthState {
+    NotConfigured,
     NotAuthenticated,
     AwaitingUserCode {
         user_code: String,
@@ -29,8 +33,51 @@ pub enum AuthState {
         expires_at: DateTime<Utc>,
     },
     Authenticated(TokenInfo),
-    Refreshing,
     Error(String),
+}
+
+impl AuthDisplay for GoogleAuthState {
+    fn is_authenticated(&self) -> bool {
+        matches!(self, GoogleAuthState::Authenticated(_))
+    }
+
+    fn status_message(&self) -> String {
+        match self {
+            GoogleAuthState::NotConfigured => "Not configured".to_string(),
+            GoogleAuthState::NotAuthenticated => "Press 'g' to connect".to_string(),
+            GoogleAuthState::AwaitingUserCode { user_code, verification_url, .. } => {
+                format!("{} → {}", verification_url, user_code)
+            }
+            GoogleAuthState::Authenticated(_) => String::new(),
+            GoogleAuthState::Error(msg) => msg.clone(),
+        }
+    }
+}
+
+/// iCloud authentication state
+#[derive(Debug, Clone)]
+pub enum ICloudAuthState {
+    NotConfigured,
+    NotAuthenticated,
+    Discovering,
+    Authenticated { calendar_urls: Vec<String> },
+    Error(String),
+}
+
+impl AuthDisplay for ICloudAuthState {
+    fn is_authenticated(&self) -> bool {
+        matches!(self, ICloudAuthState::Authenticated { .. })
+    }
+
+    fn status_message(&self) -> String {
+        match self {
+            ICloudAuthState::NotConfigured => "Not configured".to_string(),
+            ICloudAuthState::NotAuthenticated => "Press 'i' to connect".to_string(),
+            ICloudAuthState::Discovering => "Discovering...".to_string(),
+            ICloudAuthState::Authenticated { .. } => String::new(),
+            ICloudAuthState::Error(msg) => msg.clone(),
+        }
+    }
 }
 
 /// Application state
@@ -38,11 +85,14 @@ struct App {
     current_date: NaiveDate,
     selected_date: NaiveDate,
     events: EventCache,
-    auth_state: AuthState,
+    google_auth: GoogleAuthState,
+    icloud_auth: ICloudAuthState,
     status_message: Option<String>,
-    config: Option<Config>,
-    needs_fetch: bool,
-    is_loading: bool,
+    config: Config,
+    google_needs_fetch: bool,
+    icloud_needs_fetch: bool,
+    google_loading: bool,
+    icloud_loading: bool,
 }
 
 impl App {
@@ -52,11 +102,14 @@ impl App {
             current_date: today,
             selected_date: today,
             events: EventCache::new(),
-            auth_state: AuthState::NotAuthenticated,
+            google_auth: GoogleAuthState::NotConfigured,
+            icloud_auth: ICloudAuthState::NotConfigured,
             status_message: None,
-            config: None,
-            needs_fetch: false,
-            is_loading: false,
+            config: Config::default(),
+            google_needs_fetch: false,
+            icloud_needs_fetch: false,
+            google_loading: false,
+            icloud_loading: false,
         }
     }
 
@@ -85,7 +138,8 @@ impl App {
             || self.selected_date.year() != self.current_date.year()
         {
             self.current_date = self.selected_date.with_day(1).unwrap();
-            self.needs_fetch = true;
+            self.google_needs_fetch = true;
+            self.icloud_needs_fetch = true;
         }
     }
 
@@ -96,7 +150,8 @@ impl App {
         self.current_date = today;
         self.selected_date = today;
         if month_changed {
-            self.needs_fetch = true;
+            self.google_needs_fetch = true;
+            self.icloud_needs_fetch = true;
         }
     }
 
@@ -117,17 +172,24 @@ impl App {
 
 /// Messages from async tasks to main loop
 enum AsyncMessage {
-    DeviceCodeReceived {
+    // Google messages
+    GoogleDeviceCode {
         user_code: String,
         verification_url: String,
         device_code: String,
         expires_at: DateTime<Utc>,
     },
-    TokenReceived(TokenInfo),
-    AuthPending,
-    AuthError(String),
-    EventsFetched(Vec<google::CalendarEvent>, NaiveDate, NaiveDate),
-    FetchError(String),
+    GoogleToken(TokenInfo),
+    GoogleAuthPending,
+    GoogleAuthError(String),
+    GoogleEvents(Vec<google::CalendarEvent>, NaiveDate),
+    GoogleFetchError(String),
+
+    // iCloud messages
+    ICloudDiscovered { calendar_urls: Vec<String> },
+    ICloudDiscoveryError(String),
+    ICloudEvents(Vec<ICalEvent>, NaiveDate),
+    ICloudFetchError(String),
 }
 
 #[tokio::main]
@@ -135,26 +197,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
 
     // Load config
-    match Config::load() {
-        Ok(Some(cfg)) => {
-            app.config = Some(cfg);
-            // Try to load saved tokens
-            if let Ok(Some(tokens)) = config::load_tokens() {
-                if !tokens.is_expired() {
-                    app.auth_state = AuthState::Authenticated(tokens);
-                    app.needs_fetch = true;
-                } else if tokens.refresh_token.is_some() {
-                    app.auth_state = AuthState::Refreshing;
-                    app.needs_fetch = true;
-                }
+    app.config = Config::load().unwrap_or_default();
+
+    // Initialize auth states based on config
+    if app.config.google.is_some() {
+        app.google_auth = GoogleAuthState::NotAuthenticated;
+        // Try to load saved Google tokens
+        if let Ok(Some(tokens)) = config::load_google_tokens() {
+            if !tokens.is_expired() {
+                app.google_auth = GoogleAuthState::Authenticated(tokens);
+                app.google_needs_fetch = true;
             }
         }
-        Ok(None) => {
-            app.status_message = Some("No config found. Create ~/.config/calendarchy/config.json".to_string());
+    }
+
+    if app.config.icloud.is_some() {
+        app.icloud_auth = ICloudAuthState::NotAuthenticated;
+        // Try to load saved iCloud discovery info
+        if let Ok(Some(icloud_tokens)) = config::load_icloud_tokens() {
+            if !icloud_tokens.calendar_urls.is_empty() {
+                app.icloud_auth = ICloudAuthState::Authenticated {
+                    calendar_urls: icloud_tokens.calendar_urls,
+                };
+                app.icloud_needs_fetch = true;
+            }
         }
-        Err(e) => {
-            app.status_message = Some(format!("Config error: {}", e));
-        }
+    }
+
+    if app.config.google.is_none() && app.config.icloud.is_none() {
+        app.status_message = Some("No calendars configured. Edit ~/.config/calendarchy/config.json".to_string());
     }
 
     // Channel for async messages
@@ -166,88 +237,160 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main loop
     loop {
         // Render
-        ui::render(
-            app.current_date,
-            app.selected_date,
-            &app.events,
-            &app.auth_state,
-            app.status_message.as_deref(),
-            app.is_loading,
-        );
+        let render_state = ui::RenderState {
+            current_date: app.current_date,
+            selected_date: app.selected_date,
+            events: &app.events,
+            google_auth: &app.google_auth,
+            icloud_auth: &app.icloud_auth,
+            status_message: app.status_message.as_deref(),
+            google_loading: app.google_loading,
+            icloud_loading: app.icloud_loading,
+        };
+        ui::render(&render_state);
 
-        // Check if we need to fetch events
-        if app.needs_fetch {
-            if let AuthState::Authenticated(ref tokens) = app.auth_state {
+        // Check if we need to fetch Google events
+        if app.google_needs_fetch {
+            if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
                 let (start, end) = app.month_range();
-                if !app.events.has_range(start, end) {
+                if !app.events.google.has_month(start) {
                     let tokens = tokens.clone();
-                    let calendar_id = app.config.as_ref()
+                    let calendar_id = app.config.google.as_ref()
                         .map(|c| c.calendar_id.clone())
                         .unwrap_or_else(|| "primary".to_string());
                     let tx = tx.clone();
 
-                    app.is_loading = true;
+                    app.google_loading = true;
                     tokio::spawn(async move {
                         let client = CalendarClient::new();
                         match client.list_events(&tokens, &calendar_id, start, end).await {
                             Ok(events) => {
-                                let _ = tx.send(AsyncMessage::EventsFetched(events, start, end)).await;
+                                let _ = tx.send(AsyncMessage::GoogleEvents(events, start)).await;
                             }
                             Err(e) => {
-                                let _ = tx.send(AsyncMessage::FetchError(e.to_string())).await;
+                                let _ = tx.send(AsyncMessage::GoogleFetchError(e.to_string())).await;
                             }
                         }
                     });
                 }
             }
-            app.needs_fetch = false;
+            app.google_needs_fetch = false;
+        }
+
+        // Check if we need to fetch iCloud events
+        if app.icloud_needs_fetch {
+            if let ICloudAuthState::Authenticated { ref calendar_urls } = app.icloud_auth {
+                let (start, end) = app.month_range();
+                if !app.events.icloud.has_month(start) {
+                    if let Some(ref icloud_config) = app.config.icloud {
+                        let auth = ICloudAuth::new(icloud_config.clone());
+                        let client = CalDavClient::new(auth);
+                        let calendar_urls = calendar_urls.clone();
+                        let tx = tx.clone();
+
+                        app.icloud_loading = true;
+                        tokio::spawn(async move {
+                            let mut all_events = Vec::new();
+                            for url in &calendar_urls {
+                                match client.fetch_events(url, start, end).await {
+                                    Ok(events) => all_events.extend(events),
+                                    Err(e) => {
+                                        let _ = tx.send(AsyncMessage::ICloudFetchError(e.to_string())).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            let _ = tx.send(AsyncMessage::ICloudEvents(all_events, start)).await;
+                        });
+                    }
+                }
+            }
+            app.icloud_needs_fetch = false;
         }
 
         // Handle async messages (non-blocking)
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                AsyncMessage::DeviceCodeReceived {
+                // Google messages
+                AsyncMessage::GoogleDeviceCode {
                     user_code,
                     verification_url,
                     device_code,
                     expires_at,
                 } => {
-                    app.auth_state = AuthState::AwaitingUserCode {
+                    app.google_auth = GoogleAuthState::AwaitingUserCode {
                         user_code,
                         verification_url,
                         device_code,
                         expires_at,
                     };
                 }
-                AsyncMessage::TokenReceived(tokens) => {
-                    let _ = config::save_tokens(&tokens);
-                    app.auth_state = AuthState::Authenticated(tokens);
-                    app.needs_fetch = true;
+                AsyncMessage::GoogleToken(tokens) => {
+                    let _ = config::save_google_tokens(&tokens);
+                    app.google_auth = GoogleAuthState::Authenticated(tokens);
+                    app.google_needs_fetch = true;
                     app.status_message = Some("Connected to Google Calendar!".to_string());
                 }
-                AsyncMessage::AuthPending => {
-                    // Still waiting, do nothing
+                AsyncMessage::GoogleAuthPending => {}
+                AsyncMessage::GoogleAuthError(msg) => {
+                    app.google_auth = GoogleAuthState::Error(msg);
                 }
-                AsyncMessage::AuthError(msg) => {
-                    app.auth_state = AuthState::Error(msg);
+                AsyncMessage::GoogleEvents(events, month_date) => {
+                    let display_events: Vec<DisplayEvent> = events
+                        .into_iter()
+                        .filter_map(|e| {
+                            Some(DisplayEvent {
+                                title: e.title().to_string(),
+                                time_str: e.time_str(),
+                                date: e.start_date()?,
+                                accepted: e.is_accepted(),
+                            })
+                        })
+                        .collect();
+                    app.events.google.store(display_events, month_date);
+                    app.google_loading = false;
                 }
-                AsyncMessage::EventsFetched(events, start, end) => {
-                    app.events.store(events, start, end);
-                    app.status_message = None;
-                    app.is_loading = false;
+                AsyncMessage::GoogleFetchError(msg) => {
+                    app.status_message = Some(format!("Google: {}", msg));
+                    app.google_loading = false;
                 }
-                AsyncMessage::FetchError(msg) => {
-                    app.status_message = Some(format!("Fetch error: {}", msg));
-                    app.is_loading = false;
+
+                // iCloud messages
+                AsyncMessage::ICloudDiscovered { calendar_urls } => {
+                    let _ = config::save_icloud_tokens(&calendar_urls);
+                    let count = calendar_urls.len();
+                    app.icloud_auth = ICloudAuthState::Authenticated { calendar_urls };
+                    app.icloud_needs_fetch = true;
+                    app.status_message = Some(format!("Connected to {} iCloud calendar(s)!", count));
+                }
+                AsyncMessage::ICloudDiscoveryError(msg) => {
+                    app.icloud_auth = ICloudAuthState::Error(msg);
+                }
+                AsyncMessage::ICloudEvents(events, month_date) => {
+                    let display_events: Vec<DisplayEvent> = events
+                        .into_iter()
+                        .map(|e| DisplayEvent {
+                            title: e.title().to_string(),
+                            time_str: e.time_str(),
+                            date: e.start_date(),
+                            accepted: e.accepted,
+                        })
+                        .collect();
+                    app.events.icloud.store(display_events, month_date);
+                    app.icloud_loading = false;
+                }
+                AsyncMessage::ICloudFetchError(msg) => {
+                    app.status_message = Some(format!("iCloud: {}", msg));
+                    app.icloud_loading = false;
                 }
             }
         }
 
-        // Poll for device code if awaiting
-        if let AuthState::AwaitingUserCode { ref device_code, expires_at, .. } = app.auth_state {
+        // Poll for Google device code if awaiting
+        if let GoogleAuthState::AwaitingUserCode { ref device_code, expires_at, .. } = app.google_auth {
             if Utc::now() < expires_at {
-                if let Some(ref cfg) = app.config {
-                    let auth = GoogleAuth::new(cfg.clone());
+                if let Some(ref google_config) = app.config.google {
+                    let auth = GoogleAuth::new(google_config.clone());
                     let device_code = device_code.clone();
                     let tx = tx.clone();
 
@@ -255,22 +398,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::time::sleep(StdDuration::from_secs(5)).await;
                         match auth.poll_for_token(&device_code).await {
                             Ok(google::auth::PollResult::Success(tokens)) => {
-                                let _ = tx.send(AsyncMessage::TokenReceived(tokens)).await;
+                                let _ = tx.send(AsyncMessage::GoogleToken(tokens)).await;
                             }
                             Ok(google::auth::PollResult::Pending) => {
-                                let _ = tx.send(AsyncMessage::AuthPending).await;
+                                let _ = tx.send(AsyncMessage::GoogleAuthPending).await;
                             }
                             Ok(google::auth::PollResult::Denied) => {
-                                let _ = tx.send(AsyncMessage::AuthError("Access denied".to_string())).await;
+                                let _ = tx.send(AsyncMessage::GoogleAuthError("Access denied".to_string())).await;
                             }
                             Ok(google::auth::PollResult::Expired) => {
-                                let _ = tx.send(AsyncMessage::AuthError("Code expired".to_string())).await;
+                                let _ = tx.send(AsyncMessage::GoogleAuthError("Code expired".to_string())).await;
                             }
                             Ok(google::auth::PollResult::SlowDown) => {
-                                let _ = tx.send(AsyncMessage::AuthPending).await;
+                                let _ = tx.send(AsyncMessage::GoogleAuthPending).await;
                             }
                             Err(e) => {
-                                let _ = tx.send(AsyncMessage::AuthError(e.to_string())).await;
+                                let _ = tx.send(AsyncMessage::GoogleAuthError(e.to_string())).await;
                             }
                         }
                     });
@@ -300,20 +443,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('r') => {
                             app.events.clear();
-                            app.needs_fetch = true;
+                            app.google_needs_fetch = true;
+                            app.icloud_needs_fetch = true;
                             app.status_message = Some("Refreshing...".to_string());
                         }
-                        KeyCode::Char('a') => {
-                            // Start auth flow
-                            if let Some(ref cfg) = app.config {
-                                let auth = GoogleAuth::new(cfg.clone());
+                        KeyCode::Char('g') => {
+                            // Start Google auth flow (only if not already authenticated)
+                            if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
+                                // Already authenticated, ignore
+                            } else if let Some(ref google_config) = app.config.google {
+                                let auth = GoogleAuth::new(google_config.clone());
                                 let tx = tx.clone();
 
                                 tokio::spawn(async move {
                                     match auth.request_device_code().await {
                                         Ok(resp) => {
                                             let expires_at = Utc::now() + chrono::Duration::seconds(resp.expires_in as i64);
-                                            let _ = tx.send(AsyncMessage::DeviceCodeReceived {
+                                            let _ = tx.send(AsyncMessage::GoogleDeviceCode {
                                                 user_code: resp.user_code,
                                                 verification_url: resp.verification_url,
                                                 device_code: resp.device_code,
@@ -321,12 +467,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }).await;
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(AsyncMessage::AuthError(e.to_string())).await;
+                                            let _ = tx.send(AsyncMessage::GoogleAuthError(e.to_string())).await;
                                         }
                                     }
                                 });
-                            } else {
-                                app.status_message = Some("No config file found".to_string());
+                            }
+                        }
+                        KeyCode::Char('i') => {
+                            // Start iCloud discovery (only if not already authenticated)
+                            if matches!(app.icloud_auth, ICloudAuthState::Authenticated { .. }) {
+                                // Already authenticated, ignore
+                            } else if let Some(ref icloud_config) = app.config.icloud {
+                                app.icloud_auth = ICloudAuthState::Discovering;
+                                let auth = ICloudAuth::new(icloud_config.clone());
+                                let client = CalDavClient::new(auth);
+                                let tx = tx.clone();
+
+                                tokio::spawn(async move {
+                                    match client.discover_calendars().await {
+                                        Ok(calendars) => {
+                                            let urls: Vec<String> = calendars.into_iter().map(|c| c.url).collect();
+                                            if urls.is_empty() {
+                                                let _ = tx.send(AsyncMessage::ICloudDiscoveryError(
+                                                    "No calendars found".to_string()
+                                                )).await;
+                                            } else {
+                                                let _ = tx.send(AsyncMessage::ICloudDiscovered {
+                                                    calendar_urls: urls,
+                                                }).await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(AsyncMessage::ICloudDiscoveryError(e.to_string())).await;
+                                        }
+                                    }
+                                });
                             }
                         }
                         KeyCode::Char('q') | KeyCode::Esc => {
