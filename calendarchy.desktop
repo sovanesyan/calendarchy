@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Calendarchy
+Comment=A terminal-based calendar for omarchy
+Exec=xdg-terminal-exec --title Calendarchy -e calendarchy
+Icon=calendar
+Terminal=false
+Categories=Office;Calendar;
+Keywords=calendar;terminal;date;omarchy;

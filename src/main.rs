@@ -10,15 +10,12 @@ use chrono::{Datelike, NaiveDate, Duration, Local};
 
 struct Calendar {
     current_date: NaiveDate,
-    selected_date: NaiveDate,
 }
 
 impl Calendar {
     fn new() -> Self {
-        let today = Local::now().date_naive();
         Self {
-            current_date: today,
-            selected_date: today,
+            current_date: Local::now().date_naive(),
         }
     }
 
@@ -63,15 +60,9 @@ impl Calendar {
         while current_day <= last_day {
             let day = current_day.day();
             let is_today = current_day == today;
-            let is_selected = current_day == self.selected_date;
             let is_weekend = current_day.weekday().num_days_from_monday() >= 5;
 
-            if is_selected {
-                execute!(out, SetForegroundColor(Color::Black)).unwrap();
-                execute!(out, SetAttribute(Attribute::Reverse)).unwrap();
-                print!("{:2} ", day);
-                execute!(out, SetAttribute(Attribute::NoReverse), ResetColor).unwrap();
-            } else if is_today {
+            if is_today {
                 execute!(out, SetForegroundColor(Color::Green), SetAttribute(Attribute::Bold)).unwrap();
                 print!("{:2} ", day);
                 execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
@@ -105,9 +96,7 @@ impl Calendar {
     }
 
     fn goto_today(&mut self) {
-        let today = Local::now().date_naive();
-        self.current_date = today;
-        self.selected_date = today;
+        self.current_date = Local::now().date_naive();
     }
 
     fn days_in_month(&self) -> u32 {
@@ -130,21 +119,29 @@ impl Calendar {
         (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
     }
 
-    fn next_day(&mut self) {
-        let next_day = self.selected_date + Duration::days(1);
-        self.selected_date = next_day;
-        // If we moved to a new month, update current_date to match
-        if next_day.month() != self.current_date.month() || next_day.year() != self.current_date.year() {
-            self.current_date = next_day.with_day(1).unwrap();
+    fn next_month(&mut self) {
+        if self.current_date.month() == 12 {
+            self.current_date = self.current_date
+                .with_year(self.current_date.year() + 1).unwrap()
+                .with_month(1).unwrap()
+                .with_day(1).unwrap();
+        } else {
+            self.current_date = self.current_date
+                .with_month(self.current_date.month() + 1).unwrap()
+                .with_day(1).unwrap();
         }
     }
 
-    fn prev_day(&mut self) {
-        let prev_day = self.selected_date - Duration::days(1);
-        self.selected_date = prev_day;
-        // If we moved to a new month, update current_date to match
-        if prev_day.month() != self.current_date.month() || prev_day.year() != self.current_date.year() {
-            self.current_date = prev_day.with_day(1).unwrap();
+    fn prev_month(&mut self) {
+        if self.current_date.month() == 1 {
+            self.current_date = self.current_date
+                .with_year(self.current_date.year() - 1).unwrap()
+                .with_month(12).unwrap()
+                .with_day(1).unwrap();
+        } else {
+            self.current_date = self.current_date
+                .with_month(self.current_date.month() - 1).unwrap()
+                .with_day(1).unwrap();
         }
     }
 }
@@ -164,10 +161,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if key_event.kind == KeyEventKind::Press {
                 match key_event.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        calendar.next_day();
+                        calendar.next_month();
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        calendar.prev_day();
+                        calendar.prev_month();
                     }
                     KeyCode::Char('t') => {
                         calendar.goto_today();
