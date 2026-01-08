@@ -248,55 +248,53 @@ fn render_event_panel<A: AuthDisplay>(
         print!("No events");
         execute!(out, ResetColor).unwrap();
     } else {
-        // Find the index of the next/current event (only for today)
-        let next_event_idx = if is_today {
-            find_next_event_index(events, current_time)
+        // Find current and next event indices (only for today)
+        let (current_event_idx, next_event_idx) = if is_today {
+            find_current_and_next_events(events, current_time)
         } else {
-            None
+            (None, None)
         };
 
         for (i, event) in events.iter().take(max_events).enumerate() {
             execute!(out, cursor::MoveTo(x, content_start + i as u16)).unwrap();
 
+            let is_current = current_event_idx == Some(i);
             let is_next = next_event_idx == Some(i);
-            let is_past = is_today && is_event_past(event, current_time) && !is_next;
+            let is_past = is_today && is_event_past(event, current_time) && !is_current;
             let is_unaccepted = !event.accepted;
 
             // Choose color based on event status
-            // Priority: unaccepted (grey) > past (grey) > next (green) > normal
-            let time_color = if is_unaccepted || is_past {
+            // Priority: unaccepted (grey) > past (grey) > current (green) > next (orange) > normal
+            let event_color = if is_unaccepted || is_past {
                 Color::DarkGrey
-            } else if is_next {
+            } else if is_current {
                 Color::Green
-            } else {
-                Color::White
-            };
-
-            let title_color = if is_unaccepted || is_past {
-                Color::DarkGrey
             } else if is_next {
-                Color::Green
+                Color::Yellow // Orange-ish
             } else {
                 Color::Reset
             };
 
-            // Green dot indicator for next event (only if accepted)
-            if is_next && !is_unaccepted {
+            // Dot indicator for current (green) or next (orange) event
+            if is_current && !is_unaccepted {
                 execute!(out, SetForegroundColor(Color::Green)).unwrap();
                 print!("\u{25CF} "); // Filled circle
+            } else if is_next && !is_unaccepted {
+                execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
+                print!("\u{25CB} "); // Empty circle
             } else {
                 print!("  ");
             }
 
-            execute!(out, SetForegroundColor(time_color)).unwrap();
-            if is_next && !is_unaccepted {
+            execute!(out, SetForegroundColor(event_color)).unwrap();
+            if (is_current || is_next) && !is_unaccepted {
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
             print!("{:>7} ", event.time_str);
             execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
-            execute!(out, SetForegroundColor(title_color)).unwrap();
-            if is_next && !is_unaccepted {
+            execute!(out, SetForegroundColor(event_color)).unwrap();
+            if (is_current || is_next) && !is_unaccepted {
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
 
@@ -355,21 +353,29 @@ fn is_event_past(event: &DisplayEvent, current_time: NaiveTime) -> bool {
     }
 }
 
-/// Find the index of the next upcoming event (or currently happening)
-fn find_next_event_index(events: &[DisplayEvent], current_time: NaiveTime) -> Option<usize> {
-    // First, find the first event that hasn't passed yet
+/// Find indices of current (happening now) and next upcoming event
+/// Returns (current_index, next_index)
+fn find_current_and_next_events(events: &[DisplayEvent], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
+    let mut current_idx: Option<usize> = None;
+    let mut next_idx: Option<usize> = None;
+
     for (i, event) in events.iter().enumerate() {
         if let Some(event_time) = parse_event_time(&event.time_str) {
             if event.time_str == "All day" {
-                continue; // Skip all-day events for "next" calculation
+                continue; // Skip all-day events
             }
-            if event_time >= current_time {
-                return Some(i);
+            if event_time <= current_time {
+                // This event has started - it's the current candidate
+                current_idx = Some(i);
+            } else if next_idx.is_none() {
+                // First event that hasn't started yet
+                next_idx = Some(i);
+                break; // No need to continue
             }
         }
     }
-    // If all timed events have passed, don't highlight any
-    None
+
+    (current_idx, next_idx)
 }
 
 /// Trait for auth state display
