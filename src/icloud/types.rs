@@ -10,6 +10,7 @@ pub struct ICalEvent {
     pub dtend: Option<EventTime>,
     pub location: Option<String>,
     pub description: Option<String>,
+    pub url: Option<String>,
     pub accepted: bool, // true if accepted or no PARTSTAT found
 }
 
@@ -45,6 +46,32 @@ impl ICalEvent {
         }
     }
 
+    /// Extract meeting URL (Zoom, Google Meet, etc.)
+    pub fn meeting_url(&self) -> Option<String> {
+        // Check URL field first
+        if let Some(ref url) = self.url {
+            if is_meeting_url(url) {
+                return Some(url.clone());
+            }
+        }
+
+        // Check location for meeting URLs
+        if let Some(ref loc) = self.location {
+            if let Some(url) = extract_meeting_url(loc) {
+                return Some(url);
+            }
+        }
+
+        // Check description for meeting URLs
+        if let Some(ref desc) = self.description {
+            if let Some(url) = extract_meeting_url(desc) {
+                return Some(url);
+            }
+        }
+
+        None
+    }
+
     /// Parse an iCal VCALENDAR string into events
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
         let mut events = Vec::new();
@@ -71,6 +98,7 @@ impl ICalEvent {
                         "DTEND" => builder.dtend = parse_ical_datetime(key, value),
                         "LOCATION" => builder.location = Some(unescape_ical(value)),
                         "DESCRIPTION" => builder.description = Some(unescape_ical(value)),
+                        "URL" => builder.url = Some(unescape_ical(value)),
                         "ATTENDEE" => {
                             // Extract PARTSTAT from ATTENDEE line
                             if let Some(partstat) = extract_partstat(key) {
@@ -95,6 +123,7 @@ struct ICalEventBuilder {
     dtend: Option<EventTime>,
     location: Option<String>,
     description: Option<String>,
+    url: Option<String>,
     partstat: Option<String>, // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
 }
 
@@ -115,6 +144,7 @@ impl ICalEventBuilder {
             dtend: self.dtend,
             location: self.location,
             description: self.description,
+            url: self.url,
             accepted,
         })
     }
@@ -210,6 +240,39 @@ fn extract_partstat(key: &str) -> Option<String> {
     for part in key.split(';') {
         if part.starts_with("PARTSTAT=") {
             return Some(part[9..].to_string());
+        }
+    }
+    None
+}
+
+/// Check if a URL is a meeting URL
+fn is_meeting_url(url: &str) -> bool {
+    url.contains("zoom.us")
+        || url.contains("meet.google.com")
+        || url.contains("teams.microsoft.com")
+}
+
+/// Extract a meeting URL (Zoom, Meet, Teams) from text
+fn extract_meeting_url(text: &str) -> Option<String> {
+    // Common meeting URL patterns
+    let patterns = [
+        "https://zoom.us/",
+        "https://us02web.zoom.us/",
+        "https://us04web.zoom.us/",
+        "https://us05web.zoom.us/",
+        "https://us06web.zoom.us/",
+        "https://meet.google.com/",
+        "https://teams.microsoft.com/",
+    ];
+
+    for pattern in patterns {
+        if let Some(start) = text.find(pattern) {
+            // Extract URL until whitespace or end
+            let url_part = &text[start..];
+            let end = url_part
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
+                .unwrap_or(url_part.len());
+            return Some(url_part[..end].to_string());
         }
     }
     None

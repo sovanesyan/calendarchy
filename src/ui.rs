@@ -49,7 +49,7 @@ pub fn render(state: &RenderState) {
             0,
             right_panel_width,
             panel_height,
-            "Work",
+            "Work (Google)",
             state.events.google.get(state.selected_date),
             state.google_auth,
             state.google_loading,
@@ -65,7 +65,7 @@ pub fn render(state: &RenderState) {
             panel_height + 1,
             right_panel_width,
             panel_height,
-            "Personal",
+            "Personal (iCloud)",
             state.events.icloud.get(state.selected_date),
             state.icloud_auth,
             state.icloud_loading,
@@ -299,9 +299,20 @@ fn render_event_panel<A: AuthDisplay>(
             if is_next && !is_unaccepted {
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
-            let title_width = width.saturating_sub(11) as usize;
+
+            // Calculate title width, leaving room for video emoji if present
+            let has_meeting = event.meeting_url.is_some();
+            let join_width = if has_meeting { 3 } else { 0 }; // " 📹"
+            let title_width = width.saturating_sub(11 + join_width as u16) as usize;
             print!("{}", truncate_str(&event.title, title_width));
             execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+            // Show clickable video call link if meeting URL available
+            if let Some(ref url) = event.meeting_url {
+                print!(" ");
+                // OSC 8 hyperlink using ST terminator: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
+                print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url); // 📹 camera emoji
+            }
         }
 
         if events.len() > max_events {

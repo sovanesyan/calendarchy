@@ -344,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 time_str: e.time_str(),
                                 date: e.start_date()?,
                                 accepted: e.is_accepted(),
+                                meeting_url: e.meeting_url(),
                             })
                         })
                         .collect();
@@ -374,6 +375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             time_str: e.time_str(),
                             date: e.start_date(),
                             accepted: e.accepted,
+                            meeting_url: e.meeting_url(),
                         })
                         .collect();
                     app.events.icloud.store(display_events, month_date);

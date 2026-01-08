@@ -8,6 +8,7 @@ pub struct DisplayEvent {
     pub time_str: String,
     pub date: NaiveDate,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
+    pub meeting_url: Option<String>, // Zoom, Meet, Teams link if available
 }
 
 /// Source-specific event cache

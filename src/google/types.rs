@@ -38,14 +38,33 @@ pub struct TokenResponse {
 
 /// A calendar event
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CalendarEvent {
     pub id: String,
     pub summary: Option<String>,
     pub start: EventDateTime,
     pub end: EventDateTime,
     pub location: Option<String>,
+    pub description: Option<String>,
     pub status: Option<String>,
     pub attendees: Option<Vec<Attendee>>,
+    pub conference_data: Option<ConferenceData>,
+    pub hangout_link: Option<String>,
+}
+
+/// Conference/meeting data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConferenceData {
+    pub entry_points: Option<Vec<EntryPoint>>,
+}
+
+/// Conference entry point (video link, phone, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryPoint {
+    pub entry_point_type: Option<String>,
+    pub uri: Option<String>,
 }
 
 /// Event attendee
@@ -115,6 +134,69 @@ impl CalendarEvent {
             }
         }
     }
+
+    /// Extract meeting URL (Zoom, Google Meet, etc.)
+    pub fn meeting_url(&self) -> Option<String> {
+        // Check hangout_link first (Google Meet)
+        if let Some(ref url) = self.hangout_link {
+            return Some(url.clone());
+        }
+
+        // Check conference data entry points
+        if let Some(ref conf) = self.conference_data {
+            if let Some(ref entry_points) = conf.entry_points {
+                for ep in entry_points {
+                    if ep.entry_point_type.as_deref() == Some("video") {
+                        if let Some(ref uri) = ep.uri {
+                            return Some(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check location for meeting URLs
+        if let Some(ref loc) = self.location {
+            if let Some(url) = extract_meeting_url(loc) {
+                return Some(url);
+            }
+        }
+
+        // Check description for meeting URLs
+        if let Some(ref desc) = self.description {
+            if let Some(url) = extract_meeting_url(desc) {
+                return Some(url);
+            }
+        }
+
+        None
+    }
+}
+
+/// Extract a meeting URL (Zoom, Meet, Teams) from text
+fn extract_meeting_url(text: &str) -> Option<String> {
+    // Common meeting URL patterns
+    let patterns = [
+        "https://zoom.us/",
+        "https://us02web.zoom.us/",
+        "https://us04web.zoom.us/",
+        "https://us05web.zoom.us/",
+        "https://us06web.zoom.us/",
+        "https://meet.google.com/",
+        "https://teams.microsoft.com/",
+    ];
+
+    for pattern in patterns {
+        if let Some(start) = text.find(pattern) {
+            // Extract URL until whitespace or end
+            let url_part = &text[start..];
+            let end = url_part
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
+                .unwrap_or(url_part.len());
+            return Some(url_part[..end].to_string());
+        }
+    }
+    None
 }
 
 use chrono::Timelike;
