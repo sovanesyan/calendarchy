@@ -277,3 +277,266 @@ fn extract_meeting_url(text: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_ical_event() {
+        let ical = r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:test-123@example.com
+SUMMARY:Team Meeting
+DTSTART:20260115T143000Z
+DTEND:20260115T153000Z
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title(), "Team Meeting");
+        assert_eq!(events[0].uid, "test-123@example.com");
+    }
+
+    #[test]
+    fn test_parse_all_day_event() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:holiday-123
+SUMMARY:Company Holiday
+DTSTART;VALUE=DATE:20260101
+DTEND;VALUE=DATE:20260102
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].time_str(), "All day");
+        assert_eq!(events[0].start_date(), NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+    }
+
+    #[test]
+    fn test_parse_event_with_timezone() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:tz-event
+SUMMARY:Sofia Meeting
+DTSTART;TZID=Europe/Sofia:20260108T200000
+DTEND;TZID=Europe/Sofia:20260108T210000
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title(), "Sofia Meeting");
+        assert_eq!(events[0].time_str(), "20:00");
+    }
+
+    #[test]
+    fn test_parse_event_no_title() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:no-title
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title(), "(No title)");
+    }
+
+    #[test]
+    fn test_parse_event_with_location_and_description() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:full-event
+SUMMARY:Office Meeting
+DTSTART:20260115T140000Z
+DTEND:20260115T150000Z
+LOCATION:Conference Room A
+DESCRIPTION:Weekly sync meeting
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].location, Some("Conference Room A".to_string()));
+        assert_eq!(events[0].description, Some("Weekly sync meeting".to_string()));
+    }
+
+    #[test]
+    fn test_parse_event_with_escaped_characters() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:escaped
+SUMMARY:Meeting\, with comma
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+DESCRIPTION:Line 1\nLine 2
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, Some("Meeting, with comma".to_string()));
+        assert_eq!(events[0].description, Some("Line 1\nLine 2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_multiple_events() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:event-1
+SUMMARY:First
+DTSTART:20260115T090000Z
+DTEND:20260115T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:event-2
+SUMMARY:Second
+DTSTART:20260115T110000Z
+DTEND:20260115T120000Z
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].title(), "First");
+        assert_eq!(events[1].title(), "Second");
+    }
+
+    #[test]
+    fn test_parse_folded_lines() {
+        let ical = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:folded\r\nSUMMARY:This is a very long summary that has been\r\n  folded across multiple lines\r\nDTSTART:20260115T100000Z\r\nDTEND:20260115T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR";
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].title().contains("folded across multiple lines"));
+    }
+
+    #[test]
+    fn test_partstat_accepted() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:accepted-event
+SUMMARY:Meeting
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+ATTENDEE;PARTSTAT=ACCEPTED;CN=Me:mailto:me@example.com
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].accepted);
+    }
+
+    #[test]
+    fn test_partstat_declined() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:declined-event
+SUMMARY:Meeting
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+ATTENDEE;PARTSTAT=DECLINED;CN=Me:mailto:me@example.com
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].accepted);
+    }
+
+    #[test]
+    fn test_partstat_needs_action() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:needs-action
+SUMMARY:Meeting
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+ATTENDEE;PARTSTAT=NEEDS-ACTION;CN=Me:mailto:me@example.com
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].accepted);
+    }
+
+    #[test]
+    fn test_meeting_url_from_url_field() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:zoom-event
+SUMMARY:Zoom Call
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+URL:https://zoom.us/j/123456789
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].meeting_url(), Some("https://zoom.us/j/123456789".to_string()));
+    }
+
+    #[test]
+    fn test_meeting_url_from_location() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:meet-event
+SUMMARY:Google Meet
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+LOCATION:https://meet.google.com/abc-defg-hij
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].meeting_url(), Some("https://meet.google.com/abc-defg-hij".to_string()));
+    }
+
+    #[test]
+    fn test_unfold_ical_lines() {
+        let folded = "SUMMARY:This is\r\n  a folded line";
+        let unfolded = unfold_ical_lines(folded);
+        assert_eq!(unfolded.len(), 1);
+        assert_eq!(unfolded[0], "SUMMARY:This isa folded line");
+    }
+
+    #[test]
+    fn test_parse_ical_line() {
+        assert_eq!(parse_ical_line("SUMMARY:Test"), Some(("SUMMARY", "Test")));
+        assert_eq!(parse_ical_line("DTSTART;VALUE=DATE:20260101"), Some(("DTSTART;VALUE=DATE", "20260101")));
+        assert_eq!(parse_ical_line("no colon here"), None);
+    }
+
+    #[test]
+    fn test_unescape_ical() {
+        assert_eq!(unescape_ical("test\\nline"), "test\nline");
+        assert_eq!(unescape_ical("a\\,b\\;c"), "a,b;c");
+        assert_eq!(unescape_ical("path\\\\to\\\\file"), "path\\to\\file");
+    }
+
+    #[test]
+    fn test_extract_partstat() {
+        assert_eq!(extract_partstat("ATTENDEE;PARTSTAT=ACCEPTED;CN=Test"), Some("ACCEPTED".to_string()));
+        assert_eq!(extract_partstat("ATTENDEE;CN=Test;PARTSTAT=DECLINED"), Some("DECLINED".to_string()));
+        assert_eq!(extract_partstat("ATTENDEE;CN=Test"), None);
+    }
+
+    #[test]
+    fn test_is_meeting_url() {
+        assert!(is_meeting_url("https://zoom.us/j/123"));
+        assert!(is_meeting_url("https://meet.google.com/abc"));
+        assert!(is_meeting_url("https://teams.microsoft.com/l/meetup"));
+        assert!(!is_meeting_url("https://example.com"));
+    }
+}

@@ -408,3 +408,173 @@ fn days_in_month(date: NaiveDate) -> u32 {
         _ => 30,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Timelike;
+
+    fn make_event(time: &str) -> DisplayEvent {
+        DisplayEvent {
+            title: "Test".to_string(),
+            time_str: time.to_string(),
+            date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            accepted: true,
+            meeting_url: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_event_time_valid() {
+        let time = parse_event_time("14:30").unwrap();
+        assert_eq!(time.hour(), 14);
+        assert_eq!(time.minute(), 30);
+    }
+
+    #[test]
+    fn test_parse_event_time_all_day() {
+        let time = parse_event_time("All day").unwrap();
+        assert_eq!(time.hour(), 0);
+        assert_eq!(time.minute(), 0);
+    }
+
+    #[test]
+    fn test_parse_event_time_invalid() {
+        assert!(parse_event_time("invalid").is_none());
+        assert!(parse_event_time("25:00").is_none());
+    }
+
+    #[test]
+    fn test_is_event_past_before_current() {
+        let event = make_event("09:00");
+        let current = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        assert!(is_event_past(&event, current));
+    }
+
+    #[test]
+    fn test_is_event_past_after_current() {
+        let event = make_event("14:00");
+        let current = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        assert!(!is_event_past(&event, current));
+    }
+
+    #[test]
+    fn test_is_event_past_all_day_never_past() {
+        let event = make_event("All day");
+        let current = NaiveTime::from_hms_opt(23, 59, 0).unwrap();
+        assert!(!is_event_past(&event, current));
+    }
+
+    #[test]
+    fn test_find_current_and_next_no_events() {
+        let events: Vec<DisplayEvent> = vec![];
+        let current = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        let (current_idx, next_idx) = find_current_and_next_events(&events, current);
+        assert!(current_idx.is_none());
+        assert!(next_idx.is_none());
+    }
+
+    #[test]
+    fn test_find_current_and_next_all_future() {
+        let events = vec![
+            make_event("14:00"),
+            make_event("15:00"),
+            make_event("16:00"),
+        ];
+        let current = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        let (current_idx, next_idx) = find_current_and_next_events(&events, current);
+        assert!(current_idx.is_none());
+        assert_eq!(next_idx, Some(0));
+    }
+
+    #[test]
+    fn test_find_current_and_next_all_past() {
+        let events = vec![
+            make_event("08:00"),
+            make_event("09:00"),
+            make_event("10:00"),
+        ];
+        let current = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        let (current_idx, next_idx) = find_current_and_next_events(&events, current);
+        assert_eq!(current_idx, Some(2)); // Last started event
+        assert!(next_idx.is_none());
+    }
+
+    #[test]
+    fn test_find_current_and_next_mixed() {
+        let events = vec![
+            make_event("08:00"),
+            make_event("10:00"), // current (started at 10:00)
+            make_event("14:00"), // next
+            make_event("16:00"),
+        ];
+        let current = NaiveTime::from_hms_opt(10, 30, 0).unwrap();
+        let (current_idx, next_idx) = find_current_and_next_events(&events, current);
+        assert_eq!(current_idx, Some(1));
+        assert_eq!(next_idx, Some(2));
+    }
+
+    #[test]
+    fn test_find_current_and_next_skips_all_day() {
+        let events = vec![
+            make_event("All day"),
+            make_event("10:00"),
+            make_event("14:00"),
+        ];
+        let current = NaiveTime::from_hms_opt(10, 30, 0).unwrap();
+        let (current_idx, next_idx) = find_current_and_next_events(&events, current);
+        assert_eq!(current_idx, Some(1)); // Skipped all-day
+        assert_eq!(next_idx, Some(2));
+    }
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("Hello", 10), "Hello");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("Hello", 5), "Hello");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("Hello World", 8), "Hello W…");
+    }
+
+    #[test]
+    fn test_days_in_month_january() {
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        assert_eq!(days_in_month(date), 31);
+    }
+
+    #[test]
+    fn test_days_in_month_april() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 1).unwrap();
+        assert_eq!(days_in_month(date), 30);
+    }
+
+    #[test]
+    fn test_days_in_month_february_non_leap() {
+        let date = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
+        assert_eq!(days_in_month(date), 28);
+    }
+
+    #[test]
+    fn test_days_in_month_february_leap() {
+        let date = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        assert_eq!(days_in_month(date), 29);
+    }
+
+    #[test]
+    fn test_days_in_month_february_century_non_leap() {
+        let date = NaiveDate::from_ymd_opt(1900, 2, 1).unwrap();
+        assert_eq!(days_in_month(date), 28);
+    }
+
+    #[test]
+    fn test_days_in_month_february_400_year_leap() {
+        let date = NaiveDate::from_ymd_opt(2000, 2, 1).unwrap();
+        assert_eq!(days_in_month(date), 29);
+    }
+}

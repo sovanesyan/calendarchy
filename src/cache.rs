@@ -158,3 +158,142 @@ impl Default for EventCache {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_event(title: &str, date: NaiveDate, time: &str) -> DisplayEvent {
+        DisplayEvent {
+            title: title.to_string(),
+            time_str: time.to_string(),
+            date,
+            accepted: true,
+            meeting_url: None,
+        }
+    }
+
+    #[test]
+    fn test_source_cache_store_and_get() {
+        let mut cache = SourceCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        let events = vec![
+            make_event("Meeting 1", date, "10:00"),
+            make_event("Meeting 2", date, "14:00"),
+        ];
+
+        cache.store(events, month_date);
+
+        let retrieved = cache.get(date);
+        assert_eq!(retrieved.len(), 2);
+        assert_eq!(retrieved[0].title, "Meeting 1");
+        assert_eq!(retrieved[1].title, "Meeting 2");
+    }
+
+    #[test]
+    fn test_source_cache_has_month() {
+        let mut cache = SourceCache::new();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        assert!(!cache.has_month(month_date));
+
+        cache.store(vec![], month_date);
+
+        assert!(cache.has_month(month_date));
+        assert!(!cache.has_month(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+    }
+
+    #[test]
+    fn test_source_cache_store_replaces_month_data() {
+        let mut cache = SourceCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        // Store first batch
+        cache.store(vec![make_event("Old Event", date, "09:00")], month_date);
+        assert_eq!(cache.get(date).len(), 1);
+        assert_eq!(cache.get(date)[0].title, "Old Event");
+
+        // Store second batch - should replace
+        cache.store(vec![make_event("New Event", date, "10:00")], month_date);
+        assert_eq!(cache.get(date).len(), 1);
+        assert_eq!(cache.get(date)[0].title, "New Event");
+    }
+
+    #[test]
+    fn test_source_cache_has_events() {
+        let mut cache = SourceCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let empty_date = NaiveDate::from_ymd_opt(2026, 1, 16).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        cache.store(vec![make_event("Event", date, "10:00")], month_date);
+
+        assert!(cache.has_events(date));
+        assert!(!cache.has_events(empty_date));
+    }
+
+    #[test]
+    fn test_source_cache_clear() {
+        let mut cache = SourceCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        cache.store(vec![make_event("Event", date, "10:00")], month_date);
+        assert!(cache.has_month(month_date));
+        assert!(cache.has_events(date));
+
+        cache.clear();
+        assert!(!cache.has_month(month_date));
+        assert!(!cache.has_events(date));
+    }
+
+    #[test]
+    fn test_source_cache_load_from_does_not_mark_fetched() {
+        let mut cache = SourceCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        let mut data = HashMap::new();
+        data.insert(date, vec![make_event("Cached Event", date, "10:00")]);
+
+        cache.load_from(data);
+
+        // Data should be there
+        assert_eq!(cache.get(date).len(), 1);
+        // But month should NOT be marked as fetched (allows refresh)
+        assert!(!cache.has_month(month_date));
+    }
+
+    #[test]
+    fn test_event_cache_has_events_either_source() {
+        let mut cache = EventCache::new();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+
+        assert!(!cache.has_events(date));
+
+        cache.google.store(vec![make_event("Google Event", date, "10:00")], month_date);
+        assert!(cache.has_events(date));
+
+        cache.google.clear();
+        assert!(!cache.has_events(date));
+
+        cache.icloud.store(vec![make_event("iCloud Event", date, "11:00")], month_date);
+        assert!(cache.has_events(date));
+    }
+
+    #[test]
+    fn test_display_event_serialization() {
+        let event = make_event("Test Meeting", NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(), "14:30");
+
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: DisplayEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.title, "Test Meeting");
+        assert_eq!(parsed.time_str, "14:30");
+        assert!(parsed.accepted);
+    }
+}
