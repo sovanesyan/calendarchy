@@ -15,6 +15,7 @@ pub fn render(
     events: &EventCache,
     auth_state: &AuthState,
     status_message: Option<&str>,
+    is_loading: bool,
 ) {
     let mut out = stdout();
     let today = Local::now().date_naive();
@@ -35,13 +36,15 @@ pub fn render(
         SetAttribute(Attribute::Bold)
     )
     .unwrap();
+    let loading_indicator = if is_loading { " *" } else { "" };
     print!(
-        " {} {}\r\n",
+        " {} {}{}\r\n",
         current_date
             .format("%B")
             .to_string()
             .to_uppercase(),
-        current_date.year()
+        current_date.year(),
+        loading_indicator
     );
     execute!(out, ResetColor).unwrap();
 
@@ -111,7 +114,7 @@ pub fn render(
 
     // Controls
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!(" j/k:month h/l:day t:today r:refresh a:auth q:quit\r\n");
+    print!(" hjkl:nav t:today r:refresh a:auth q:quit\r\n");
     execute!(out, ResetColor).unwrap();
 
     out.flush().unwrap();

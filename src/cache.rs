@@ -1,10 +1,10 @@
 use crate::google::CalendarEvent;
-use chrono::{DateTime, NaiveDate, Utc};
-use std::collections::HashMap;
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use std::collections::{HashMap, HashSet};
 
 pub struct EventCache {
     by_date: HashMap<NaiveDate, Vec<CalendarEvent>>,
-    cached_range: Option<(NaiveDate, NaiveDate)>,
+    fetched_months: HashSet<(i32, u32)>, // (year, month)
     last_fetch: Option<DateTime<Utc>>,
 }
 
@@ -12,24 +12,18 @@ impl EventCache {
     pub fn new() -> Self {
         Self {
             by_date: HashMap::new(),
-            cached_range: None,
+            fetched_months: HashSet::new(),
             last_fetch: None,
         }
     }
 
-    /// Check if we have events cached for this range
-    pub fn has_range(&self, start: NaiveDate, end: NaiveDate) -> bool {
-        if let Some((cached_start, cached_end)) = self.cached_range {
-            start >= cached_start && end <= cached_end
-        } else {
-            false
-        }
+    /// Check if we have events cached for this month
+    pub fn has_range(&self, start: NaiveDate, _end: NaiveDate) -> bool {
+        self.fetched_months.contains(&(start.year(), start.month()))
     }
 
-    /// Store events, indexed by date
-    pub fn store(&mut self, events: Vec<CalendarEvent>, start: NaiveDate, end: NaiveDate) {
-        self.by_date.clear();
-
+    /// Store events, indexed by date (appends to existing cache)
+    pub fn store(&mut self, events: Vec<CalendarEvent>, start: NaiveDate, _end: NaiveDate) {
         for event in events {
             if let Some(date) = event.start_date() {
                 self.by_date
@@ -39,7 +33,7 @@ impl EventCache {
             }
         }
 
-        self.cached_range = Some((start, end));
+        self.fetched_months.insert((start.year(), start.month()));
         self.last_fetch = Some(Utc::now());
     }
 
@@ -59,17 +53,10 @@ impl EventCache {
             .unwrap_or(false)
     }
 
-    /// Check if cache is stale (older than 5 minutes)
-    pub fn is_stale(&self) -> bool {
-        self.last_fetch
-            .map(|t| Utc::now() - t > chrono::Duration::minutes(5))
-            .unwrap_or(true)
-    }
-
     /// Clear all cached data
     pub fn clear(&mut self) {
         self.by_date.clear();
-        self.cached_range = None;
+        self.fetched_months.clear();
         self.last_fetch = None;
     }
 }

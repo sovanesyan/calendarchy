@@ -42,6 +42,7 @@ struct App {
     status_message: Option<String>,
     config: Option<Config>,
     needs_fetch: bool,
+    is_loading: bool,
 }
 
 impl App {
@@ -55,61 +56,31 @@ impl App {
             status_message: None,
             config: None,
             needs_fetch: false,
+            is_loading: false,
         }
-    }
-
-    fn next_month(&mut self) {
-        if self.current_date.month() == 12 {
-            self.current_date = self.current_date
-                .with_year(self.current_date.year() + 1)
-                .unwrap()
-                .with_month(1)
-                .unwrap()
-                .with_day(1)
-                .unwrap();
-        } else {
-            self.current_date = self.current_date
-                .with_month(self.current_date.month() + 1)
-                .unwrap()
-                .with_day(1)
-                .unwrap();
-        }
-        self.selected_date = self.current_date;
-        self.needs_fetch = true;
-    }
-
-    fn prev_month(&mut self) {
-        if self.current_date.month() == 1 {
-            self.current_date = self.current_date
-                .with_year(self.current_date.year() - 1)
-                .unwrap()
-                .with_month(12)
-                .unwrap()
-                .with_day(1)
-                .unwrap();
-        } else {
-            self.current_date = self.current_date
-                .with_month(self.current_date.month() - 1)
-                .unwrap()
-                .with_day(1)
-                .unwrap();
-        }
-        self.selected_date = self.current_date;
-        self.needs_fetch = true;
     }
 
     fn next_day(&mut self) {
         self.selected_date = self.selected_date + Duration::days(1);
-        if self.selected_date.month() != self.current_date.month()
-            || self.selected_date.year() != self.current_date.year()
-        {
-            self.current_date = self.selected_date.with_day(1).unwrap();
-            self.needs_fetch = true;
-        }
+        self.sync_month_if_needed();
     }
 
     fn prev_day(&mut self) {
         self.selected_date = self.selected_date - Duration::days(1);
+        self.sync_month_if_needed();
+    }
+
+    fn next_week(&mut self) {
+        self.selected_date = self.selected_date + Duration::days(7);
+        self.sync_month_if_needed();
+    }
+
+    fn prev_week(&mut self) {
+        self.selected_date = self.selected_date - Duration::days(7);
+        self.sync_month_if_needed();
+    }
+
+    fn sync_month_if_needed(&mut self) {
         if self.selected_date.month() != self.current_date.month()
             || self.selected_date.year() != self.current_date.year()
         {
@@ -201,19 +172,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &app.events,
             &app.auth_state,
             app.status_message.as_deref(),
+            app.is_loading,
         );
 
         // Check if we need to fetch events
         if app.needs_fetch {
             if let AuthState::Authenticated(ref tokens) = app.auth_state {
                 let (start, end) = app.month_range();
-                if !app.events.has_range(start, end) || app.events.is_stale() {
+                if !app.events.has_range(start, end) {
                     let tokens = tokens.clone();
                     let calendar_id = app.config.as_ref()
                         .map(|c| c.calendar_id.clone())
                         .unwrap_or_else(|| "primary".to_string());
                     let tx = tx.clone();
 
+                    app.is_loading = true;
                     tokio::spawn(async move {
                         let client = CalendarClient::new();
                         match client.list_events(&tokens, &calendar_id, start, end).await {
@@ -261,9 +234,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::EventsFetched(events, start, end) => {
                     app.events.store(events, start, end);
                     app.status_message = None;
+                    app.is_loading = false;
                 }
                 AsyncMessage::FetchError(msg) => {
                     app.status_message = Some(format!("Fetch error: {}", msg));
+                    app.is_loading = false;
                 }
             }
         }
@@ -309,10 +284,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if key_event.kind == KeyEventKind::Press {
                     match key_event.code {
                         KeyCode::Char('j') | KeyCode::Down => {
-                            app.next_month();
+                            app.next_week();
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
-                            app.prev_month();
+                            app.prev_week();
                         }
                         KeyCode::Char('h') | KeyCode::Left => {
                             app.prev_day();
