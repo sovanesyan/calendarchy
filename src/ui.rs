@@ -753,7 +753,7 @@ fn render_event_details_column(
     if event.meeting_url.is_some() && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::Green)).unwrap();
-        print!("[o] Join meeting");
+        print!("[J] Join");
         execute!(out, ResetColor).unwrap();
         current_row += 1;
     }

@@ -866,7 +866,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
                                 app.prev_event();
                             }
-                            KeyCode::Char('o') | KeyCode::Char('о') => {
+                            KeyCode::Char('J') => {
                                 // Join meeting
                                 if let Some(event) = app.get_selected_event() {
                                     if let Some(ref url) = event.meeting_url {
