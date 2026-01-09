@@ -867,7 +867,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.prev_event();
                             }
                             KeyCode::Char('o') | KeyCode::Char('о') => {
-                                // Open meeting link
+                                // Join meeting
                                 if let Some(event) = app.get_selected_event() {
                                     if let Some(ref url) = event.meeting_url {
                                         let _ = std::process::Command::new("xdg-open")

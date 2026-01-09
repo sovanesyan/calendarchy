@@ -746,26 +746,36 @@ fn render_event_details_column(
         }
     }
 
+    // Actions section
+    current_row += 1; // Blank line before actions
+
     // Meeting link
     if event.meeting_url.is_some() && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::Green)).unwrap();
-        print!("\u{1F4F9} [o] Open meeting link");
+        print!("[o] Join meeting");
         execute!(out, ResetColor).unwrap();
         current_row += 1;
     }
 
-    // Actions section
-    if current_row < y + height - 3 {
-        current_row += 1; // Blank line before actions
+    // Accept/Decline (Google events only)
+    if matches!(event.id, EventId::Google { .. }) && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        // Google events support accept/decline
-        if matches!(event.id, EventId::Google { .. }) {
-            print!("[a] accept  [d] decline  [x] delete");
+        if event.accepted {
+            print!("[d] Decline");
         } else {
-            print!("[x] delete");
+            print!("[a] Accept");
         }
+        execute!(out, ResetColor).unwrap();
+        current_row += 1;
+    }
+
+    // Delete
+    if current_row < y + height - 3 {
+        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("[x] Delete");
         execute!(out, ResetColor).unwrap();
         current_row += 1;
     }
