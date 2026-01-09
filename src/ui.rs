@@ -736,20 +736,24 @@ fn render_event_details_column(
     // Calendar source
     if current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         match &event.id {
-            EventId::Google { calendar_id, .. } => {
-                print!("🔵 {}", truncate_str(calendar_id, content_width.saturating_sub(3)));
+            EventId::Google { calendar_name, .. } => {
+                if let Some(name) = calendar_name {
+                    print!("Google - {}", name);
+                } else {
+                    print!("Google");
+                }
             }
-            EventId::ICloud { calendar_url, .. } => {
-                // Extract calendar name from URL (last path segment before trailing slash)
-                let name = calendar_url
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("iCloud");
-                print!("🍎 {}", truncate_str(name, content_width.saturating_sub(3)));
+            EventId::ICloud { calendar_name, .. } => {
+                if let Some(name) = calendar_name {
+                    print!("iCloud - {}", name);
+                } else {
+                    print!("iCloud");
+                }
             }
         }
+        execute!(out, ResetColor).unwrap();
         current_row += 1;
     }
 
@@ -951,7 +955,7 @@ mod tests {
 
     fn make_event(time: &str) -> DisplayEvent {
         DisplayEvent {
-            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string() },
+            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: "Test".to_string(),
             time_str: time.to_string(),
             end_time_str: None,

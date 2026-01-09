@@ -46,9 +46,21 @@ pub struct GoogleTokens {
     pub stored_at: DateTime<Utc>,
 }
 
+/// Stored calendar entry with URL and optional display name
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCalendar {
+    pub url: String,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ICloudTokens {
+    /// Legacy field for backwards compatibility
+    #[serde(default)]
     pub calendar_urls: Vec<String>,
+    /// New field with calendar names
+    #[serde(default)]
+    pub calendars: Vec<StoredCalendar>,
     pub stored_at: DateTime<Utc>,
 }
 
@@ -105,7 +117,7 @@ pub fn save_google_tokens(tokens: &TokenInfo) -> Result<()> {
 }
 
 /// Save iCloud discovery info
-pub fn save_icloud_tokens(calendar_urls: &[String]) -> Result<()> {
+pub fn save_icloud_tokens(calendars: &[StoredCalendar]) -> Result<()> {
     Config::ensure_config_dir()?;
 
     let mut stored = load_all_tokens().unwrap_or(StoredTokens {
@@ -114,7 +126,8 @@ pub fn save_icloud_tokens(calendar_urls: &[String]) -> Result<()> {
     });
 
     stored.icloud = Some(ICloudTokens {
-        calendar_urls: calendar_urls.to_vec(),
+        calendar_urls: Vec::new(), // Legacy field, keep empty
+        calendars: calendars.to_vec(),
         stored_at: Utc::now(),
     });
 

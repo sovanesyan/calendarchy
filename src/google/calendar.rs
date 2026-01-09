@@ -205,6 +205,44 @@ impl CalendarClient {
 
         Ok(())
     }
+
+    /// Get calendar display name
+    pub async fn get_calendar_name(
+        &self,
+        token: &TokenInfo,
+        calendar_id: &str,
+    ) -> Result<Option<String>> {
+        let url = format!(
+            "{}/calendars/{}",
+            CALENDAR_API_BASE,
+            urlencoding::encode(calendar_id)
+        );
+
+        log_request("GET", &url);
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&token.access_token)
+            .send()
+            .await?;
+        log_response(response.status().as_u16(), &url);
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CalendarchyError::TokenExpired);
+        }
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CalendarMeta {
+            summary: Option<String>,
+        }
+
+        let meta: CalendarMeta = response.json().await?;
+        Ok(meta.summary)
+    }
 }
 
 impl Default for CalendarClient {

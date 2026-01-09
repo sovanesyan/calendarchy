@@ -147,13 +147,20 @@ impl AuthDisplay for GoogleAuthState {
     }
 }
 
+/// Calendar with URL and display name
+#[derive(Debug, Clone)]
+pub struct CalendarEntry {
+    pub url: String,
+    pub name: Option<String>,
+}
+
 /// iCloud authentication state
 #[derive(Debug, Clone)]
 pub enum ICloudAuthState {
     NotConfigured,
     NotAuthenticated,
     Discovering,
-    Authenticated { calendar_urls: Vec<String> },
+    Authenticated { calendars: Vec<CalendarEntry> },
     Error(String),
 }
 
@@ -459,15 +466,15 @@ enum AsyncMessage {
     GoogleToken(TokenInfo),
     GoogleAuthPending,
     GoogleAuthError(String),
-    GoogleEvents(Vec<google::CalendarEvent>, NaiveDate, String), // events, month_date, calendar_id
+    GoogleEvents(Vec<google::CalendarEvent>, NaiveDate, String, Option<String>), // events, month_date, calendar_id, calendar_name
     GoogleFetchError(String),
     GoogleTokenRefreshed(TokenInfo),
     GoogleRefreshFailed(String),
 
     // iCloud messages
-    ICloudDiscovered { calendar_urls: Vec<String> },
+    ICloudDiscovered { calendars: Vec<CalendarEntry> },
     ICloudDiscoveryError(String),
-    ICloudEvents(Vec<ICalEvent>, NaiveDate),
+    ICloudEvents(Vec<(ICalEvent, Option<String>)>, NaiveDate), // Events with calendar name
     ICloudFetchError(String),
 
     // Event action messages
@@ -505,10 +512,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.icloud_auth = ICloudAuthState::NotAuthenticated;
         // Try to load saved iCloud discovery info
         if let Ok(Some(icloud_tokens)) = config::load_icloud_tokens() {
-            if !icloud_tokens.calendar_urls.is_empty() {
-                app.icloud_auth = ICloudAuthState::Authenticated {
-                    calendar_urls: icloud_tokens.calendar_urls,
-                };
+            // Use new calendars field if available, fall back to legacy calendar_urls
+            let calendars: Vec<CalendarEntry> = if !icloud_tokens.calendars.is_empty() {
+                icloud_tokens.calendars.into_iter()
+                    .map(|c| CalendarEntry { url: c.url, name: c.name })
+                    .collect()
+            } else {
+                icloud_tokens.calendar_urls.into_iter()
+                    .map(|url| CalendarEntry { url, name: None })
+                    .collect()
+            };
+            if !calendars.is_empty() {
+                app.icloud_auth = ICloudAuthState::Authenticated { calendars };
                 app.icloud_needs_fetch = true;
             }
         }
@@ -578,9 +593,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let calendar_id_clone = calendar_id.clone();
                     tokio::spawn(async move {
                         let client = CalendarClient::new();
+                        // Get calendar display name
+                        let calendar_name = client.get_calendar_name(&tokens, &calendar_id).await.ok().flatten();
                         match client.list_events(&tokens, &calendar_id, start, end).await {
                             Ok(events) => {
-                                let _ = tx.send(AsyncMessage::GoogleEvents(events, start, calendar_id_clone)).await;
+                                let _ = tx.send(AsyncMessage::GoogleEvents(events, start, calendar_id_clone, calendar_name)).await;
                             }
                             Err(e) => {
                                 let _ = tx.send(AsyncMessage::GoogleFetchError(e.to_string())).await;
@@ -594,21 +611,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if we need to fetch iCloud events
         if app.icloud_needs_fetch {
-            if let ICloudAuthState::Authenticated { ref calendar_urls } = app.icloud_auth {
+            if let ICloudAuthState::Authenticated { ref calendars } = app.icloud_auth {
                 let (start, end) = app.month_range();
                 if !app.events.icloud.has_month(start) {
                     if let Some(ref icloud_config) = app.config.icloud {
                         let auth = ICloudAuth::new(icloud_config.clone());
                         let client = CalDavClient::new(auth);
-                        let calendar_urls = calendar_urls.clone();
+                        let calendars = calendars.clone();
                         let tx = tx.clone();
 
                         app.icloud_loading = true;
                         tokio::spawn(async move {
-                            let mut all_events = Vec::new();
-                            for url in &calendar_urls {
-                                match client.fetch_events(url, start, end).await {
-                                    Ok(events) => all_events.extend(events),
+                            let mut all_events: Vec<(ICalEvent, Option<String>)> = Vec::new();
+                            for cal in &calendars {
+                                match client.fetch_events(&cal.url, start, end).await {
+                                    Ok(events) => {
+                                        for e in events {
+                                            all_events.push((e, cal.name.clone()));
+                                        }
+                                    }
                                     Err(e) => {
                                         let _ = tx.send(AsyncMessage::ICloudFetchError(e.to_string())).await;
                                         return;
@@ -650,7 +671,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::GoogleAuthError(msg) => {
                     app.google_auth = GoogleAuthState::Error(msg);
                 }
-                AsyncMessage::GoogleEvents(events, month_date, calendar_id) => {
+                AsyncMessage::GoogleEvents(events, month_date, calendar_id, calendar_name) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
                         .filter_map(|e| {
@@ -683,6 +704,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 id: EventId::Google {
                                     calendar_id: calendar_id.clone(),
                                     event_id: e.id.clone(),
+                                    calendar_name: calendar_name.clone(),
                                 },
                                 title: e.title().to_string(),
                                 time_str: e.time_str(),
@@ -717,10 +739,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // iCloud messages
-                AsyncMessage::ICloudDiscovered { calendar_urls } => {
-                    let _ = config::save_icloud_tokens(&calendar_urls);
-                    let count = calendar_urls.len();
-                    app.icloud_auth = ICloudAuthState::Authenticated { calendar_urls };
+                AsyncMessage::ICloudDiscovered { calendars } => {
+                    let stored: Vec<config::StoredCalendar> = calendars.iter()
+                        .map(|c| config::StoredCalendar { url: c.url.clone(), name: c.name.clone() })
+                        .collect();
+                    let _ = config::save_icloud_tokens(&stored);
+                    let count = calendars.len();
+                    app.icloud_auth = ICloudAuthState::Authenticated { calendars };
                     app.icloud_needs_fetch = true;
                     app.status_message = Some(format!("Connected to {} iCloud calendar(s)!", count));
                 }
@@ -730,7 +755,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::ICloudEvents(events, month_date) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
-                        .map(|e| {
+                        .map(|(e, calendar_name)| {
                             let mut attendees: Vec<DisplayAttendee> = e.attendees.iter()
                                 .map(|a| {
                                     let status = if a.is_organizer {
@@ -758,6 +783,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     calendar_url: e.calendar_url.clone(),
                                     event_uid: e.uid.clone(),
                                     etag: e.etag.clone(),
+                                    calendar_name,
                                 },
                                 title: e.title().to_string(),
                                 time_str: e.time_str(),
@@ -857,7 +883,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Char('a') | KeyCode::Char('а') => {
                                 // Accept event (Google only)
                                 if let Some(event) = app.get_selected_event() {
-                                    if let EventId::Google { calendar_id, event_id } = event.id.clone() {
+                                    if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
                                         if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
                                             let tokens = tokens.clone();
                                             let tx = tx.clone();
@@ -882,7 +908,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Char('d') | KeyCode::Char('д') => {
                                 // Decline event (Google only)
                                 if let Some(event) = app.get_selected_event() {
-                                    if let EventId::Google { calendar_id, event_id } = event.id.clone() {
+                                    if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
                                         if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
                                             let tokens = tokens.clone();
                                             let tx = tx.clone();
@@ -908,7 +934,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Delete event
                                 if let Some(event) = app.get_selected_event() {
                                     match event.id.clone() {
-                                        EventId::Google { calendar_id, event_id } => {
+                                        EventId::Google { calendar_id, event_id, .. } => {
                                             if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
                                                 let tokens = tokens.clone();
                                                 let tx = tx.clone();
@@ -926,7 +952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 app.status_message = Some("Deleting event...".to_string());
                                             }
                                         }
-                                        EventId::ICloud { calendar_url, event_uid, etag } => {
+                                        EventId::ICloud { calendar_url, event_uid, etag, .. } => {
                                             if let Some(ref icloud_config) = app.config.icloud {
                                                 let auth = ICloudAuth::new(icloud_config.clone());
                                                 let client = CalDavClient::new(auth);
@@ -1055,10 +1081,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Char('i') | KeyCode::Char('и') => {
-                            // Start iCloud discovery (only if not already authenticated)
-                            if matches!(app.icloud_auth, ICloudAuthState::Authenticated { .. }) {
-                                // Already authenticated, ignore
-                            } else if let Some(ref icloud_config) = app.config.icloud {
+                            // Start iCloud discovery (re-run to refresh calendar names)
+                            if let Some(ref icloud_config) = app.config.icloud {
                                 app.icloud_auth = ICloudAuthState::Discovering;
                                 let auth = ICloudAuth::new(icloud_config.clone());
                                 let client = CalDavClient::new(auth);
@@ -1066,16 +1090,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 tokio::spawn(async move {
                                     match client.discover_calendars().await {
-                                        Ok(calendars) => {
-                                            let urls: Vec<String> = calendars.into_iter().map(|c| c.url).collect();
-                                            if urls.is_empty() {
+                                        Ok(discovered) => {
+                                            let calendars: Vec<CalendarEntry> = discovered
+                                                .into_iter()
+                                                .map(|c| CalendarEntry { url: c.url, name: c.name })
+                                                .collect();
+                                            if calendars.is_empty() {
                                                 let _ = tx.send(AsyncMessage::ICloudDiscoveryError(
                                                     "No calendars found".to_string()
                                                 )).await;
                                             } else {
-                                                let _ = tx.send(AsyncMessage::ICloudDiscovered {
-                                                    calendar_urls: urls,
-                                                }).await;
+                                                let _ = tx.send(AsyncMessage::ICloudDiscovered { calendars }).await;
                                             }
                                         }
                                         Err(e) => {

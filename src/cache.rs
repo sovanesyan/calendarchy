@@ -25,10 +25,10 @@ pub enum AttendeeStatus {
 /// Event identifier for API actions (accept/decline/delete)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventId {
-    /// Google Calendar event (calendar_id, event_id)
-    Google { calendar_id: String, event_id: String },
-    /// iCloud CalDAV event (calendar_url, event_uid, raw_ical for updates)
-    ICloud { calendar_url: String, event_uid: String, etag: Option<String> },
+    /// Google Calendar event (calendar_id, event_id, calendar_name for display)
+    Google { calendar_id: String, event_id: String, calendar_name: Option<String> },
+    /// iCloud CalDAV event (calendar_url, event_uid, etag for updates, calendar_name for display)
+    ICloud { calendar_url: String, event_uid: String, etag: Option<String>, calendar_name: Option<String> },
 }
 
 /// Unified event representation for display
@@ -197,7 +197,7 @@ mod tests {
 
     fn make_event(title: &str, date: NaiveDate, time: &str) -> DisplayEvent {
         DisplayEvent {
-            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string() },
+            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: title.to_string(),
             time_str: time.to_string(),
             end_time_str: None,
