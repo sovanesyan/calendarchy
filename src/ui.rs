@@ -43,6 +43,16 @@ mod colors {
     pub const STATUS_MESSAGE: Color = Color::Yellow;
 }
 
+// Terminal write helpers
+fn draw_separator(out: &mut impl Write, x: u16, y: u16, width: u16) {
+    execute!(out, cursor::MoveTo(x, y)).unwrap();
+    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
+    for _ in 0..width.min(40) {
+        print!("\u{2500}");
+    }
+    execute!(out, ResetColor).unwrap();
+}
+
 pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
@@ -172,12 +182,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
         // Separator line
-        execute!(out, cursor::MoveTo(events_x, 1)).unwrap();
-        execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
-        for _ in 0..events_panel_width.min(40) {
-            print!("\u{2500}");
-        }
-        execute!(out, ResetColor).unwrap();
+        draw_separator(out, events_x, 1, events_panel_width);
 
         // Selection info for highlighting
         let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
@@ -538,12 +543,7 @@ fn render_calendar(
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
     // Separator line
-    execute!(out, cursor::MoveTo(0, 1)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    for _ in 0..(CALENDAR_WIDTH - 1).min(40) {
-        print!("\u{2500}");
-    }
-    execute!(out, ResetColor).unwrap();
+    draw_separator(out, 0, 1, CALENDAR_WIDTH - 1);
 
     // Weekday header
     execute!(out, cursor::MoveTo(0, 2)).unwrap();
@@ -724,12 +724,7 @@ fn render_event_details_column(
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
     // Separator line
-    execute!(out, cursor::MoveTo(x, y + 1)).unwrap();
-    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
-    for _ in 0..width.min(40) {
-        print!("\u{2500}");
-    }
-    execute!(out, ResetColor).unwrap();
+    draw_separator(out, x, y + 1, width);
 
     let content_x = x;
     let content_width = width as usize;
