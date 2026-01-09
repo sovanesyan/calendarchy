@@ -25,6 +25,30 @@ use ui::AuthDisplay;
 /// Global log storage for HTTP requests
 static HTTP_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Extract a display name from an email address
+/// e.g., "john.smith@example.com" -> "John Smith"
+///       "jsmith@example.com" -> "Jsmith"
+fn name_from_email(email: &str) -> String {
+    // Get the part before @
+    let local = email.split('@').next().unwrap_or(email);
+
+    // Split by common separators (., _, -)
+    let parts: Vec<&str> = local.split(|c| c == '.' || c == '_' || c == '-').collect();
+
+    // Capitalize each part and join with space
+    parts
+        .iter()
+        .map(|p| {
+            let mut chars = p.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Log an HTTP request
 pub fn log_request(method: &str, url: &str) {
     if let Ok(mut logs) = HTTP_LOGS.lock() {
@@ -644,7 +668,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         };
                                         Some(DisplayAttendee {
-                                            name: a.display_name.clone(),
+                                            name: Some(a.display_name.clone()
+                                                .unwrap_or_else(|| name_from_email(&email))),
                                             email,
                                             status,
                                         })
@@ -717,7 +742,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     };
                                     DisplayAttendee {
-                                        name: a.name.clone(),
+                                        name: Some(a.name.clone()
+                                            .unwrap_or_else(|| name_from_email(&a.email))),
                                         email: a.email.clone(),
                                         status,
                                     }
