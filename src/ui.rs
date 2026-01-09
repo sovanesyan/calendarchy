@@ -116,14 +116,17 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
     if in_event_mode {
         let available = term_width.saturating_sub(CALENDAR_WIDTH + 2);
-        events_panel_width = (available * 2 / 5).max(MIN_PANEL_WIDTH);
-        details_panel_width = available.saturating_sub(events_panel_width + 1);
+        // Details panel: fixed width or 1/3 of available
+        details_panel_width = (available / 3).max(MIN_PANEL_WIDTH).min(40);
+        events_panel_width = available.saturating_sub(details_panel_width + 1);
     } else {
         events_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
         details_panel_width = 0;
     }
 
-    let panel_height = term_height.saturating_sub(3) / 2;
+    // Reserve 2 rows for column headers
+    let header_rows = 2u16;
+    let panel_height = term_height.saturating_sub(3 + header_rows) / 2;
 
     // Render calendar on left
     render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
@@ -131,6 +134,20 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
         let events_x = CALENDAR_WIDTH + 1;
+
+        // Events column header: selected date
+        execute!(out, cursor::MoveTo(events_x, 0)).unwrap();
+        execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
+        print!("{}", state.selected_date.format("%a %b %d"));
+        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+        // Separator line
+        execute!(out, cursor::MoveTo(events_x, 1)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        for _ in 0..events_panel_width.min(40) {
+            print!("\u{2500}");
+        }
+        execute!(out, ResetColor).unwrap();
 
         // Selection info for highlighting
         let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
@@ -144,11 +161,11 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             None
         };
 
-        // Render Work (Google) panel on right top
+        // Render Work (Google) panel below header
         render_event_panel_with_selection(
             out,
             events_x,
-            0,
+            header_rows,
             events_panel_width,
             panel_height,
             "Work (Google)",
@@ -165,7 +182,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         render_event_panel_with_selection(
             out,
             events_x,
-            panel_height + 1,
+            header_rows + panel_height + 1,
             events_panel_width,
             panel_height,
             "Personal (iCloud)",
@@ -479,18 +496,26 @@ fn render_calendar(
 
     let loading_indicator = if is_loading { " *" } else { "" };
     let header = format!(
-        " {} {}{}",
+        "{} {}{}",
         current_date.format("%B").to_string().to_uppercase(),
         current_date.year(),
         loading_indicator
     );
     print!("{}", truncate_str(&header, CALENDAR_WIDTH as usize));
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    // Separator line
+    execute!(out, cursor::MoveTo(0, 1)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    for _ in 0..(CALENDAR_WIDTH - 1).min(40) {
+        print!("\u{2500}");
+    }
     execute!(out, ResetColor).unwrap();
 
     // Weekday header
-    execute!(out, cursor::MoveTo(0, 1)).unwrap();
+    execute!(out, cursor::MoveTo(0, 2)).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!(" Mo Tu We Th Fr Sa Su");
+    print!("Mo Tu We Th Fr Sa Su");
     execute!(out, ResetColor).unwrap();
 
     // Calendar grid
@@ -498,8 +523,7 @@ fn render_calendar(
     let days_in_month = days_in_month(current_date);
 
     for row in 0..6 {
-        execute!(out, cursor::MoveTo(0, 2 + row as u16)).unwrap();
-        print!(" ");
+        execute!(out, cursor::MoveTo(0, 3 + row as u16)).unwrap();
 
         for col in 0..7 {
             let cell = row * 7 + col;
@@ -542,15 +566,6 @@ fn render_calendar(
         }
     }
 
-    // Selected date info
-    execute!(out, cursor::MoveTo(0, 9)).unwrap();
-    execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
-    print!(
-        " {} {}",
-        selected_date.format("%a"),
-        selected_date.format("%b %d")
-    );
-    execute!(out, ResetColor).unwrap();
 }
 
 /// Render event panel with optional selection highlighting
