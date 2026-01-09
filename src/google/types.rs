@@ -145,6 +145,22 @@ impl CalendarEvent {
         }
     }
 
+    /// Check if the current user is the organizer of this event
+    pub fn is_organizer(&self) -> bool {
+        match &self.attendees {
+            None => true, // No attendees means it's your own event
+            Some(attendees) => {
+                // Check if any attendee is both self and organizer
+                for attendee in attendees {
+                    if attendee.is_self == Some(true) && attendee.organizer == Some(true) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
     /// Extract meeting URL (Zoom, Google Meet, etc.)
     pub fn meeting_url(&self) -> Option<String> {
         // Check hangout_link first (Google Meet)

@@ -711,6 +711,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 end_time_str: e.end_time_str(),
                                 date: e.start_date()?,
                                 accepted: e.is_accepted(),
+                                is_organizer: e.is_organizer(),
                                 meeting_url: e.meeting_url(),
                                 description: e.description.clone(),
                                 location: e.location.clone(),
@@ -778,6 +779,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .collect();
                             sort_attendees(&mut attendees);
 
+                            // For iCloud, if there are no attendees, the user created the event
+                            let is_organizer = e.attendees.is_empty();
+
                             DisplayEvent {
                                 id: EventId::ICloud {
                                     calendar_url: e.calendar_url.clone(),
@@ -790,6 +794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 end_time_str: e.end_time_str(),
                                 date: e.start_date(),
                                 accepted: e.accepted,
+                                is_organizer,
                                 meeting_url: e.meeting_url(),
                                 description: e.description.clone(),
                                 location: e.location.clone(),

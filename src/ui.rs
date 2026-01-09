@@ -162,6 +162,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         let google_events = state.events.google.get(state.selected_date);
         let icloud_events = state.events.icloud.get(state.selected_date);
+        let is_past_day = state.selected_date < today;
 
         // Render Work (Google) panel
         render_event_panel(
@@ -174,6 +175,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             state.google_loading,
             Color::Blue,
             is_today,
+            is_past_day,
             current_time,
             google_selected,
         );
@@ -193,6 +195,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             state.icloud_loading,
             Color::Magenta,
             is_today,
+            is_past_day,
             current_time,
             icloud_selected,
         );
@@ -581,6 +584,7 @@ fn render_event_panel(
     is_loading: bool,
     accent_color: Color,
     is_today: bool,
+    is_past_day: bool,
     current_time: NaiveTime,
     selected_index: Option<usize>,
 ) {
@@ -626,13 +630,14 @@ fn render_event_panel(
         let is_selected = selected_index == Some(i);
         let is_current = current_event_idx == Some(i);
         let is_next = next_event_idx == Some(i);
-        let is_past = is_today && is_event_past(event, current_time) && !is_current;
+        let is_past_event = is_today && is_event_past(event, current_time) && !is_current;
         let is_unaccepted = !event.accepted;
 
         // Choose color based on event status
+        // Gray out: past days, past events today, or unaccepted
         let event_color = if is_selected {
             Color::Cyan
-        } else if is_unaccepted || is_past {
+        } else if is_past_day || is_unaccepted || is_past_event {
             Color::DarkGrey
         } else if is_current {
             Color::Green
@@ -775,8 +780,8 @@ fn render_event_details_column(
         current_row += 1;
     }
 
-    // Accept/Decline (Google events only)
-    if matches!(event.id, EventId::Google { .. }) && current_row < y + height - 3 {
+    // Accept/Decline (Google events only, not for organizer)
+    if matches!(event.id, EventId::Google { .. }) && !event.is_organizer && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         if event.accepted {
@@ -788,8 +793,8 @@ fn render_event_details_column(
         current_row += 1;
     }
 
-    // Delete
-    if current_row < y + height - 3 {
+    // Delete (not for organizer)
+    if !event.is_organizer && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         print!("[x] Delete");
@@ -945,6 +950,7 @@ mod tests {
             end_time_str: None,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
+            is_organizer: false,
             meeting_url: None,
             description: None,
             location: None,

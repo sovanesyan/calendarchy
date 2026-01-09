@@ -40,6 +40,7 @@ pub struct DisplayEvent {
     pub end_time_str: Option<String>,
     pub date: NaiveDate,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
+    pub is_organizer: bool, // true if the user created/organizes this event
     pub meeting_url: Option<String>, // Zoom, Meet, Teams link if available
     pub description: Option<String>,
     pub location: Option<String>,
@@ -203,6 +204,7 @@ mod tests {
             end_time_str: None,
             date,
             accepted: true,
+            is_organizer: false,
             meeting_url: None,
             description: None,
             location: None,
