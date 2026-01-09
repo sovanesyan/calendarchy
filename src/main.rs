@@ -972,6 +972,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Esc => {
                                 app.exit_event_mode();
                             }
+                            KeyCode::Char('1') => {
+                                let _ = std::process::Command::new("xdg-open")
+                                    .arg("https://calendar.google.com")
+                                    .spawn();
+                            }
+                            KeyCode::Char('2') => {
+                                let _ = std::process::Command::new("xdg-open")
+                                    .arg("https://www.icloud.com/calendar")
+                                    .spawn();
+                            }
                             KeyCode::Char('q') | KeyCode::Char('я') => {
                                 break;
                             }
@@ -1026,6 +1036,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('D') => {
                             // Toggle HTTP request logs display
                             app.show_logs = !app.show_logs;
+                        }
+                        KeyCode::Char('1') => {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg("https://calendar.google.com")
+                                .spawn();
+                        }
+                        KeyCode::Char('2') => {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg("https://www.icloud.com/calendar")
+                                .spawn();
                         }
                         KeyCode::Char('g') | KeyCode::Char('г') => {
                             // Start Google auth flow (only if not already authenticated)

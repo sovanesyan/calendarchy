@@ -95,11 +95,11 @@ pub fn render(state: &RenderState) {
             c.push_str(" x:delete");
         }
 
-        c.push_str(" D:logs Esc:back q:quit");
+        c.push_str(" 1:google 2:icloud D:logs Esc:back q:quit");
         c
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" hjkl:nav t:today r:refresh v:view D:logs");
+        let mut c = String::from(" hjkl:nav t:today r:refresh v:view 1:google 2:icloud D:logs");
         if state.view_mode == ViewMode::Month {
             c.push_str(" Enter:events");
         }
