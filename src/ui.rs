@@ -12,6 +12,44 @@ use std::io::{stdout, Write};
 const CALENDAR_WIDTH: u16 = 22;
 const MIN_PANEL_WIDTH: u16 = 25;
 
+// Semantic color constants
+mod colors {
+    use crossterm::style::Color;
+
+    // Calendar sources
+    pub const GOOGLE_ACCENT: Color = Color::Blue;
+    pub const ICLOUD_ACCENT: Color = Color::Magenta;
+
+    // Event states
+    pub const CURRENT_EVENT: Color = Color::Green;
+    pub const NEXT_EVENT: Color = Color::Yellow;
+    pub const PAST_EVENT: Color = Color::DarkGrey;
+    pub const SELECTED: Color = Color::Cyan;
+
+    // UI elements
+    pub const HEADER: Color = Color::Cyan;
+    pub const SEPARATOR: Color = Color::DarkGrey;
+    pub const MUTED: Color = Color::DarkGrey;
+    pub const TODAY: Color = Color::Green;
+
+    // Details panel
+    pub const TITLE: Color = Color::White;
+    pub const TIME: Color = Color::White;
+    pub const LOCATION: Color = Color::Yellow;
+    pub const ACTION: Color = Color::Green;
+
+    // Attendee status
+    pub const ACCEPTED: Color = Color::Green;
+    pub const ORGANIZER: Color = Color::Blue;
+    pub const DECLINED: Color = Color::Red;
+    pub const TENTATIVE: Color = Color::Yellow;
+    pub const NEEDS_ACTION: Color = Color::DarkGrey;
+
+    // Status bar
+    pub const LOG_TEXT: Color = Color::DarkCyan;
+    pub const STATUS_MESSAGE: Color = Color::Yellow;
+}
+
 pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
@@ -50,7 +88,7 @@ pub fn render(state: &RenderState) {
         let logs = get_recent_logs(log_height as usize);
         let log_start_row = term_height.saturating_sub(2 + log_height);
 
-        execute!(out, SetForegroundColor(Color::DarkCyan)).unwrap();
+        execute!(out, SetForegroundColor(colors::LOG_TEXT)).unwrap();
         for (i, log) in logs.iter().rev().enumerate() {
             let row = log_start_row + i as u16;
             if row < term_height.saturating_sub(2) {
@@ -66,7 +104,7 @@ pub fn render(state: &RenderState) {
     execute!(out, cursor::MoveTo(0, status_row)).unwrap();
 
     if let Some(msg) = state.status_message {
-        execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
+        execute!(out, SetForegroundColor(colors::STATUS_MESSAGE)).unwrap();
         print!(" {}", truncate_str(msg, term_width as usize - 2));
         execute!(out, ResetColor).unwrap();
     }
@@ -136,13 +174,13 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         // Events column header: selected date
         execute!(out, cursor::MoveTo(events_x, 0)).unwrap();
-        execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
+        execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
         print!("{}", state.selected_date.format("%a %b %d"));
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
         // Separator line
         execute!(out, cursor::MoveTo(events_x, 1)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
         for _ in 0..events_panel_width.min(40) {
             print!("\u{2500}");
         }
@@ -173,7 +211,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             "Work",
             google_events,
             state.google_loading,
-            Color::Blue,
+            colors::GOOGLE_ACCENT,
             is_today,
             is_past_day,
             current_time,
@@ -193,7 +231,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             "Personal",
             icloud_events,
             state.icloud_loading,
-            Color::Magenta,
+            colors::ICLOUD_ACCENT,
             is_today,
             is_past_day,
             current_time,
@@ -261,9 +299,9 @@ fn render_week_view(out: &mut impl Write, state: &RenderState, today: NaiveDate,
             execute!(out, SetForegroundColor(Color::Black)).unwrap();
             execute!(out, crossterm::style::SetBackgroundColor(Color::White)).unwrap();
         } else if is_today {
-            execute!(out, SetForegroundColor(Color::Green)).unwrap();
+            execute!(out, SetForegroundColor(colors::TODAY)).unwrap();
         } else if date.weekday() == Weekday::Sat || date.weekday() == Weekday::Sun {
-            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+            execute!(out, SetForegroundColor(colors::MUTED)).unwrap();
         } else {
             execute!(out, SetForegroundColor(Color::White)).unwrap();
         }
@@ -348,11 +386,11 @@ fn render_week_day_panel(
 
         // Gray out: past days, past events today, or unaccepted
         let event_color = if is_past_day || is_unaccepted || is_past_event {
-            Color::DarkGrey
+            colors::PAST_EVENT
         } else if is_current {
-            Color::Green
+            colors::CURRENT_EVENT
         } else if is_next {
-            Color::Yellow
+            colors::NEXT_EVENT
         } else {
             Color::Reset
         };
@@ -633,13 +671,13 @@ fn render_event_panel(
         // Choose color based on event status
         // Gray out: past days, past events today, or unaccepted
         let event_color = if is_selected {
-            Color::Cyan
+            colors::SELECTED
         } else if is_past_day || is_unaccepted || is_past_event {
-            Color::DarkGrey
+            colors::PAST_EVENT
         } else if is_current {
-            Color::Green
+            colors::CURRENT_EVENT
         } else if is_next {
-            Color::Yellow
+            colors::NEXT_EVENT
         } else {
             Color::Reset
         };
@@ -688,13 +726,13 @@ fn render_event_details_column(
 ) {
     // Header
     execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
+    execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
     print!("Details");
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
     // Separator line
     execute!(out, cursor::MoveTo(x, y + 1)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
     for _ in 0..width.min(40) {
         print!("\u{2500}");
     }
@@ -714,14 +752,14 @@ fn render_event_details_column(
 
     // Title
     execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-    execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
+    execute!(out, SetForegroundColor(colors::TITLE), SetAttribute(Attribute::Bold)).unwrap();
     print!("{}", truncate_str(&event.title, content_width));
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
     current_row += 1;
 
     // Time
     execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-    execute!(out, SetForegroundColor(Color::White)).unwrap();
+    execute!(out, SetForegroundColor(colors::TIME)).unwrap();
     if let Some(ref end) = event.end_time_str {
         print!("\u{1F552} {} - {}", event.time_str, end);
     } else {
@@ -734,7 +772,7 @@ fn render_event_details_column(
     if let Some(ref loc) = event.location
         && !loc.is_empty() && current_row < y + height - 3 {
             execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-            execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
+            execute!(out, SetForegroundColor(colors::LOCATION)).unwrap();
             print!("\u{1F4CD} {}", truncate_str(loc, content_width.saturating_sub(3)));
             execute!(out, ResetColor).unwrap();
             current_row += 1;
@@ -770,7 +808,7 @@ fn render_event_details_column(
     // Meeting link
     if event.meeting_url.is_some() && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::Green)).unwrap();
+        execute!(out, SetForegroundColor(colors::ACTION)).unwrap();
         print!("[J] Join");
         execute!(out, ResetColor).unwrap();
         current_row += 1;
@@ -828,11 +866,11 @@ fn render_event_details_column(
 
             // Status icon
             let (icon, color) = match attendee.status {
-                AttendeeStatus::Accepted => ("\u{2713}", Color::Green),
-                AttendeeStatus::Organizer => ("\u{2713}", Color::Blue),
-                AttendeeStatus::Declined => ("\u{2717}", Color::Red),
-                AttendeeStatus::Tentative => ("?", Color::Yellow),
-                AttendeeStatus::NeedsAction => ("?", Color::DarkGrey),
+                AttendeeStatus::Accepted => ("\u{2713}", colors::ACCEPTED),
+                AttendeeStatus::Organizer => ("\u{2713}", colors::ORGANIZER),
+                AttendeeStatus::Declined => ("\u{2717}", colors::DECLINED),
+                AttendeeStatus::Tentative => ("?", colors::TENTATIVE),
+                AttendeeStatus::NeedsAction => ("?", colors::NEEDS_ACTION),
             };
             execute!(out, SetForegroundColor(color)).unwrap();
             print!("  {} ", icon);
