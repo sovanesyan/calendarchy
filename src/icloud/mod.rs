@@ -4,4 +4,4 @@ mod types;
 
 pub use auth::ICloudAuth;
 pub use calendar::CalDavClient;
-pub use types::ICalEvent;
+pub use types::{EventTime, ICalAttendee, ICalEvent};
