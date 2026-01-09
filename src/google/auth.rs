@@ -6,7 +6,7 @@ use reqwest::Client;
 
 const DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 
 pub struct GoogleAuth {
     client: Client,
