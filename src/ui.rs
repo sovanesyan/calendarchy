@@ -126,12 +126,11 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
     // Reserve 2 rows for column headers
     let header_rows = 2u16;
-    let events_height = term_height.saturating_sub(3 + header_rows);
 
     // Render calendar on left
     render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
 
-    // Render merged events panel in the middle
+    // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
         let events_x = CALENDAR_WIDTH + 1;
 
@@ -149,47 +148,53 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         }
         execute!(out, ResetColor).unwrap();
 
-        // Build merged event list with source info
-        let google_events = state.events.google.get(state.selected_date);
-        let icloud_events = state.events.icloud.get(state.selected_date);
-
-        // Create merged list: (event, source, original_index)
-        let mut merged: Vec<(&DisplayEvent, EventSource, usize)> = Vec::new();
-        for (i, e) in google_events.iter().enumerate() {
-            merged.push((e, EventSource::Google, i));
-        }
-        for (i, e) in icloud_events.iter().enumerate() {
-            merged.push((e, EventSource::ICloud, i));
-        }
-
-        // Sort by time (All day first, then by time)
-        merged.sort_by(|a, b| {
-            let time_a = parse_event_time(&a.0.time_str);
-            let time_b = parse_event_time(&b.0.time_str);
-            time_a.cmp(&time_b)
-        });
-
-        // Find selected index in merged list
-        let selected_merged_idx = if in_event_mode {
-            merged.iter().position(|(_, src, idx)| {
-                *src == state.selected_source && *idx == state.selected_event_index
-            })
+        // Selection info for highlighting
+        let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
+            Some(state.selected_event_index)
+        } else {
+            None
+        };
+        let icloud_selected = if in_event_mode && state.selected_source == EventSource::ICloud {
+            Some(state.selected_event_index)
         } else {
             None
         };
 
-        // Render merged events
-        render_merged_events(
+        let google_events = state.events.google.get(state.selected_date);
+        let icloud_events = state.events.icloud.get(state.selected_date);
+
+        // Render Work (Google) panel
+        render_event_panel(
             out,
             events_x,
             header_rows,
             events_panel_width,
-            events_height,
-            &merged,
+            "Work",
+            google_events,
+            state.google_loading,
+            Color::Blue,
             is_today,
             current_time,
-            selected_merged_idx,
-            state.google_loading || state.icloud_loading,
+            google_selected,
+        );
+
+        // Calculate Personal panel position: after Work header (2) + events + spacing (1)
+        let work_panel_rows = 2 + google_events.len().max(1) as u16;
+        let personal_y = header_rows + work_panel_rows + 1;
+
+        // Render Personal (iCloud) panel below
+        render_event_panel(
+            out,
+            events_x,
+            personal_y,
+            events_panel_width,
+            "Personal",
+            icloud_events,
+            state.icloud_loading,
+            Color::Magenta,
+            is_today,
+            current_time,
+            icloud_selected,
         );
     }
 
@@ -565,21 +570,37 @@ fn render_calendar(
 
 }
 
-/// Render merged events from all sources
-fn render_merged_events(
+/// Render event panel with title and events
+fn render_event_panel(
     out: &mut impl Write,
     x: u16,
     y: u16,
     width: u16,
-    height: u16,
-    events: &[(&DisplayEvent, EventSource, usize)],
+    title: &str,
+    events: &[DisplayEvent],
+    is_loading: bool,
+    accent_color: Color,
     is_today: bool,
     current_time: NaiveTime,
     selected_index: Option<usize>,
-    is_loading: bool,
 ) {
-    let content_start = y;
-    let max_events = height as usize;
+    // Panel header
+    execute!(out, cursor::MoveTo(x, y)).unwrap();
+    execute!(out, SetForegroundColor(accent_color), SetAttribute(Attribute::Bold)).unwrap();
+    let loading_str = if is_loading { " *" } else { "" };
+    let header = format!("{}{}", title, loading_str);
+    print!("{}", truncate_str(&header, width as usize));
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    // Separator line
+    execute!(out, cursor::MoveTo(x, y + 1)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    for _ in 0..width.min(40) {
+        print!("\u{2500}");
+    }
+    execute!(out, ResetColor).unwrap();
+
+    let content_start = y + 2;
 
     if events.is_empty() {
         execute!(out, cursor::MoveTo(x, content_start)).unwrap();
@@ -595,12 +616,12 @@ fn render_merged_events(
 
     // Find current and next event indices
     let (current_event_idx, next_event_idx) = if is_today {
-        find_current_and_next_merged(events, current_time)
+        find_current_and_next_events(events, current_time)
     } else {
         (None, None)
     };
 
-    for (i, (event, source, _)) in events.iter().take(max_events).enumerate() {
+    for (i, event) in events.iter().enumerate() {
         execute!(out, cursor::MoveTo(x, content_start + i as u16)).unwrap();
 
         let is_selected = selected_index == Some(i);
@@ -636,13 +657,6 @@ fn render_merged_events(
             print!(" ");
         }
 
-        // Source indicator emoji
-        let source_emoji = match source {
-            EventSource::Google => "🔵",
-            EventSource::ICloud => "🍎",
-        };
-        print!("{}", source_emoji);
-
         // Time
         execute!(out, SetForegroundColor(event_color)).unwrap();
         if is_selected || ((is_current || is_next) && !is_unaccepted) {
@@ -656,16 +670,9 @@ fn render_merged_events(
         if is_selected || ((is_current || is_next) && !is_unaccepted) {
             execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         }
-        let title_width = width.saturating_sub(12) as usize;
+        let title_width = width.saturating_sub(10) as usize;
         print!("{}", truncate_str(&event.title, title_width));
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-    }
-
-    if events.len() > max_events {
-        execute!(out, cursor::MoveTo(x, content_start + max_events as u16)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("... +{} more", events.len() - max_events);
-        execute!(out, ResetColor).unwrap();
     }
 }
 
@@ -869,28 +876,6 @@ fn is_event_past(event: &DisplayEvent, current_time: NaiveTime) -> bool {
     } else {
         false
     }
-}
-
-/// Find indices of current (happening now) and next upcoming event in merged list
-fn find_current_and_next_merged(events: &[(&DisplayEvent, EventSource, usize)], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
-    let mut current_idx: Option<usize> = None;
-    let mut next_idx: Option<usize> = None;
-
-    for (i, (event, _, _)) in events.iter().enumerate() {
-        if let Some(event_time) = parse_event_time(&event.time_str) {
-            if event.time_str == "All day" {
-                continue;
-            }
-            if event_time <= current_time {
-                current_idx = Some(i);
-            } else if next_idx.is_none() {
-                next_idx = Some(i);
-                break;
-            }
-        }
-    }
-
-    (current_idx, next_idx)
 }
 
 /// Find indices of current (happening now) and next upcoming event
