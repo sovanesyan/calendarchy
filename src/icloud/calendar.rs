@@ -233,14 +233,13 @@ impl CalDavClient {
                 Ok(Event::End(e)) => {
                     let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                     if name == "response" && in_response {
-                        if is_calendar {
-                            if let Some(href) = current_href.take() {
+                        if is_calendar
+                            && let Some(href) = current_href.take() {
                                 calendars.push(CalendarInfo {
                                     url: self.resolve_url(&href),
                                     name: current_name.take(),
                                 });
                             }
-                        }
                         in_response = false;
                     }
                 }

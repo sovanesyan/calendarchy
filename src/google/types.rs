@@ -169,61 +169,33 @@ impl CalendarEvent {
         }
 
         // Check conference data entry points
-        if let Some(ref conf) = self.conference_data {
-            if let Some(ref entry_points) = conf.entry_points {
+        if let Some(ref conf) = self.conference_data
+            && let Some(ref entry_points) = conf.entry_points {
                 for ep in entry_points {
-                    if ep.entry_point_type.as_deref() == Some("video") {
-                        if let Some(ref uri) = ep.uri {
+                    if ep.entry_point_type.as_deref() == Some("video")
+                        && let Some(ref uri) = ep.uri {
                             return Some(uri.clone());
                         }
-                    }
                 }
             }
-        }
 
         // Check location for meeting URLs
-        if let Some(ref loc) = self.location {
-            if let Some(url) = extract_meeting_url(loc) {
+        if let Some(ref loc) = self.location
+            && let Some(url) = extract_meeting_url(loc) {
                 return Some(url);
             }
-        }
 
         // Check description for meeting URLs
-        if let Some(ref desc) = self.description {
-            if let Some(url) = extract_meeting_url(desc) {
+        if let Some(ref desc) = self.description
+            && let Some(url) = extract_meeting_url(desc) {
                 return Some(url);
             }
-        }
 
         None
     }
 }
 
-/// Extract a meeting URL (Zoom, Meet, Teams) from text
-fn extract_meeting_url(text: &str) -> Option<String> {
-    // Common meeting URL patterns
-    let patterns = [
-        "https://zoom.us/",
-        "https://us02web.zoom.us/",
-        "https://us04web.zoom.us/",
-        "https://us05web.zoom.us/",
-        "https://us06web.zoom.us/",
-        "https://meet.google.com/",
-        "https://teams.microsoft.com/",
-    ];
-
-    for pattern in patterns {
-        if let Some(start) = text.find(pattern) {
-            // Extract URL until whitespace or end
-            let url_part = &text[start..];
-            let end = url_part
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
-                .unwrap_or(url_part.len());
-            return Some(url_part[..end].to_string());
-        }
-    }
-    None
-}
+use crate::utils::extract_meeting_url;
 
 use chrono::Timelike;
 
@@ -409,33 +381,6 @@ mod tests {
             event.meeting_url(),
             Some("https://teams.microsoft.com/l/meetup-join/123".to_string())
         );
-    }
-
-    #[test]
-    fn test_extract_meeting_url_zoom_variants() {
-        assert_eq!(
-            extract_meeting_url("https://us02web.zoom.us/j/123"),
-            Some("https://us02web.zoom.us/j/123".to_string())
-        );
-        assert_eq!(
-            extract_meeting_url("https://us04web.zoom.us/j/456"),
-            Some("https://us04web.zoom.us/j/456".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_meeting_url_with_surrounding_text() {
-        let text = "Join meeting at https://meet.google.com/abc-def-ghi and bring notes";
-        assert_eq!(
-            extract_meeting_url(text),
-            Some("https://meet.google.com/abc-def-ghi".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_meeting_url_none() {
-        assert_eq!(extract_meeting_url("No meeting link here"), None);
-        assert_eq!(extract_meeting_url("https://example.com/not-a-meeting"), None);
     }
 
     #[test]

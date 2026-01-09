@@ -117,7 +117,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     if in_event_mode {
         let available = term_width.saturating_sub(CALENDAR_WIDTH + 2);
         // Details panel: fixed width or 1/3 of available
-        details_panel_width = (available / 3).max(MIN_PANEL_WIDTH).min(40);
+        details_panel_width = (available / 3).clamp(MIN_PANEL_WIDTH, 40);
         events_panel_width = available.saturating_sub(details_panel_width + 1);
     } else {
         events_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
@@ -288,7 +288,6 @@ fn render_week_view(out: &mut impl Write, state: &RenderState, today: NaiveDate,
             col_width.saturating_sub(1),
             half_height,
             state.events.google.get(date),
-            Color::Blue,
             is_today,
             is_past_day,
             current_time,
@@ -308,7 +307,6 @@ fn render_week_view(out: &mut impl Write, state: &RenderState, today: NaiveDate,
             col_width.saturating_sub(1),
             half_height.saturating_sub(1),
             state.events.icloud.get(date),
-            Color::Magenta,
             is_today,
             is_past_day,
             current_time,
@@ -323,7 +321,6 @@ fn render_week_day_panel(
     width: u16,
     height: u16,
     events: &[DisplayEvent],
-    _color: Color,
     is_today: bool,
     is_past_day: bool,
     current_time: NaiveTime,
@@ -535,7 +532,7 @@ fn render_calendar(
             if cell < start_weekday || cell >= start_weekday + days_in_month {
                 print!("   ");
             } else {
-                let day = (cell - start_weekday + 1) as u32;
+                let day = cell - start_weekday + 1;
                 let date = first_day.with_day(day).unwrap();
                 let is_today = date == today;
                 let is_selected = date == selected_date;
@@ -734,15 +731,14 @@ fn render_event_details_column(
     current_row += 1;
 
     // Location
-    if let Some(ref loc) = event.location {
-        if !loc.is_empty() && current_row < y + height - 3 {
+    if let Some(ref loc) = event.location
+        && !loc.is_empty() && current_row < y + height - 3 {
             execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
             execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
             print!("\u{1F4CD} {}", truncate_str(loc, content_width.saturating_sub(3)));
             execute!(out, ResetColor).unwrap();
             current_row += 1;
         }
-    }
 
     // Calendar source
     if current_row < y + height - 3 {
@@ -858,7 +854,7 @@ fn render_event_details_column(
 /// Parse time string like "14:30" into NaiveTime
 fn parse_event_time(time_str: &str) -> Option<NaiveTime> {
     if time_str == "All day" {
-        return Some(NaiveTime::from_hms_opt(0, 0, 0)?);
+        return NaiveTime::from_hms_opt(0, 0, 0);
     }
     let parts: Vec<&str> = time_str.split(':').collect();
     if parts.len() == 2 {

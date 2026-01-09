@@ -74,25 +74,22 @@ impl ICalEvent {
     /// Extract meeting URL (Zoom, Google Meet, etc.)
     pub fn meeting_url(&self) -> Option<String> {
         // Check URL field first
-        if let Some(ref url) = self.url {
-            if is_meeting_url(url) {
+        if let Some(ref url) = self.url
+            && is_meeting_url(url) {
                 return Some(url.clone());
             }
-        }
 
         // Check location for meeting URLs
-        if let Some(ref loc) = self.location {
-            if let Some(url) = extract_meeting_url(loc) {
+        if let Some(ref loc) = self.location
+            && let Some(url) = extract_meeting_url(loc) {
                 return Some(url);
             }
-        }
 
         // Check description for meeting URLs
-        if let Some(ref desc) = self.description {
-            if let Some(url) = extract_meeting_url(desc) {
+        if let Some(ref desc) = self.description
+            && let Some(url) = extract_meeting_url(desc) {
                 return Some(url);
             }
-        }
 
         None
     }
@@ -112,18 +109,18 @@ impl ICalEvent {
             let line = line.trim();
 
             if line == "BEGIN:VEVENT" {
-                let mut builder = ICalEventBuilder::default();
-                builder.calendar_url = calendar_url.clone();
-                builder.etag = etag.clone();
-                current_event = Some(builder);
+                current_event = Some(ICalEventBuilder {
+                    calendar_url: calendar_url.clone(),
+                    etag: etag.clone(),
+                    ..Default::default()
+                });
             } else if line == "END:VEVENT" {
-                if let Some(builder) = current_event.take() {
-                    if let Some(event) = builder.build() {
+                if let Some(builder) = current_event.take()
+                    && let Some(event) = builder.build() {
                         events.push(event);
                     }
-                }
-            } else if let Some(ref mut builder) = current_event {
-                if let Some((key, value)) = parse_ical_line(line) {
+            } else if let Some(ref mut builder) = current_event
+                && let Some((key, value)) = parse_ical_line(line) {
                     let base_key = key.split(';').next().unwrap_or(key);
                     match base_key {
                         "UID" => builder.uid = Some(value.to_string()),
@@ -154,7 +151,6 @@ impl ICalEvent {
                         _ => {}
                     }
                 }
-            }
         }
 
         events
@@ -290,8 +286,8 @@ fn unescape_ical(value: &str) -> String {
 /// e.g., "ATTENDEE;PARTSTAT=ACCEPTED;CN=..." -> "ACCEPTED"
 fn extract_partstat(key: &str) -> Option<String> {
     for part in key.split(';') {
-        if part.starts_with("PARTSTAT=") {
-            return Some(part[9..].to_string());
+        if let Some(stripped) = part.strip_prefix("PARTSTAT=") {
+            return Some(stripped.to_string());
         }
     }
     None
@@ -301,8 +297,7 @@ fn extract_partstat(key: &str) -> Option<String> {
 /// e.g., "ATTENDEE;CN=John Smith;PARTSTAT=ACCEPTED" -> "John Smith"
 fn extract_cn(key: &str) -> Option<String> {
     for part in key.split(';') {
-        if part.starts_with("CN=") {
-            let name = &part[3..];
+        if let Some(name) = part.strip_prefix("CN=") {
             // Remove surrounding quotes if present
             let name = name.trim_matches('"');
             if !name.is_empty() {
@@ -318,11 +313,10 @@ fn extract_cn(key: &str) -> Option<String> {
 /// value: "mailto:john@example.com"
 fn parse_attendee(key: &str, value: &str) -> Option<ICalAttendee> {
     // Extract email from mailto: value
-    let email = if value.starts_with("mailto:") {
-        value[7..].to_string()
-    } else {
-        value.to_string()
-    };
+    let email = value
+        .strip_prefix("mailto:")
+        .unwrap_or(value)
+        .to_string();
 
     // Skip if no valid email
     if email.is_empty() {
@@ -343,38 +337,7 @@ fn parse_attendee(key: &str, value: &str) -> Option<ICalAttendee> {
     })
 }
 
-/// Check if a URL is a meeting URL
-fn is_meeting_url(url: &str) -> bool {
-    url.contains("zoom.us")
-        || url.contains("meet.google.com")
-        || url.contains("teams.microsoft.com")
-}
-
-/// Extract a meeting URL (Zoom, Meet, Teams) from text
-fn extract_meeting_url(text: &str) -> Option<String> {
-    // Common meeting URL patterns
-    let patterns = [
-        "https://zoom.us/",
-        "https://us02web.zoom.us/",
-        "https://us04web.zoom.us/",
-        "https://us05web.zoom.us/",
-        "https://us06web.zoom.us/",
-        "https://meet.google.com/",
-        "https://teams.microsoft.com/",
-    ];
-
-    for pattern in patterns {
-        if let Some(start) = text.find(pattern) {
-            // Extract URL until whitespace or end
-            let url_part = &text[start..];
-            let end = url_part
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
-                .unwrap_or(url_part.len());
-            return Some(url_part[..end].to_string());
-        }
-    }
-    None
-}
+use crate::utils::{extract_meeting_url, is_meeting_url};
 
 #[cfg(test)]
 mod tests {
@@ -628,14 +591,6 @@ END:VCALENDAR"#;
         assert_eq!(extract_partstat("ATTENDEE;PARTSTAT=ACCEPTED;CN=Test"), Some("ACCEPTED".to_string()));
         assert_eq!(extract_partstat("ATTENDEE;CN=Test;PARTSTAT=DECLINED"), Some("DECLINED".to_string()));
         assert_eq!(extract_partstat("ATTENDEE;CN=Test"), None);
-    }
-
-    #[test]
-    fn test_is_meeting_url() {
-        assert!(is_meeting_url("https://zoom.us/j/123"));
-        assert!(is_meeting_url("https://meet.google.com/abc"));
-        assert!(is_meeting_url("https://teams.microsoft.com/l/meetup"));
-        assert!(!is_meeting_url("https://example.com"));
     }
 
     #[test]

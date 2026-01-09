@@ -4,6 +4,7 @@ mod error;
 mod google;
 mod icloud;
 mod ui;
+mod utils;
 
 use cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventCache, EventId};
 use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, NaiveTime, Utc};
@@ -56,7 +57,7 @@ fn name_from_email(email: &str) -> String {
     let local = email.split('@').next().unwrap_or(email);
 
     // Split by common separators (., _, -)
-    let parts: Vec<&str> = local.split(|c| c == '.' || c == '_' || c == '-').collect();
+    let parts: Vec<&str> = local.split(['.', '_', '-']).collect();
 
     // Capitalize each part and join with space
     parts
@@ -226,22 +227,22 @@ impl App {
     }
 
     fn next_day(&mut self) {
-        self.selected_date = self.selected_date + Duration::days(1);
+        self.selected_date += Duration::days(1);
         self.sync_month_if_needed();
     }
 
     fn prev_day(&mut self) {
-        self.selected_date = self.selected_date - Duration::days(1);
+        self.selected_date -= Duration::days(1);
         self.sync_month_if_needed();
     }
 
     fn next_week(&mut self) {
-        self.selected_date = self.selected_date + Duration::days(7);
+        self.selected_date += Duration::days(7);
         self.sync_month_if_needed();
     }
 
     fn prev_week(&mut self) {
-        self.selected_date = self.selected_date - Duration::days(7);
+        self.selected_date -= Duration::days(7);
         self.sync_month_if_needed();
     }
 
@@ -315,22 +316,20 @@ impl App {
             let current_time = Local::now().time();
 
             // Check Google events for current/next
-            if let Some((idx, is_current_or_next)) = find_current_or_next_event(google_events, current_time) {
-                if is_current_or_next {
+            if let Some((idx, is_current_or_next)) = find_current_or_next_event(google_events, current_time)
+                && is_current_or_next {
                     self.selected_source = EventSource::Google;
                     self.selected_event_index = idx;
                     return;
                 }
-            }
 
             // Check iCloud events for current/next
-            if let Some((idx, is_current_or_next)) = find_current_or_next_event(icloud_events, current_time) {
-                if is_current_or_next {
+            if let Some((idx, is_current_or_next)) = find_current_or_next_event(icloud_events, current_time)
+                && is_current_or_next {
                     self.selected_source = EventSource::ICloud;
                     self.selected_event_index = idx;
                     return;
                 }
-            }
 
             // Compare the next events from both sources to find the earliest
             let google_next = find_current_or_next_event(google_events, current_time);
@@ -435,15 +434,12 @@ fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) 
         // Check if current (within event time range)
         if let Some(ref end_str) = event.end_time_str {
             let end_parts: Vec<&str> = end_str.split(':').collect();
-            if end_parts.len() == 2 {
-                if let (Ok(eh), Ok(em)) = (end_parts[0].parse::<u32>(), end_parts[1].parse::<u32>()) {
-                    if let Some(end_time) = NaiveTime::from_hms_opt(eh, em, 0) {
-                        if event_time <= current_time && current_time < end_time {
+            if end_parts.len() == 2
+                && let (Ok(eh), Ok(em)) = (end_parts[0].parse::<u32>(), end_parts[1].parse::<u32>())
+                    && let Some(end_time) = NaiveTime::from_hms_opt(eh, em, 0)
+                        && event_time <= current_time && current_time < end_time {
                             return Some((i, true)); // Current event
                         }
-                    }
-                }
-            }
         }
 
         // Check if next (starts after current time)
@@ -537,8 +533,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = mpsc::channel::<AsyncMessage>(32);
 
     // Spawn Google token refresh if needed
-    if let Some(refresh_token) = google_needs_refresh {
-        if let Some(ref google_config) = app.config.google {
+    if let Some(refresh_token) = google_needs_refresh
+        && let Some(ref google_config) = app.config.google {
             let auth = GoogleAuth::new(google_config.clone());
             let tx = tx.clone();
             tokio::spawn(async move {
@@ -552,7 +548,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
-    }
 
     // Enable raw mode
     enable_raw_mode()?;
@@ -613,8 +608,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if app.icloud_needs_fetch {
             if let ICloudAuthState::Authenticated { ref calendars } = app.icloud_auth {
                 let (start, end) = app.month_range();
-                if !app.events.icloud.has_month(start) {
-                    if let Some(ref icloud_config) = app.config.icloud {
+                if !app.events.icloud.has_month(start)
+                    && let Some(ref icloud_config) = app.config.icloud {
                         let auth = ICloudAuth::new(icloud_config.clone());
                         let client = CalDavClient::new(auth);
                         let calendars = calendars.clone();
@@ -639,7 +634,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = tx.send(AsyncMessage::ICloudEvents(all_events, start)).await;
                         });
                     }
-                }
             }
             app.icloud_needs_fetch = false;
         }
@@ -828,9 +822,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Poll for Google device code if awaiting
-        if let GoogleAuthState::AwaitingUserCode { ref device_code, expires_at, .. } = app.google_auth {
-            if Utc::now() < expires_at {
-                if let Some(ref google_config) = app.config.google {
+        if let GoogleAuthState::AwaitingUserCode { ref device_code, expires_at, .. } = app.google_auth
+            && Utc::now() < expires_at
+                && let Some(ref google_config) = app.config.google {
                     let auth = GoogleAuth::new(google_config.clone());
                     let device_code = device_code.clone();
                     let tx = tx.clone();
@@ -859,13 +853,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 }
-            }
-        }
 
         // Handle keyboard input with timeout
-        if event::poll(StdDuration::from_millis(100))? {
-            if let Event::Key(key_event) = event::read()? {
-                if key_event.kind == KeyEventKind::Press {
+        if event::poll(StdDuration::from_millis(100))?
+            && let Event::Key(key_event) = event::read()?
+                && key_event.kind == KeyEventKind::Press {
                     // Handle Event navigation mode (month view only)
                     if app.navigation_mode == NavigationMode::Event && app.view_mode == ViewMode::Month {
                         match key_event.code {
@@ -877,13 +869,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Char('J') => {
                                 // Join meeting
-                                if let Some(event) = app.get_selected_event() {
-                                    if let Some(ref url) = event.meeting_url {
+                                if let Some(event) = app.get_selected_event()
+                                    && let Some(ref url) = event.meeting_url {
                                         let _ = std::process::Command::new("xdg-open")
                                             .arg(url)
                                             .spawn();
                                     }
-                                }
                             }
                             KeyCode::Char('a') | KeyCode::Char('а') => {
                                 // Accept event (Google only)
@@ -1121,8 +1112,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
-            }
-        }
     }
 
     // Cleanup

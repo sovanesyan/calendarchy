@@ -81,7 +81,7 @@ impl SourceCache {
         for event in events {
             self.by_date
                 .entry(event.date)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(event);
         }
         self.fetched_months.insert((year, month));
