@@ -160,6 +160,7 @@ fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) -> D
 pub enum ViewMode {
     Month,
     Week,
+    Day,
 }
 
 /// Navigation mode for two-level navigation in month view
@@ -526,6 +527,22 @@ impl App {
             }
             check_date -= Duration::days(1);
         }
+    }
+
+    /// Toggle between Month and Week views
+    fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Month => ViewMode::Week,
+            ViewMode::Week => ViewMode::Month,
+            ViewMode::Day => ViewMode::Month,
+        };
+        // Exit event mode when switching views
+        self.exit_event_mode();
+    }
+
+    /// Enter day view for the selected date
+    fn enter_day_view(&mut self) {
+        self.view_mode = ViewMode::Day;
     }
 }
 
@@ -1002,6 +1019,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Char('D') => {
                                 app.show_logs = !app.show_logs;
                             }
+                            KeyCode::Char('v') | KeyCode::Char('ж') => {
+                                // Enter day view for the selected date
+                                app.enter_day_view();
+                            }
                             KeyCode::Char('1') => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://calendar.google.com")
@@ -1011,6 +1032,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://www.icloud.com/calendar")
                                     .spawn();
+                            }
+                            KeyCode::Char('q') | KeyCode::Char('я') => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Handle Day view mode
+                    if app.view_mode == ViewMode::Day {
+                        match key_event.code {
+                            KeyCode::Char('h') | KeyCode::Char('х') | KeyCode::Left => {
+                                app.prev_day();
+                            }
+                            KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right => {
+                                app.next_day();
+                            }
+                            KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
+                                app.next_week();
+                            }
+                            KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
+                                app.prev_week();
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('т') => {
+                                app.goto_today();
+                            }
+                            KeyCode::Esc => {
+                                // Return to month view with event mode
+                                app.view_mode = ViewMode::Month;
+                                app.enter_event_mode();
                             }
                             KeyCode::Char('q') | KeyCode::Char('я') => {
                                 break;
@@ -1051,13 +1103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.status_message = Some("Refreshing...".to_string());
                         }
                         KeyCode::Char('v') | KeyCode::Char('ж') => {
-                            // Toggle between month and week view
-                            app.view_mode = match app.view_mode {
-                                ViewMode::Month => ViewMode::Week,
-                                ViewMode::Week => ViewMode::Month,
-                            };
-                            // Exit event mode when switching views
-                            app.exit_event_mode();
+                            // Toggle between Month and Week views
+                            app.toggle_view_mode();
                         }
                         KeyCode::Char('s') | KeyCode::Char('с') => {
                             // Toggle weekends (only meaningful in week view)

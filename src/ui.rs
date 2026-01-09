@@ -1,6 +1,6 @@
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
 use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike, Weekday};
 use crossterm::{
     cursor,
     execute,
@@ -71,6 +71,107 @@ pub struct RenderState<'a> {
     pub selected_event_index: usize,
 }
 
+/// Information about an upcoming event for the countdown display
+pub struct NextEventInfo<'a> {
+    pub event: &'a DisplayEvent,
+    pub is_current: bool,      // Event is happening right now
+    pub minutes_until: i64,    // Minutes until start (negative if already started)
+}
+
+/// Find the next upcoming event across all sources
+fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: NaiveTime) -> Option<NextEventInfo<'a>> {
+    // Check today's events first
+    let all_today: Vec<&DisplayEvent> = events.google.get(today).iter()
+        .chain(events.icloud.get(today).iter())
+        .filter(|e| e.accepted) // Only show accepted events
+        .collect();
+
+    // Find current or next event today
+    for event in &all_today {
+        if event.time_str == "All day" {
+            continue;
+        }
+
+        let Some(start_time) = parse_event_time(&event.time_str) else {
+            continue;
+        };
+
+        // Calculate end time
+        let end_time = event.end_time_str.as_ref()
+            .and_then(|s| parse_event_time(s))
+            .unwrap_or_else(|| start_time + chrono::Duration::hours(1));
+
+        if current_time < end_time {
+            // This event hasn't ended yet
+            let minutes_until = (start_time - current_time).num_minutes();
+            let is_current = current_time >= start_time;
+
+            return Some(NextEventInfo {
+                event,
+                is_current,
+                minutes_until,
+            });
+        }
+    }
+
+    // Check future days (up to 7 days ahead)
+    for days_ahead in 1..=7 {
+        let check_date = today + Duration::days(days_ahead);
+        let future_events: Vec<&DisplayEvent> = events.google.get(check_date).iter()
+            .chain(events.icloud.get(check_date).iter())
+            .filter(|e| e.accepted && e.time_str != "All day")
+            .collect();
+
+        if let Some(event) = future_events.first() {
+            if let Some(start_time) = parse_event_time(&event.time_str) {
+                // Calculate minutes from now until the event
+                // Remaining today + full days + time into target day
+                let remaining_today = (NaiveTime::from_hms_opt(23, 59, 59).unwrap() - current_time).num_minutes();
+                let full_days_minutes = (days_ahead - 1) * 24 * 60;
+                let target_day_minutes = (start_time - NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_minutes();
+                let minutes_until = remaining_today + full_days_minutes + target_day_minutes + 1;
+
+                return Some(NextEventInfo {
+                    event,
+                    is_current: false,
+                    minutes_until,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Format the countdown string for display
+fn format_countdown(info: &NextEventInfo, max_title_len: usize) -> String {
+    let title = truncate_str(&info.event.title, max_title_len);
+
+    if info.is_current {
+        format!("Now: {}", title)
+    } else if info.minutes_until <= 0 {
+        format!("Now: {}", title)
+    } else if info.minutes_until < 60 {
+        format!("Next: {} in {}m", title, info.minutes_until)
+    } else if info.minutes_until < 24 * 60 {
+        let hours = info.minutes_until / 60;
+        let mins = info.minutes_until % 60;
+        if mins > 0 {
+            format!("Next: {} in {}h {}m", title, hours, mins)
+        } else {
+            format!("Next: {} in {}h", title, hours)
+        }
+    } else {
+        let days = info.minutes_until / (24 * 60);
+        let hours = (info.minutes_until % (24 * 60)) / 60;
+        if hours > 0 {
+            format!("Next: {} in {}d {}h", title, days, hours)
+        } else {
+            format!("Next: {} in {}d", title, days)
+        }
+    }
+}
+
 pub fn render(state: &RenderState) {
     let mut out = stdout();
     let today = Local::now().date_naive();
@@ -83,6 +184,7 @@ pub fn render(state: &RenderState) {
     match state.view_mode {
         ViewMode::Month => render_month_view(&mut out, state, today, term_width, term_height),
         ViewMode::Week => render_week_view(&mut out, state, today, term_width, term_height),
+        ViewMode::Day => render_day_view(&mut out, state, today, term_width, term_height),
     }
 
     // Render HTTP logs if enabled
@@ -110,18 +212,36 @@ pub fn render(state: &RenderState) {
         execute!(out, SetForegroundColor(colors::STATUS_MESSAGE)).unwrap();
         print!(" {}", truncate_str(msg, term_width as usize - 2));
         execute!(out, ResetColor).unwrap();
+    } else {
+        // Show countdown to next event when no status message
+        let current_time = Local::now().time();
+        if let Some(next_info) = find_next_event(state.events, today, current_time) {
+            let countdown = format_countdown(&next_info, 30);
+            if next_info.is_current {
+                execute!(out, SetForegroundColor(colors::CURRENT_EVENT)).unwrap();
+            } else if next_info.minutes_until <= 15 {
+                execute!(out, SetForegroundColor(colors::NEXT_EVENT)).unwrap();
+            } else {
+                execute!(out, SetForegroundColor(Color::White)).unwrap();
+            }
+            print!(" {}", countdown);
+            execute!(out, ResetColor).unwrap();
+        }
     }
 
     // Render controls based on current mode
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
 
-    let controls = if state.navigation_mode == NavigationMode::Event {
+    let controls = if state.view_mode == ViewMode::Day {
+        // Day view controls
+        String::from(" hl:day jk:week t:today Esc:back q:quit")
+    } else if state.navigation_mode == NavigationMode::Event {
         // Event navigation mode controls (event-specific actions shown in details panel)
-        String::from(" jk:nav 1:google 2:icloud D:logs Esc:back q:quit")
+        String::from(" jk:nav v:day 1:google 2:icloud D:logs Esc:back q:quit")
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" hjkl:nav t:today r:refresh v:view 1:google 2:icloud D:logs");
+        let mut c = String::from(" hjkl:nav t:today r:refresh v:view");
         if state.view_mode == ViewMode::Month {
             c.push_str(" Enter:events");
         }
@@ -950,6 +1070,186 @@ fn days_in_month(date: NaiveDate) -> u32 {
         }
         _ => 30,
     }
+}
+
+/// Render day view with hourly timeline
+fn render_day_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
+    let now = Local::now();
+    let current_time = now.time();
+    let is_today = state.selected_date == today;
+
+    // Header with date
+    execute!(out, cursor::MoveTo(0, 0)).unwrap();
+    execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
+    print!("{}", state.selected_date.format("%A, %B %d, %Y"));
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    if is_today {
+        execute!(out, SetForegroundColor(colors::TODAY)).unwrap();
+        print!(" (Today)");
+        execute!(out, ResetColor).unwrap();
+    }
+
+    // Separator
+    draw_separator(out, 0, 1, term_width);
+
+    // Collect all events for this day
+    let google_events = state.events.google.get(state.selected_date);
+    let icloud_events = state.events.icloud.get(state.selected_date);
+
+    // Time column width
+    let time_col_width = 6u16; // "HH:MM "
+    let content_width = term_width.saturating_sub(time_col_width + 1);
+
+    // Calculate visible hours based on events and current time
+    let (start_hour, end_hour) = calculate_visible_hours(google_events, icloud_events, is_today, current_time);
+
+    let available_rows = term_height.saturating_sub(4) as usize;
+    let hours_to_show = end_hour - start_hour;
+    let rows_per_hour = (available_rows / hours_to_show).max(1);
+
+    // Render timeline
+    let mut current_row = 2u16;
+
+    for hour in start_hour..end_hour {
+        if current_row >= term_height.saturating_sub(2) {
+            break;
+        }
+
+        // Hour label
+        execute!(out, cursor::MoveTo(0, current_row)).unwrap();
+        execute!(out, SetForegroundColor(colors::MUTED)).unwrap();
+        print!("{:02}:00 ", hour);
+        execute!(out, ResetColor).unwrap();
+
+        // Vertical line
+        execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
+        print!("\u{2502}");
+        execute!(out, ResetColor).unwrap();
+
+        // Current time indicator
+        if is_today && current_time.hour() == hour as u32 {
+            execute!(out, cursor::MoveTo(time_col_width, current_row)).unwrap();
+            execute!(out, SetForegroundColor(colors::CURRENT_EVENT)).unwrap();
+            let mins = current_time.minute();
+            let indicator_offset = (mins as usize * rows_per_hour) / 60;
+            if indicator_offset == 0 {
+                print!("\u{25B6}"); // Current time marker
+            }
+        }
+
+        // Find events that occur in this hour
+        let hour_events: Vec<(&DisplayEvent, bool)> = google_events.iter()
+            .map(|e| (e, true)) // true = Google
+            .chain(icloud_events.iter().map(|e| (e, false)))
+            .filter(|(e, _)| {
+                if let Some(start) = parse_event_time(&e.time_str) {
+                    start.hour() == hour as u32
+                } else if e.time_str == "All day" {
+                    hour == start_hour // Show all-day events at start
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        // Render events for this hour
+        if !hour_events.is_empty() {
+            let event_x = time_col_width + 2;
+            for (offset, (event, is_google)) in hour_events.iter().enumerate() {
+                let event_row = current_row + offset as u16;
+                if event_row >= term_height.saturating_sub(2) {
+                    break;
+                }
+
+                execute!(out, cursor::MoveTo(event_x, event_row)).unwrap();
+
+                // Source indicator
+                let source_color = if *is_google { colors::GOOGLE_ACCENT } else { colors::ICLOUD_ACCENT };
+                execute!(out, SetForegroundColor(source_color)).unwrap();
+                print!("\u{25CF} ");
+
+                // Determine event color
+                let is_past = is_today && is_event_past(event, current_time);
+                let is_current = is_today && !is_past && {
+                    if let (Some(start), Some(end)) = (parse_event_time(&event.time_str), event.end_time_str.as_ref().and_then(|s| parse_event_time(s))) {
+                        start <= current_time && current_time < end
+                    } else {
+                        false
+                    }
+                };
+
+                let event_color = if !event.accepted {
+                    colors::PAST_EVENT
+                } else if is_current {
+                    colors::CURRENT_EVENT
+                } else if is_past {
+                    colors::PAST_EVENT
+                } else {
+                    Color::White
+                };
+
+                execute!(out, SetForegroundColor(event_color)).unwrap();
+
+                // Time and title
+                let time_title = if event.time_str == "All day" {
+                    format!("[All day] {}", event.title)
+                } else if let Some(ref end) = event.end_time_str {
+                    format!("{}-{} {}", event.time_str, end, event.title)
+                } else {
+                    format!("{} {}", event.time_str, event.title)
+                };
+
+                print!("{}", truncate_str(&time_title, content_width.saturating_sub(4) as usize));
+                execute!(out, ResetColor).unwrap();
+            }
+        }
+
+        // Move to next hour
+        current_row += rows_per_hour as u16;
+    }
+
+}
+
+/// Calculate the visible hour range based on events
+fn calculate_visible_hours(
+    google_events: &[DisplayEvent],
+    icloud_events: &[DisplayEvent],
+    is_today: bool,
+    current_time: NaiveTime,
+) -> (usize, usize) {
+    let mut earliest = 9usize; // Default start
+    let mut latest = 18usize;  // Default end
+
+    // Find earliest and latest event times
+    for event in google_events.iter().chain(icloud_events.iter()) {
+        if let Some(start) = parse_event_time(&event.time_str) {
+            earliest = earliest.min(start.hour() as usize);
+            if let Some(end) = event.end_time_str.as_ref().and_then(|s| parse_event_time(s)) {
+                latest = latest.max(end.hour() as usize + 1);
+            } else {
+                latest = latest.max(start.hour() as usize + 1);
+            }
+        }
+    }
+
+    // Include current hour if today
+    if is_today {
+        let current_hour = current_time.hour() as usize;
+        earliest = earliest.min(current_hour);
+        latest = latest.max(current_hour + 1);
+    }
+
+    // Ensure reasonable bounds
+    earliest = earliest.max(0);
+    latest = latest.min(24);
+
+    // Ensure at least 1 hour difference
+    if latest <= earliest {
+        latest = earliest + 1;
+    }
+
+    (earliest, latest)
 }
 
 #[cfg(test)]
