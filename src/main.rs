@@ -972,6 +972,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Esc => {
                                 app.exit_event_mode();
                             }
+                            KeyCode::Char('D') => {
+                                app.show_logs = !app.show_logs;
+                            }
                             KeyCode::Char('1') => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://calendar.google.com")
