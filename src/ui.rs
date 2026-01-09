@@ -38,13 +38,6 @@ mod colors {
     pub const LOCATION: Color = Color::Yellow;
     pub const ACTION: Color = Color::Green;
 
-    // Attendee status
-    pub const ACCEPTED: Color = Color::Green;
-    pub const ORGANIZER: Color = Color::Blue;
-    pub const DECLINED: Color = Color::Red;
-    pub const TENTATIVE: Color = Color::Yellow;
-    pub const NEEDS_ACTION: Color = Color::DarkGrey;
-
     // Status bar
     pub const LOG_TEXT: Color = Color::DarkCyan;
     pub const STATUS_MESSAGE: Color = Color::Yellow;
@@ -865,15 +858,8 @@ fn render_event_details_column(
             execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
 
             // Status icon
-            let (icon, color) = match attendee.status {
-                AttendeeStatus::Accepted => ("\u{2713}", colors::ACCEPTED),
-                AttendeeStatus::Organizer => ("\u{2713}", colors::ORGANIZER),
-                AttendeeStatus::Declined => ("\u{2717}", colors::DECLINED),
-                AttendeeStatus::Tentative => ("?", colors::TENTATIVE),
-                AttendeeStatus::NeedsAction => ("?", colors::NEEDS_ACTION),
-            };
-            execute!(out, SetForegroundColor(color)).unwrap();
-            print!("  {} ", icon);
+            execute!(out, SetForegroundColor(attendee.status.color())).unwrap();
+            print!("  {} ", attendee.status.icon());
             execute!(out, ResetColor).unwrap();
 
             // Name or email

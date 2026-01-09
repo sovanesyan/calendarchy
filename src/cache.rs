@@ -22,6 +22,29 @@ pub enum AttendeeStatus {
     Organizer,
 }
 
+impl AttendeeStatus {
+    /// Get the display icon for this status
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Accepted | Self::Organizer => "\u{2713}", // ✓
+            Self::Declined => "\u{2717}",                   // ✗
+            Self::Tentative | Self::NeedsAction => "?",
+        }
+    }
+
+    /// Get the display color for this status
+    pub fn color(&self) -> crossterm::style::Color {
+        use crossterm::style::Color;
+        match self {
+            Self::Accepted => Color::Green,
+            Self::Organizer => Color::Blue,
+            Self::Declined => Color::Red,
+            Self::Tentative => Color::Yellow,
+            Self::NeedsAction => Color::DarkGrey,
+        }
+    }
+}
+
 /// Event identifier for API actions (accept/decline/delete)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventId {

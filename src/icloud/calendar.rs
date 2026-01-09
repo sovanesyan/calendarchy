@@ -1,4 +1,4 @@
-use crate::error::{CalendarchyError, Result};
+use crate::error::{check_caldav_response, check_caldav_response_no_body, CalendarchyError, Result};
 use crate::icloud::auth::ICloudAuth;
 use crate::icloud::types::ICalEvent;
 use crate::{log_request, log_response};
@@ -77,16 +77,7 @@ impl CalDavClient {
             .await?;
         log_response(response.status().as_u16(), calendar_url);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::CalDav(format!(
-                "REPORT failed {}: {}",
-                status, body
-            )));
-        }
-
-        let xml = response.text().await?;
+        let xml = check_caldav_response(response, "REPORT failed").await?;
         let events = self.parse_calendar_multiget(&xml, calendar_url)?;
 
         Ok(events)
@@ -113,16 +104,7 @@ impl CalDavClient {
             .await?;
         log_response(response.status().as_u16(), CALDAV_SERVER);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::CalDav(format!(
-                "Principal discovery failed {}: {}",
-                status, body
-            )));
-        }
-
-        let xml = response.text().await?;
+        let xml = check_caldav_response(response, "Principal discovery failed").await?;
         self.extract_href(&xml, "current-user-principal")
             .ok_or_else(|| CalendarchyError::CalDav("Could not find principal URL".to_string()))
     }
@@ -150,16 +132,7 @@ impl CalDavClient {
             .await?;
         log_response(response.status().as_u16(), &url);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::CalDav(format!(
-                "Calendar home discovery failed {}: {}",
-                status, body
-            )));
-        }
-
-        let xml = response.text().await?;
+        let xml = check_caldav_response(response, "Calendar home discovery failed").await?;
         self.extract_href(&xml, "calendar-home-set")
             .ok_or_else(|| CalendarchyError::CalDav("Could not find calendar home".to_string()))
     }
@@ -189,16 +162,7 @@ impl CalDavClient {
             .await?;
         log_response(response.status().as_u16(), &url);
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::CalDav(format!(
-                "Calendar list failed {}: {}",
-                status, body
-            )));
-        }
-
-        let xml = response.text().await?;
+        let xml = check_caldav_response(response, "Calendar list failed").await?;
         Ok(self.parse_calendar_list(&xml))
     }
 
@@ -412,21 +376,7 @@ impl CalDavClient {
         let response = request.send().await?;
         log_response(response.status().as_u16(), &event_url);
 
-        // 204 No Content or 200 OK means success, 404 means already deleted
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(()); // Already deleted, consider success
-        }
-
-        if !response.status().is_success() && response.status() != reqwest::StatusCode::NO_CONTENT {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::CalDav(format!(
-                "Failed to delete event {}: {}",
-                status, body
-            )));
-        }
-
-        Ok(())
+        check_caldav_response_no_body(response, "Failed to delete event").await
     }
 }
 
