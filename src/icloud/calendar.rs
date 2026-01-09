@@ -1,6 +1,7 @@
 use crate::error::{CalendarchyError, Result};
 use crate::icloud::auth::ICloudAuth;
 use crate::icloud::types::ICalEvent;
+use crate::{log_request, log_response};
 use chrono::NaiveDate;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -64,6 +65,7 @@ impl CalDavClient {
             start_str, end_str
         );
 
+        log_request("REPORT", calendar_url);
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"REPORT").unwrap(), calendar_url)
@@ -73,6 +75,7 @@ impl CalDavClient {
             .body(body)
             .send()
             .await?;
+        log_response(response.status().as_u16(), calendar_url);
 
         if !response.status().is_success() {
             let status = response.status();
@@ -98,6 +101,7 @@ impl CalDavClient {
   </d:prop>
 </d:propfind>"#;
 
+        log_request("PROPFIND", CALDAV_SERVER);
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), CALDAV_SERVER)
@@ -107,6 +111,7 @@ impl CalDavClient {
             .body(body)
             .send()
             .await?;
+        log_response(response.status().as_u16(), CALDAV_SERVER);
 
         if !response.status().is_success() {
             let status = response.status();
@@ -133,6 +138,7 @@ impl CalDavClient {
   </d:prop>
 </d:propfind>"#;
 
+        log_request("PROPFIND", &url);
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
@@ -142,6 +148,7 @@ impl CalDavClient {
             .body(body)
             .send()
             .await?;
+        log_response(response.status().as_u16(), &url);
 
         if !response.status().is_success() {
             let status = response.status();
@@ -170,6 +177,7 @@ impl CalDavClient {
   </d:prop>
 </d:propfind>"#;
 
+        log_request("PROPFIND", &url);
         let response = self
             .client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
@@ -179,6 +187,7 @@ impl CalDavClient {
             .body(body)
             .send()
             .await?;
+        log_response(response.status().as_u16(), &url);
 
         if !response.status().is_success() {
             let status = response.status();
@@ -390,6 +399,7 @@ impl CalDavClient {
             event_uid
         );
 
+        log_request("DELETE", &event_url);
         let mut request = self
             .client
             .delete(&event_url)
@@ -401,6 +411,7 @@ impl CalDavClient {
         }
 
         let response = request.send().await?;
+        log_response(response.status().as_u16(), &event_url);
 
         // 204 No Content or 200 OK means success, 404 means already deleted
         if response.status() == reqwest::StatusCode::NOT_FOUND {

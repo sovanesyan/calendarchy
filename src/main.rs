@@ -17,9 +17,46 @@ use crossterm::{
 use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
 use std::io::stdout;
+use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc;
 use ui::AuthDisplay;
+
+/// Global log storage for HTTP requests
+static HTTP_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Log an HTTP request
+pub fn log_request(method: &str, url: &str) {
+    if let Ok(mut logs) = HTTP_LOGS.lock() {
+        let timestamp = chrono::Local::now().format("%H:%M:%S");
+        logs.push(format!("[{}] {} {}", timestamp, method, url));
+        // Keep only last 100 logs
+        if logs.len() > 100 {
+            logs.remove(0);
+        }
+    }
+}
+
+/// Log an HTTP response
+pub fn log_response(status: u16, url: &str) {
+    if let Ok(mut logs) = HTTP_LOGS.lock() {
+        let timestamp = chrono::Local::now().format("%H:%M:%S");
+        logs.push(format!("[{}] <- {} {}", timestamp, status, url));
+        // Keep only last 100 logs
+        if logs.len() > 100 {
+            logs.remove(0);
+        }
+    }
+}
+
+/// Get recent logs for display
+pub fn get_recent_logs(count: usize) -> Vec<String> {
+    if let Ok(logs) = HTTP_LOGS.lock() {
+        logs.iter().rev().take(count).cloned().collect()
+    } else {
+        Vec::new()
+    }
+}
 
 /// View mode for the calendar
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +144,7 @@ struct App {
     selected_date: NaiveDate,
     view_mode: ViewMode,
     show_weekends: bool,
+    show_logs: bool, // Toggle HTTP request logs display
     events: EventCache,
     google_auth: GoogleAuthState,
     icloud_auth: ICloudAuthState,
@@ -129,11 +167,12 @@ impl App {
         // Load cached events from disk for instant display
         events.load_from_disk();
 
-        Self {
+        let mut app = Self {
             current_date: today,
             selected_date: today,
             view_mode: ViewMode::Month,
             show_weekends: false,
+            show_logs: false,
             events,
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
@@ -146,7 +185,12 @@ impl App {
             navigation_mode: NavigationMode::Day,
             selected_source: EventSource::Google,
             selected_event_index: 0,
-        }
+        };
+
+        // Auto-enter event mode with current/next event selected
+        app.enter_event_mode();
+
+        app
     }
 
     fn next_day(&mut self) {
@@ -490,6 +534,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             navigation_mode: app.navigation_mode,
             selected_source: app.selected_source,
             selected_event_index: app.selected_event_index,
+            show_logs: app.show_logs,
         };
         ui::render(&render_state);
 
@@ -926,6 +971,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('s') | KeyCode::Char('с') => {
                             // Toggle weekends (only meaningful in week view)
                             app.show_weekends = !app.show_weekends;
+                        }
+                        KeyCode::Char('D') => {
+                            // Toggle HTTP request logs display
+                            app.show_logs = !app.show_logs;
                         }
                         KeyCode::Char('g') | KeyCode::Char('г') => {
                             // Start Google auth flow (only if not already authenticated)

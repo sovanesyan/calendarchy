@@ -1,5 +1,5 @@
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
-use crate::{EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
+use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 use crossterm::{
     cursor,
@@ -17,6 +17,7 @@ pub struct RenderState<'a> {
     pub selected_date: NaiveDate,
     pub view_mode: ViewMode,
     pub show_weekends: bool,
+    pub show_logs: bool,
     pub events: &'a EventCache,
     pub google_auth: &'a GoogleAuthState,
     pub icloud_auth: &'a ICloudAuthState,
@@ -41,6 +42,23 @@ pub fn render(state: &RenderState) {
     match state.view_mode {
         ViewMode::Month => render_month_view(&mut out, state, today, term_width, term_height),
         ViewMode::Week => render_week_view(&mut out, state, today, term_width, term_height),
+    }
+
+    // Render HTTP logs if enabled
+    let log_height = if state.show_logs { 8 } else { 0 };
+    if state.show_logs {
+        let logs = get_recent_logs(log_height as usize);
+        let log_start_row = term_height.saturating_sub(2 + log_height);
+
+        execute!(out, SetForegroundColor(Color::DarkCyan)).unwrap();
+        for (i, log) in logs.iter().rev().enumerate() {
+            let row = log_start_row + i as u16;
+            if row < term_height.saturating_sub(2) {
+                execute!(out, cursor::MoveTo(0, row)).unwrap();
+                print!(" {}", truncate_str(log, term_width as usize - 2));
+            }
+        }
+        execute!(out, ResetColor).unwrap();
     }
 
     // Render status bar at bottom
@@ -77,11 +95,11 @@ pub fn render(state: &RenderState) {
             c.push_str(" x:delete");
         }
 
-        c.push_str(" Esc:back q:quit");
+        c.push_str(" D:logs Esc:back q:quit");
         c
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" hjkl:nav t:today r:refresh v:view");
+        let mut c = String::from(" hjkl:nav t:today r:refresh v:view D:logs");
         if state.view_mode == ViewMode::Month {
             c.push_str(" Enter:events");
         }

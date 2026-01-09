@@ -1,6 +1,7 @@
 use crate::config::GoogleConfig;
 use crate::error::{CalendarchyError, Result};
 use crate::google::types::{DeviceCodeResponse, TokenInfo, TokenResponse};
+use crate::{log_request, log_response};
 use chrono::Utc;
 use reqwest::Client;
 
@@ -32,6 +33,7 @@ impl GoogleAuth {
 
     /// Step 1: Request device code
     pub async fn request_device_code(&self) -> Result<DeviceCodeResponse> {
+        log_request("POST", DEVICE_CODE_URL);
         let response = self
             .client
             .post(DEVICE_CODE_URL)
@@ -41,6 +43,7 @@ impl GoogleAuth {
             ])
             .send()
             .await?;
+        log_response(response.status().as_u16(), DEVICE_CODE_URL);
 
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -56,6 +59,7 @@ impl GoogleAuth {
 
     /// Step 2: Poll for token (call this repeatedly)
     pub async fn poll_for_token(&self, device_code: &str) -> Result<PollResult> {
+        log_request("POST", TOKEN_URL);
         let response = self
             .client
             .post(TOKEN_URL)
@@ -67,6 +71,7 @@ impl GoogleAuth {
             ])
             .send()
             .await?;
+        log_response(response.status().as_u16(), TOKEN_URL);
 
         if response.status().is_success() {
             let token_response: TokenResponse = response.json().await?;
@@ -95,6 +100,7 @@ impl GoogleAuth {
     /// Refresh an expired token
     #[allow(dead_code)]
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenInfo> {
+        log_request("POST", &format!("{} (refresh)", TOKEN_URL));
         let response = self
             .client
             .post(TOKEN_URL)
@@ -106,6 +112,7 @@ impl GoogleAuth {
             ])
             .send()
             .await?;
+        log_response(response.status().as_u16(), TOKEN_URL);
 
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();

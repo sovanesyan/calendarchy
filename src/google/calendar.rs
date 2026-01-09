@@ -1,5 +1,6 @@
 use crate::error::{CalendarchyError, Result};
 use crate::google::types::{CalendarEvent, EventsListResponse, TokenInfo};
+use crate::{log_request, log_response};
 use chrono::NaiveDate;
 use reqwest::Client;
 
@@ -54,7 +55,9 @@ impl CalendarClient {
                 request = request.query(&[("pageToken", pt.as_str())]);
             }
 
+            log_request("GET", &url);
             let response = request.send().await?;
+            log_response(response.status().as_u16(), &url);
 
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(CalendarchyError::TokenExpired);
@@ -100,12 +103,14 @@ impl CalendarClient {
         );
 
         // First, get the current event to find our attendee entry
+        log_request("GET", &url);
         let get_response = self
             .client
             .get(&url)
             .bearer_auth(&token.access_token)
             .send()
             .await?;
+        log_response(get_response.status().as_u16(), &url);
 
         if get_response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(CalendarchyError::TokenExpired);
@@ -133,6 +138,7 @@ impl CalendarClient {
         }
 
         // PATCH the event back
+        log_request("PATCH", &url);
         let patch_response = self
             .client
             .patch(&url)
@@ -141,6 +147,7 @@ impl CalendarClient {
             .json(&event)
             .send()
             .await?;
+        log_response(patch_response.status().as_u16(), &url);
 
         if patch_response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(CalendarchyError::TokenExpired);
@@ -172,6 +179,7 @@ impl CalendarClient {
             urlencoding::encode(event_id)
         );
 
+        log_request("DELETE", &url);
         let response = self
             .client
             .delete(&url)
@@ -179,6 +187,7 @@ impl CalendarClient {
             .query(&[("sendUpdates", "none")]) // Don't send notification emails
             .send()
             .await?;
+        log_response(response.status().as_u16(), &url);
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(CalendarchyError::TokenExpired);
