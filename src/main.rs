@@ -5,7 +5,7 @@ mod google;
 mod icloud;
 mod ui;
 
-use cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventCache};
+use cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventCache, EventId};
 use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, NaiveTime, Utc};
 use config::Config;
 use crossterm::{
@@ -390,7 +390,7 @@ enum AsyncMessage {
     GoogleToken(TokenInfo),
     GoogleAuthPending,
     GoogleAuthError(String),
-    GoogleEvents(Vec<google::CalendarEvent>, NaiveDate),
+    GoogleEvents(Vec<google::CalendarEvent>, NaiveDate, String), // events, month_date, calendar_id
     GoogleFetchError(String),
     GoogleTokenRefreshed(TokenInfo),
     GoogleRefreshFailed(String),
@@ -400,6 +400,10 @@ enum AsyncMessage {
     ICloudDiscoveryError(String),
     ICloudEvents(Vec<ICalEvent>, NaiveDate),
     ICloudFetchError(String),
+
+    // Event action messages
+    EventActionSuccess(String), // Success message
+    EventActionError(String),   // Error message
 }
 
 #[tokio::main]
@@ -501,11 +505,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let tx = tx.clone();
 
                     app.google_loading = true;
+                    let calendar_id_clone = calendar_id.clone();
                     tokio::spawn(async move {
                         let client = CalendarClient::new();
                         match client.list_events(&tokens, &calendar_id, start, end).await {
                             Ok(events) => {
-                                let _ = tx.send(AsyncMessage::GoogleEvents(events, start)).await;
+                                let _ = tx.send(AsyncMessage::GoogleEvents(events, start, calendar_id_clone)).await;
                             }
                             Err(e) => {
                                 let _ = tx.send(AsyncMessage::GoogleFetchError(e.to_string())).await;
@@ -575,7 +580,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::GoogleAuthError(msg) => {
                     app.google_auth = GoogleAuthState::Error(msg);
                 }
-                AsyncMessage::GoogleEvents(events, month_date) => {
+                AsyncMessage::GoogleEvents(events, month_date, calendar_id) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
                         .filter_map(|e| {
@@ -603,6 +608,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }).unwrap_or_default();
 
                             Some(DisplayEvent {
+                                id: EventId::Google {
+                                    calendar_id: calendar_id.clone(),
+                                    event_id: e.id.clone(),
+                                },
                                 title: e.title().to_string(),
                                 time_str: e.time_str(),
                                 end_time_str: e.end_time_str(),
@@ -671,6 +680,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .collect();
 
                             DisplayEvent {
+                                id: EventId::ICloud {
+                                    calendar_url: e.calendar_url.clone(),
+                                    event_uid: e.uid.clone(),
+                                    etag: e.etag.clone(),
+                                },
                                 title: e.title().to_string(),
                                 time_str: e.time_str(),
                                 end_time_str: e.end_time_str(),
@@ -690,6 +704,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::ICloudFetchError(msg) => {
                     app.status_message = Some(format!("iCloud: {}", msg));
                     app.icloud_loading = false;
+                }
+
+                // Event action messages
+                AsyncMessage::EventActionSuccess(msg) => {
+                    app.status_message = Some(msg);
+                    // Refresh events to reflect the change
+                    app.events.clear();
+                    app.google_needs_fetch = true;
+                    app.icloud_needs_fetch = true;
+                    // Exit event mode after action
+                    app.exit_event_mode();
+                }
+                AsyncMessage::EventActionError(msg) => {
+                    app.status_message = Some(msg);
                 }
             }
         }
@@ -749,6 +777,99 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = std::process::Command::new("xdg-open")
                                             .arg(url)
                                             .spawn();
+                                    }
+                                }
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('а') => {
+                                // Accept event (Google only)
+                                if let Some(event) = app.get_selected_event() {
+                                    if let EventId::Google { calendar_id, event_id } = event.id.clone() {
+                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                            let tokens = tokens.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let client = CalendarClient::new();
+                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "accepted").await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event accepted".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to accept: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Accepting event...".to_string());
+                                        }
+                                    } else {
+                                        app.status_message = Some("Accept not supported for iCloud".to_string());
+                                    }
+                                }
+                            }
+                            KeyCode::Char('d') | KeyCode::Char('д') => {
+                                // Decline event (Google only)
+                                if let Some(event) = app.get_selected_event() {
+                                    if let EventId::Google { calendar_id, event_id } = event.id.clone() {
+                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                            let tokens = tokens.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let client = CalendarClient::new();
+                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "declined").await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event declined".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to decline: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Declining event...".to_string());
+                                        }
+                                    } else {
+                                        app.status_message = Some("Decline not supported for iCloud".to_string());
+                                    }
+                                }
+                            }
+                            KeyCode::Char('x') | KeyCode::Char('ь') => {
+                                // Delete event
+                                if let Some(event) = app.get_selected_event() {
+                                    match event.id.clone() {
+                                        EventId::Google { calendar_id, event_id } => {
+                                            if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                                let tokens = tokens.clone();
+                                                let tx = tx.clone();
+                                                tokio::spawn(async move {
+                                                    let client = CalendarClient::new();
+                                                    match client.delete_event(&tokens, &calendar_id, &event_id).await {
+                                                        Ok(()) => {
+                                                            let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
+                                                        }
+                                                    }
+                                                });
+                                                app.status_message = Some("Deleting event...".to_string());
+                                            }
+                                        }
+                                        EventId::ICloud { calendar_url, event_uid, etag } => {
+                                            if let Some(ref icloud_config) = app.config.icloud {
+                                                let auth = ICloudAuth::new(icloud_config.clone());
+                                                let client = CalDavClient::new(auth);
+                                                let tx = tx.clone();
+                                                tokio::spawn(async move {
+                                                    match client.delete_event(&calendar_url, &event_uid, etag.as_deref()).await {
+                                                        Ok(()) => {
+                                                            let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
+                                                        }
+                                                    }
+                                                });
+                                                app.status_message = Some("Deleting event...".to_string());
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -1,4 +1,4 @@
-use crate::cache::{AttendeeStatus, DisplayEvent, EventCache};
+use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
 use crate::{EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 use crossterm::{
@@ -61,7 +61,7 @@ pub fn render(state: &RenderState) {
         // Event navigation mode controls
         let mut c = String::from(" jk:nav");
 
-        // Check if selected event has meeting link
+        // Check if selected event has meeting link and source
         let selected_event = match state.selected_source {
             EventSource::Google => state.events.google.get(state.selected_date).get(state.selected_event_index),
             EventSource::ICloud => state.events.icloud.get(state.selected_date).get(state.selected_event_index),
@@ -70,6 +70,11 @@ pub fn render(state: &RenderState) {
             if event.meeting_url.is_some() {
                 c.push_str(" o:open");
             }
+            // Google events support accept/decline
+            if matches!(event.id, EventId::Google { .. }) {
+                c.push_str(" a:accept d:decline");
+            }
+            c.push_str(" x:delete");
         }
 
         c.push_str(" Esc:back q:quit");
@@ -894,6 +899,7 @@ mod tests {
 
     fn make_event(time: &str) -> DisplayEvent {
         DisplayEvent {
+            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string() },
             title: "Test".to_string(),
             time_str: time.to_string(),
             end_time_str: None,

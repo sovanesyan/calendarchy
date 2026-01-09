@@ -84,7 +84,7 @@ impl CalDavClient {
         }
 
         let xml = response.text().await?;
-        let events = self.parse_calendar_multiget(&xml)?;
+        let events = self.parse_calendar_multiget(&xml, calendar_url)?;
 
         Ok(events)
     }
@@ -262,35 +262,52 @@ impl CalDavClient {
     }
 
     /// Parse calendar-multiget response to extract events
-    fn parse_calendar_multiget(&self, xml: &str) -> Result<Vec<ICalEvent>> {
+    fn parse_calendar_multiget(&self, xml: &str, calendar_url: &str) -> Result<Vec<ICalEvent>> {
         let mut events = Vec::new();
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut in_calendar_data = false;
+        let mut in_etag = false;
         let mut calendar_data = String::new();
+        let mut current_etag: Option<String> = None;
+        let mut current_tag = String::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
                     let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                    current_tag = name.clone();
                     if name == "calendar-data" {
                         in_calendar_data = true;
                         calendar_data.clear();
+                    } else if name == "getetag" {
+                        in_etag = true;
                     }
                 }
                 Ok(Event::End(e)) => {
                     let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                     if name == "calendar-data" && in_calendar_data {
-                        let parsed = ICalEvent::parse_ical(&calendar_data);
+                        let parsed = ICalEvent::parse_ical_with_source(
+                            &calendar_data,
+                            calendar_url.to_string(),
+                            current_etag.clone(),
+                        );
                         events.extend(parsed);
                         in_calendar_data = false;
+                    } else if name == "getetag" {
+                        in_etag = false;
+                    } else if name == "response" {
+                        current_etag = None;
                     }
                 }
                 Ok(Event::Text(e)) => {
+                    let text = e.unescape().unwrap_or_default().to_string();
                     if in_calendar_data {
-                        calendar_data.push_str(&e.unescape().unwrap_or_default());
+                        calendar_data.push_str(&text);
+                    } else if in_etag || current_tag == "getetag" {
+                        current_etag = Some(text.trim_matches('"').to_string());
                     }
                 }
                 Ok(Event::CData(e)) => {
@@ -357,6 +374,49 @@ impl CalDavClient {
         } else {
             format!("{}{}", CALDAV_SERVER, path)
         }
+    }
+
+    /// Delete an event by its UID
+    pub async fn delete_event(
+        &self,
+        calendar_url: &str,
+        event_uid: &str,
+        etag: Option<&str>,
+    ) -> Result<()> {
+        // Construct event URL: calendar_url + uid + ".ics"
+        let event_url = format!(
+            "{}{}.ics",
+            calendar_url.trim_end_matches('/').to_string() + "/",
+            event_uid
+        );
+
+        let mut request = self
+            .client
+            .delete(&event_url)
+            .header("Authorization", self.auth.auth_header());
+
+        // Use etag for conditional delete if available
+        if let Some(tag) = etag {
+            request = request.header("If-Match", format!("\"{}\"", tag));
+        }
+
+        let response = request.send().await?;
+
+        // 204 No Content or 200 OK means success, 404 means already deleted
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(()); // Already deleted, consider success
+        }
+
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NO_CONTENT {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CalendarchyError::CalDav(format!(
+                "Failed to delete event {}: {}",
+                status, body
+            )));
+        }
+
+        Ok(())
     }
 }
 

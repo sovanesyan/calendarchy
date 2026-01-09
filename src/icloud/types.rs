@@ -22,6 +22,10 @@ pub struct ICalEvent {
     pub url: Option<String>,
     pub accepted: bool, // true if accepted or no PARTSTAT found
     pub attendees: Vec<ICalAttendee>,
+    /// The calendar URL this event belongs to (set by CalDavClient)
+    pub calendar_url: String,
+    /// The etag for conditional updates
+    pub etag: Option<String>,
 }
 
 /// Event time - can be all-day (date only) or specific time
@@ -95,6 +99,11 @@ impl ICalEvent {
 
     /// Parse an iCal VCALENDAR string into events
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
+        Self::parse_ical_with_source(ical_data, String::new(), None)
+    }
+
+    /// Parse an iCal VCALENDAR string into events with calendar source info
+    pub fn parse_ical_with_source(ical_data: &str, calendar_url: String, etag: Option<String>) -> Vec<ICalEvent> {
         let mut events = Vec::new();
         let mut current_event: Option<ICalEventBuilder> = None;
 
@@ -102,7 +111,10 @@ impl ICalEvent {
             let line = line.trim();
 
             if line == "BEGIN:VEVENT" {
-                current_event = Some(ICalEventBuilder::default());
+                let mut builder = ICalEventBuilder::default();
+                builder.calendar_url = calendar_url.clone();
+                builder.etag = etag.clone();
+                current_event = Some(builder);
             } else if line == "END:VEVENT" {
                 if let Some(builder) = current_event.take() {
                     if let Some(event) = builder.build() {
@@ -159,6 +171,8 @@ struct ICalEventBuilder {
     url: Option<String>,
     partstat: Option<String>, // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
     attendees: Vec<ICalAttendee>,
+    calendar_url: String,
+    etag: Option<String>,
 }
 
 impl ICalEventBuilder {
@@ -181,6 +195,8 @@ impl ICalEventBuilder {
             url: self.url,
             accepted,
             attendees: self.attendees,
+            calendar_url: self.calendar_url,
+            etag: self.etag,
         })
     }
 }

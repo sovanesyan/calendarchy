@@ -83,6 +83,119 @@ impl CalendarClient {
 
         Ok(all_events)
     }
+
+    /// Update the current user's response status for an event
+    pub async fn respond_to_event(
+        &self,
+        token: &TokenInfo,
+        calendar_id: &str,
+        event_id: &str,
+        response: &str, // "accepted", "declined", "tentative"
+    ) -> Result<()> {
+        let url = format!(
+            "{}/calendars/{}/events/{}",
+            CALENDAR_API_BASE,
+            urlencoding::encode(calendar_id),
+            urlencoding::encode(event_id)
+        );
+
+        // First, get the current event to find our attendee entry
+        let get_response = self
+            .client
+            .get(&url)
+            .bearer_auth(&token.access_token)
+            .send()
+            .await?;
+
+        if get_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CalendarchyError::TokenExpired);
+        }
+
+        if !get_response.status().is_success() {
+            let status = get_response.status();
+            let body = get_response.text().await.unwrap_or_default();
+            return Err(CalendarchyError::Api(format!(
+                "Failed to get event {}: {}",
+                status, body
+            )));
+        }
+
+        let mut event: CalendarEvent = get_response.json().await?;
+
+        // Update the self attendee's response status
+        if let Some(ref mut attendees) = event.attendees {
+            for attendee in attendees.iter_mut() {
+                if attendee.is_self == Some(true) {
+                    attendee.response_status = Some(response.to_string());
+                    break;
+                }
+            }
+        }
+
+        // PATCH the event back
+        let patch_response = self
+            .client
+            .patch(&url)
+            .bearer_auth(&token.access_token)
+            .query(&[("sendUpdates", "none")]) // Don't send notification emails
+            .json(&event)
+            .send()
+            .await?;
+
+        if patch_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CalendarchyError::TokenExpired);
+        }
+
+        if !patch_response.status().is_success() {
+            let status = patch_response.status();
+            let body = patch_response.text().await.unwrap_or_default();
+            return Err(CalendarchyError::Api(format!(
+                "Failed to update event {}: {}",
+                status, body
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Delete an event
+    pub async fn delete_event(
+        &self,
+        token: &TokenInfo,
+        calendar_id: &str,
+        event_id: &str,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/calendars/{}/events/{}",
+            CALENDAR_API_BASE,
+            urlencoding::encode(calendar_id),
+            urlencoding::encode(event_id)
+        );
+
+        let response = self
+            .client
+            .delete(&url)
+            .bearer_auth(&token.access_token)
+            .query(&[("sendUpdates", "none")]) // Don't send notification emails
+            .send()
+            .await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(CalendarchyError::TokenExpired);
+        }
+
+        // 204 No Content or 200 OK means success
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NO_CONTENT {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CalendarchyError::Api(format!(
+                "Failed to delete event {}: {}",
+                status, body
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for CalendarClient {
