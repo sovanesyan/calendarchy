@@ -25,6 +25,29 @@ use ui::AuthDisplay;
 /// Global log storage for HTTP requests
 static HTTP_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Sort order for attendee status (lower = first)
+fn status_sort_order(status: &AttendeeStatus) -> u8 {
+    match status {
+        AttendeeStatus::Organizer => 0,
+        AttendeeStatus::Accepted => 1,
+        AttendeeStatus::Tentative => 2,
+        AttendeeStatus::NeedsAction => 3,
+        AttendeeStatus::Declined => 4,
+    }
+}
+
+/// Sort attendees by status (accepted first, declined last), then by name
+fn sort_attendees(attendees: &mut [DisplayAttendee]) {
+    attendees.sort_by(|a, b| {
+        let status_cmp = status_sort_order(&a.status).cmp(&status_sort_order(&b.status));
+        if status_cmp != std::cmp::Ordering::Equal {
+            status_cmp
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+}
+
 /// Extract a display name from an email address
 /// e.g., "john.smith@example.com" -> "John Smith"
 ///       "jsmith@example.com" -> "Jsmith"
@@ -653,7 +676,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
                         .filter_map(|e| {
-                            let attendees = e.attendees.as_ref().map(|atts| {
+                            let mut attendees: Vec<DisplayAttendee> = e.attendees.as_ref().map(|atts| {
                                 atts.iter()
                                     .filter_map(|a| {
                                         let email = a.email.clone()?;
@@ -676,6 +699,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .collect()
                             }).unwrap_or_default();
+                            sort_attendees(&mut attendees);
 
                             Some(DisplayEvent {
                                 id: EventId::Google {
@@ -729,7 +753,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
                         .map(|e| {
-                            let attendees = e.attendees.iter()
+                            let mut attendees: Vec<DisplayAttendee> = e.attendees.iter()
                                 .map(|a| {
                                     let status = if a.is_organizer {
                                         AttendeeStatus::Organizer
@@ -749,6 +773,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 })
                                 .collect();
+                            sort_attendees(&mut attendees);
 
                             DisplayEvent {
                                 id: EventId::ICloud {
