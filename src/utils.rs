@@ -1,5 +1,54 @@
 //! Shared utility functions
 
+use crate::cache::{AttendeeStatus, DisplayAttendee};
+
+/// Sort order for attendee status (lower = first)
+pub fn status_sort_order(status: &AttendeeStatus) -> u8 {
+    match status {
+        AttendeeStatus::Organizer => 0,
+        AttendeeStatus::Accepted => 1,
+        AttendeeStatus::Tentative => 2,
+        AttendeeStatus::NeedsAction => 3,
+        AttendeeStatus::Declined => 4,
+    }
+}
+
+/// Sort attendees by status (accepted first, declined last), then by name
+pub fn sort_attendees(attendees: &mut [DisplayAttendee]) {
+    attendees.sort_by(|a, b| {
+        let status_cmp = status_sort_order(&a.status).cmp(&status_sort_order(&b.status));
+        if status_cmp != std::cmp::Ordering::Equal {
+            status_cmp
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+}
+
+/// Extract a display name from an email address
+/// e.g., "john.smith@example.com" -> "John Smith"
+///       "jsmith@example.com" -> "Jsmith"
+pub fn name_from_email(email: &str) -> String {
+    // Get the part before @
+    let local = email.split('@').next().unwrap_or(email);
+
+    // Split by common separators (., _, -)
+    let parts: Vec<&str> = local.split(['.', '_', '-']).collect();
+
+    // Capitalize each part and join with space
+    parts
+        .iter()
+        .map(|p| {
+            let mut chars = p.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Common meeting URL patterns
 pub const MEETING_URL_PATTERNS: &[&str] = &[
     "https://zoom.us/",
@@ -70,5 +119,55 @@ mod tests {
     fn test_extract_meeting_url_none() {
         assert_eq!(extract_meeting_url("No meeting link here"), None);
         assert_eq!(extract_meeting_url("https://example.com/not-a-meeting"), None);
+    }
+
+    #[test]
+    fn test_name_from_email_with_dots() {
+        assert_eq!(name_from_email("john.smith@example.com"), "John Smith");
+    }
+
+    #[test]
+    fn test_name_from_email_with_underscore() {
+        assert_eq!(name_from_email("john_smith@example.com"), "John Smith");
+    }
+
+    #[test]
+    fn test_name_from_email_simple() {
+        assert_eq!(name_from_email("jsmith@example.com"), "Jsmith");
+    }
+
+    #[test]
+    fn test_status_sort_order() {
+        assert!(status_sort_order(&AttendeeStatus::Organizer) < status_sort_order(&AttendeeStatus::Accepted));
+        assert!(status_sort_order(&AttendeeStatus::Accepted) < status_sort_order(&AttendeeStatus::Tentative));
+        assert!(status_sort_order(&AttendeeStatus::Tentative) < status_sort_order(&AttendeeStatus::NeedsAction));
+        assert!(status_sort_order(&AttendeeStatus::NeedsAction) < status_sort_order(&AttendeeStatus::Declined));
+    }
+
+    #[test]
+    fn test_sort_attendees_by_status() {
+        let mut attendees = vec![
+            DisplayAttendee {
+                name: Some("Bob".to_string()),
+                email: "bob@example.com".to_string(),
+                status: AttendeeStatus::Declined,
+            },
+            DisplayAttendee {
+                name: Some("Alice".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+            DisplayAttendee {
+                name: Some("Charlie".to_string()),
+                email: "charlie@example.com".to_string(),
+                status: AttendeeStatus::Organizer,
+            },
+        ];
+
+        sort_attendees(&mut attendees);
+
+        assert_eq!(attendees[0].name, Some("Charlie".to_string())); // Organizer
+        assert_eq!(attendees[1].name, Some("Alice".to_string()));   // Accepted
+        assert_eq!(attendees[2].name, Some("Bob".to_string()));     // Declined
     }
 }
