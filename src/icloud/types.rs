@@ -1,5 +1,14 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
+/// Attendee from iCal ATTENDEE line
+#[derive(Debug, Clone)]
+pub struct ICalAttendee {
+    pub name: Option<String>,
+    pub email: String,
+    pub partstat: String,  // ACCEPTED, DECLINED, TENTATIVE, NEEDS-ACTION
+    pub is_organizer: bool,
+}
+
 /// An event from iCloud Calendar (parsed from iCal/VCALENDAR format)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -12,6 +21,7 @@ pub struct ICalEvent {
     pub description: Option<String>,
     pub url: Option<String>,
     pub accepted: bool, // true if accepted or no PARTSTAT found
+    pub attendees: Vec<ICalAttendee>,
 }
 
 /// Event time - can be all-day (date only) or specific time
@@ -43,6 +53,17 @@ impl ICalEvent {
                 use chrono::Timelike;
                 format!("{:02}:{:02}", dt.time().hour(), dt.time().minute())
             }
+        }
+    }
+
+    /// Get end time as HH:MM or None for all-day events
+    pub fn end_time_str(&self) -> Option<String> {
+        match &self.dtend {
+            Some(EventTime::DateTime(dt)) => {
+                use chrono::Timelike;
+                Some(format!("{:02}:{:02}", dt.time().hour(), dt.time().minute()))
+            }
+            _ => None,
         }
     }
 
@@ -100,9 +121,21 @@ impl ICalEvent {
                         "DESCRIPTION" => builder.description = Some(unescape_ical(value)),
                         "URL" => builder.url = Some(unescape_ical(value)),
                         "ATTENDEE" => {
-                            // Extract PARTSTAT from ATTENDEE line
+                            // Extract PARTSTAT from ATTENDEE line for self acceptance
                             if let Some(partstat) = extract_partstat(key) {
-                                builder.partstat = Some(partstat);
+                                builder.partstat = Some(partstat.clone());
+                            }
+                            // Parse attendee details
+                            if let Some(attendee) = parse_attendee(key, value) {
+                                builder.attendees.push(attendee);
+                            }
+                        }
+                        "ORGANIZER" => {
+                            // Parse organizer as an attendee
+                            if let Some(mut attendee) = parse_attendee(key, value) {
+                                attendee.is_organizer = true;
+                                attendee.partstat = "ACCEPTED".to_string();
+                                builder.attendees.push(attendee);
                             }
                         }
                         _ => {}
@@ -125,6 +158,7 @@ struct ICalEventBuilder {
     description: Option<String>,
     url: Option<String>,
     partstat: Option<String>, // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
+    attendees: Vec<ICalAttendee>,
 }
 
 impl ICalEventBuilder {
@@ -146,6 +180,7 @@ impl ICalEventBuilder {
             description: self.description,
             url: self.url,
             accepted,
+            attendees: self.attendees,
         })
     }
 }
@@ -243,6 +278,52 @@ fn extract_partstat(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract CN (Common Name) from ATTENDEE/ORGANIZER line key
+/// e.g., "ATTENDEE;CN=John Smith;PARTSTAT=ACCEPTED" -> "John Smith"
+fn extract_cn(key: &str) -> Option<String> {
+    for part in key.split(';') {
+        if part.starts_with("CN=") {
+            let name = &part[3..];
+            // Remove surrounding quotes if present
+            let name = name.trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse ATTENDEE or ORGANIZER line into ICalAttendee
+/// key: "ATTENDEE;PARTSTAT=ACCEPTED;CN=John Smith"
+/// value: "mailto:john@example.com"
+fn parse_attendee(key: &str, value: &str) -> Option<ICalAttendee> {
+    // Extract email from mailto: value
+    let email = if value.starts_with("mailto:") {
+        value[7..].to_string()
+    } else {
+        value.to_string()
+    };
+
+    // Skip if no valid email
+    if email.is_empty() {
+        return None;
+    }
+
+    // Extract display name (CN)
+    let name = extract_cn(key);
+
+    // Extract participation status
+    let partstat = extract_partstat(key).unwrap_or_else(|| "NEEDS-ACTION".to_string());
+
+    Some(ICalAttendee {
+        name,
+        email,
+        partstat,
+        is_organizer: false, // Caller sets this for ORGANIZER lines
+    })
 }
 
 /// Check if a URL is a meeting URL
@@ -538,5 +619,108 @@ END:VCALENDAR"#;
         assert!(is_meeting_url("https://meet.google.com/abc"));
         assert!(is_meeting_url("https://teams.microsoft.com/l/meetup"));
         assert!(!is_meeting_url("https://example.com"));
+    }
+
+    #[test]
+    fn test_extract_cn() {
+        assert_eq!(extract_cn("ATTENDEE;CN=John Smith;PARTSTAT=ACCEPTED"), Some("John Smith".to_string()));
+        assert_eq!(extract_cn("ATTENDEE;PARTSTAT=ACCEPTED;CN=Jane Doe"), Some("Jane Doe".to_string()));
+        assert_eq!(extract_cn("ATTENDEE;CN=\"Quoted Name\""), Some("Quoted Name".to_string()));
+        assert_eq!(extract_cn("ATTENDEE;PARTSTAT=ACCEPTED"), None);
+    }
+
+    #[test]
+    fn test_parse_attendee() {
+        let attendee = parse_attendee("ATTENDEE;PARTSTAT=ACCEPTED;CN=John Smith", "mailto:john@example.com").unwrap();
+        assert_eq!(attendee.name, Some("John Smith".to_string()));
+        assert_eq!(attendee.email, "john@example.com");
+        assert_eq!(attendee.partstat, "ACCEPTED");
+        assert!(!attendee.is_organizer);
+    }
+
+    #[test]
+    fn test_parse_attendee_no_cn() {
+        let attendee = parse_attendee("ATTENDEE;PARTSTAT=DECLINED", "mailto:bob@example.com").unwrap();
+        assert_eq!(attendee.name, None);
+        assert_eq!(attendee.email, "bob@example.com");
+        assert_eq!(attendee.partstat, "DECLINED");
+    }
+
+    #[test]
+    fn test_parse_attendee_no_partstat() {
+        let attendee = parse_attendee("ATTENDEE;CN=Unknown", "mailto:unknown@example.com").unwrap();
+        assert_eq!(attendee.partstat, "NEEDS-ACTION");
+    }
+
+    #[test]
+    fn test_parse_event_with_attendees() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:meeting-with-attendees
+SUMMARY:Team Standup
+DTSTART:20260115T100000Z
+DTEND:20260115T110000Z
+ORGANIZER;CN=Alice Manager:mailto:alice@example.com
+ATTENDEE;PARTSTAT=ACCEPTED;CN=Bob Developer:mailto:bob@example.com
+ATTENDEE;PARTSTAT=DECLINED;CN=Charlie Designer:mailto:charlie@example.com
+ATTENDEE;PARTSTAT=TENTATIVE:mailto:dave@example.com
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].attendees.len(), 4);
+
+        // Check organizer
+        let organizer = events[0].attendees.iter().find(|a| a.is_organizer).unwrap();
+        assert_eq!(organizer.name, Some("Alice Manager".to_string()));
+        assert_eq!(organizer.email, "alice@example.com");
+        assert_eq!(organizer.partstat, "ACCEPTED");
+
+        // Check accepted attendee
+        let bob = events[0].attendees.iter().find(|a| a.email == "bob@example.com").unwrap();
+        assert_eq!(bob.name, Some("Bob Developer".to_string()));
+        assert_eq!(bob.partstat, "ACCEPTED");
+
+        // Check declined attendee
+        let charlie = events[0].attendees.iter().find(|a| a.email == "charlie@example.com").unwrap();
+        assert_eq!(charlie.partstat, "DECLINED");
+
+        // Check attendee without name
+        let dave = events[0].attendees.iter().find(|a| a.email == "dave@example.com").unwrap();
+        assert_eq!(dave.name, None);
+        assert_eq!(dave.partstat, "TENTATIVE");
+    }
+
+    #[test]
+    fn test_end_time_str() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:timed-event
+SUMMARY:Meeting
+DTSTART:20260115T143000Z
+DTEND:20260115T160000Z
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].end_time_str(), Some("16:00".to_string()));
+    }
+
+    #[test]
+    fn test_end_time_str_all_day() {
+        let ical = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:all-day
+SUMMARY:Holiday
+DTSTART;VALUE=DATE:20260115
+DTEND;VALUE=DATE:20260116
+END:VEVENT
+END:VCALENDAR"#;
+
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].end_time_str(), None);
     }
 }

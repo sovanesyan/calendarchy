@@ -4,14 +4,36 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
+/// Attendee information for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayAttendee {
+    pub name: Option<String>,  // Display name if available
+    pub email: String,
+    pub status: AttendeeStatus,
+}
+
+/// Attendee response status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AttendeeStatus {
+    Accepted,
+    Declined,
+    Tentative,
+    NeedsAction,
+    Organizer,
+}
+
 /// Unified event representation for display
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayEvent {
     pub title: String,
     pub time_str: String,
+    pub end_time_str: Option<String>,
     pub date: NaiveDate,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
     pub meeting_url: Option<String>, // Zoom, Meet, Teams link if available
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub attendees: Vec<DisplayAttendee>,
 }
 
 /// Serializable cache format for disk persistence
@@ -167,9 +189,13 @@ mod tests {
         DisplayEvent {
             title: title.to_string(),
             time_str: time.to_string(),
+            end_time_str: None,
             date,
             accepted: true,
             meeting_url: None,
+            description: None,
+            location: None,
+            attendees: vec![],
         }
     }
 

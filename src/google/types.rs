@@ -72,9 +72,11 @@ pub struct EntryPoint {
 #[serde(rename_all = "camelCase")]
 pub struct Attendee {
     pub email: Option<String>,
+    pub display_name: Option<String>,
     pub response_status: Option<String>,
     #[serde(rename = "self")]
     pub is_self: Option<bool>,
+    pub organizer: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +114,14 @@ impl CalendarEvent {
                 format!("{:02}:{:02}", local.time().hour(), local.time().minute())
             })
             .unwrap_or_else(|| "All day".to_string())
+    }
+
+    /// Get end time as HH:MM or None for all-day events (converted to local timezone)
+    pub fn end_time_str(&self) -> Option<String> {
+        self.end.date_time.map(|dt| {
+            let local: DateTime<Local> = dt.with_timezone(&Local);
+            format!("{:02}:{:02}", local.time().hour(), local.time().minute())
+        })
     }
 
     /// Check if the current user has accepted this event
@@ -306,8 +316,10 @@ mod tests {
         let mut event = make_timed_event("Meeting", Utc::now());
         event.attendees = Some(vec![Attendee {
             email: Some("me@example.com".to_string()),
+            display_name: None,
             response_status: Some("accepted".to_string()),
             is_self: Some(true),
+            organizer: None,
         }]);
         assert!(event.is_accepted());
     }
@@ -317,8 +329,10 @@ mod tests {
         let mut event = make_timed_event("Meeting", Utc::now());
         event.attendees = Some(vec![Attendee {
             email: Some("me@example.com".to_string()),
+            display_name: None,
             response_status: Some("declined".to_string()),
             is_self: Some(true),
+            organizer: None,
         }]);
         assert!(!event.is_accepted());
     }
@@ -328,8 +342,10 @@ mod tests {
         let mut event = make_timed_event("Meeting", Utc::now());
         event.attendees = Some(vec![Attendee {
             email: Some("me@example.com".to_string()),
+            display_name: None,
             response_status: Some("tentative".to_string()),
             is_self: Some(true),
+            organizer: None,
         }]);
         assert!(!event.is_accepted());
     }

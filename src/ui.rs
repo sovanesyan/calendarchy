@@ -1,5 +1,5 @@
-use crate::cache::{DisplayEvent, EventCache};
-use crate::{GoogleAuthState, ICloudAuthState, ViewMode};
+use crate::cache::{AttendeeStatus, DisplayEvent, EventCache};
+use crate::{EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 use crossterm::{
     cursor,
@@ -23,6 +23,10 @@ pub struct RenderState<'a> {
     pub status_message: Option<&'a str>,
     pub google_loading: bool,
     pub icloud_loading: bool,
+    // Two-level navigation state
+    pub navigation_mode: NavigationMode,
+    pub selected_source: EventSource,
+    pub selected_event_index: usize,
 }
 
 pub fn render(state: &RenderState) {
@@ -49,20 +53,45 @@ pub fn render(state: &RenderState) {
         execute!(out, ResetColor).unwrap();
     }
 
-    // Render controls - only show g/i if not authenticated
+    // Render controls based on current mode
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    let mut controls = String::from(" hjkl:nav t:today r:refresh v:view");
-    if state.view_mode == ViewMode::Week {
-        controls.push_str(" s:weekends");
-    }
-    if !state.google_auth.is_authenticated() {
-        controls.push_str(" g:work");
-    }
-    if !state.icloud_auth.is_authenticated() {
-        controls.push_str(" i:personal");
-    }
-    controls.push_str(" q:quit");
+
+    let controls = if state.navigation_mode == NavigationMode::Event {
+        // Event navigation mode controls
+        let mut c = String::from(" jk:nav");
+
+        // Check if selected event has meeting link
+        let selected_event = match state.selected_source {
+            EventSource::Google => state.events.google.get(state.selected_date).get(state.selected_event_index),
+            EventSource::ICloud => state.events.icloud.get(state.selected_date).get(state.selected_event_index),
+        };
+        if let Some(event) = selected_event {
+            if event.meeting_url.is_some() {
+                c.push_str(" o:open");
+            }
+        }
+
+        c.push_str(" Esc:back q:quit");
+        c
+    } else {
+        // Day navigation mode controls
+        let mut c = String::from(" hjkl:nav t:today r:refresh v:view");
+        if state.view_mode == ViewMode::Month {
+            c.push_str(" Enter:events");
+        }
+        if state.view_mode == ViewMode::Week {
+            c.push_str(" s:weekends");
+        }
+        if !state.google_auth.is_authenticated() {
+            c.push_str(" g:work");
+        }
+        if !state.icloud_auth.is_authenticated() {
+            c.push_str(" i:personal");
+        }
+        c.push_str(" q:quit");
+        c
+    };
     print!("{}", controls);
     execute!(out, ResetColor).unwrap();
 
@@ -70,23 +99,53 @@ pub fn render(state: &RenderState) {
 }
 
 fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
-    let right_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
+    let now = Local::now();
+    let current_time = now.time();
+    let is_today = state.selected_date == today;
+    let in_event_mode = state.navigation_mode == NavigationMode::Event;
+
+    // Calculate column widths based on mode
+    // Day mode: calendar | events (two stacked panels)
+    // Event mode: calendar | events (two stacked panels) | details
+    let events_panel_width: u16;
+    let details_panel_width: u16;
+
+    if in_event_mode {
+        let available = term_width.saturating_sub(CALENDAR_WIDTH + 2);
+        events_panel_width = (available * 2 / 5).max(MIN_PANEL_WIDTH);
+        details_panel_width = available.saturating_sub(events_panel_width + 1);
+    } else {
+        events_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
+        details_panel_width = 0;
+    }
+
     let panel_height = term_height.saturating_sub(3) / 2;
 
     // Render calendar on left
     render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
 
-    // Render Work (Google) panel on right top
-    if right_panel_width >= MIN_PANEL_WIDTH {
-        let now = Local::now();
-        let current_time = now.time();
-        let is_today = state.selected_date == today;
+    // Render event panels in the middle
+    if events_panel_width >= MIN_PANEL_WIDTH {
+        let events_x = CALENDAR_WIDTH + 1;
 
-        render_event_panel(
+        // Selection info for highlighting
+        let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
+            Some(state.selected_event_index)
+        } else {
+            None
+        };
+        let icloud_selected = if in_event_mode && state.selected_source == EventSource::ICloud {
+            Some(state.selected_event_index)
+        } else {
+            None
+        };
+
+        // Render Work (Google) panel on right top
+        render_event_panel_with_selection(
             out,
-            CALENDAR_WIDTH + 1,
+            events_x,
             0,
-            right_panel_width,
+            events_panel_width,
             panel_height,
             "Work (Google)",
             state.events.google.get(state.selected_date),
@@ -95,14 +154,15 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             Color::Blue,
             is_today,
             current_time,
+            google_selected,
         );
 
         // Render Personal (iCloud) panel on right bottom
-        render_event_panel(
+        render_event_panel_with_selection(
             out,
-            CALENDAR_WIDTH + 1,
+            events_x,
             panel_height + 1,
-            right_panel_width,
+            events_panel_width,
             panel_height,
             "Personal (iCloud)",
             state.events.icloud.get(state.selected_date),
@@ -111,7 +171,22 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             Color::Magenta,
             is_today,
             current_time,
+            icloud_selected,
         );
+    }
+
+    // Render details panel on the right when in Event mode
+    if in_event_mode && details_panel_width >= MIN_PANEL_WIDTH {
+        let details_x = CALENDAR_WIDTH + events_panel_width + 2;
+        let details_height = term_height.saturating_sub(3);
+
+        // Get the selected event
+        let selected_event = match state.selected_source {
+            EventSource::Google => state.events.google.get(state.selected_date).get(state.selected_event_index),
+            EventSource::ICloud => state.events.icloud.get(state.selected_date).get(state.selected_event_index),
+        };
+
+        render_event_details_column(out, details_x, 0, details_panel_width, details_height, selected_event);
     }
 }
 
@@ -474,7 +549,8 @@ fn render_calendar(
     execute!(out, ResetColor).unwrap();
 }
 
-fn render_event_panel<A: AuthDisplay>(
+/// Render event panel with optional selection highlighting
+fn render_event_panel_with_selection<A: AuthDisplay>(
     out: &mut impl Write,
     x: u16,
     y: u16,
@@ -487,6 +563,7 @@ fn render_event_panel<A: AuthDisplay>(
     accent_color: Color,
     is_today: bool,
     current_time: NaiveTime,
+    selected_index: Option<usize>,
 ) {
     // Panel header
     execute!(out, cursor::MoveTo(x, y)).unwrap();
@@ -535,25 +612,30 @@ fn render_event_panel<A: AuthDisplay>(
         for (i, event) in events.iter().take(max_events).enumerate() {
             execute!(out, cursor::MoveTo(x, content_start + i as u16)).unwrap();
 
+            let is_selected = selected_index == Some(i);
             let is_current = current_event_idx == Some(i);
             let is_next = next_event_idx == Some(i);
             let is_past = is_today && is_event_past(event, current_time) && !is_current;
             let is_unaccepted = !event.accepted;
 
             // Choose color based on event status
-            // Priority: unaccepted (grey) > past (grey) > current (green) > next (orange) > normal
-            let event_color = if is_unaccepted || is_past {
+            let event_color = if is_selected {
+                Color::Cyan
+            } else if is_unaccepted || is_past {
                 Color::DarkGrey
             } else if is_current {
                 Color::Green
             } else if is_next {
-                Color::Yellow // Orange-ish
+                Color::Yellow
             } else {
                 Color::Reset
             };
 
-            // Dot indicator for current (green) or next (orange) event
-            if is_current && !is_unaccepted {
+            // Selection/status indicator
+            if is_selected {
+                execute!(out, SetForegroundColor(Color::Cyan)).unwrap();
+                print!("\u{25B6}"); // Right-pointing triangle
+            } else if is_current && !is_unaccepted {
                 execute!(out, SetForegroundColor(Color::Green)).unwrap();
                 print!("\u{25CF}"); // Filled circle
             } else if is_next && !is_unaccepted {
@@ -563,40 +645,161 @@ fn render_event_panel<A: AuthDisplay>(
                 print!(" ");
             }
 
-            // Meeting icon to the left of time (consistent spacing)
+            // Meeting icon
             if let Some(ref url) = event.meeting_url {
-                print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url); // 📹 camera emoji
+                print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url);
             } else {
-                print!("  "); // Reserve space for alignment
+                print!("  ");
             }
 
             execute!(out, SetForegroundColor(event_color)).unwrap();
-            if (is_current || is_next) && !is_unaccepted {
+            if is_selected || ((is_current || is_next) && !is_unaccepted) {
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
             print!("{:>7} ", event.time_str);
             execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
             execute!(out, SetForegroundColor(event_color)).unwrap();
-            if (is_current || is_next) && !is_unaccepted {
+            if is_selected || ((is_current || is_next) && !is_unaccepted) {
                 execute!(out, SetAttribute(Attribute::Bold)).unwrap();
             }
 
-            // Calculate title width (icon space now at start)
-            let title_width = width.saturating_sub(13) as usize; // indicator + icon + time + space
+            let title_width = width.saturating_sub(13) as usize;
             print!("{}", truncate_str(&event.title, title_width));
             execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
         }
 
         if events.len() > max_events {
-            execute!(
-                out,
-                cursor::MoveTo(x, content_start + max_events as u16)
-            )
-            .unwrap();
+            execute!(out, cursor::MoveTo(x, content_start + max_events as u16)).unwrap();
             execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
             print!("... +{} more", events.len() - max_events);
             execute!(out, ResetColor).unwrap();
+        }
+    }
+}
+
+/// Render event details in a column
+fn render_event_details_column(
+    out: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    event: Option<&DisplayEvent>,
+) {
+    // Header
+    execute!(out, cursor::MoveTo(x, y)).unwrap();
+    execute!(out, SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold)).unwrap();
+    print!("Details");
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    // Separator line
+    execute!(out, cursor::MoveTo(x, y + 1)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    for _ in 0..width.min(40) {
+        print!("\u{2500}");
+    }
+    execute!(out, ResetColor).unwrap();
+
+    let content_x = x;
+    let content_width = width as usize;
+    let mut current_row = y + 2;
+
+    let Some(event) = event else {
+        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("No event selected");
+        execute!(out, ResetColor).unwrap();
+        return;
+    };
+
+    // Title
+    execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+    execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
+    print!("{}", truncate_str(&event.title, content_width));
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    current_row += 1;
+
+    // Time
+    execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+    execute!(out, SetForegroundColor(Color::White)).unwrap();
+    if let Some(ref end) = event.end_time_str {
+        print!("\u{1F552} {} - {}", event.time_str, end);
+    } else {
+        print!("\u{1F552} {}", event.time_str);
+    }
+    execute!(out, ResetColor).unwrap();
+    current_row += 1;
+
+    // Location
+    if let Some(ref loc) = event.location {
+        if !loc.is_empty() && current_row < y + height - 3 {
+            execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+            execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
+            print!("\u{1F4CD} {}", truncate_str(loc, content_width.saturating_sub(3)));
+            execute!(out, ResetColor).unwrap();
+            current_row += 1;
+        }
+    }
+
+    // Meeting link
+    if event.meeting_url.is_some() && current_row < y + height - 3 {
+        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::Green)).unwrap();
+        print!("\u{1F4F9} [o] Open meeting link");
+        execute!(out, ResetColor).unwrap();
+        current_row += 1;
+    }
+
+    // Separator
+    if current_row < y + height - 2 {
+        current_row += 1;
+    }
+
+    // Participants
+    if !event.attendees.is_empty() && current_row < y + height - 2 {
+        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
+        print!("Participants:");
+        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        current_row += 1;
+
+        let max_row = y + height - 1;
+        for attendee in &event.attendees {
+            if current_row >= max_row {
+                execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                let remaining = event.attendees.len() - (current_row - y - 7) as usize;
+                if remaining > 0 {
+                    print!("  ... +{} more", remaining);
+                }
+                execute!(out, ResetColor).unwrap();
+                break;
+            }
+
+            execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+
+            // Status icon
+            let (icon, color) = match attendee.status {
+                AttendeeStatus::Accepted => ("\u{2713}", Color::Green),
+                AttendeeStatus::Organizer => ("\u{2713}", Color::Blue),
+                AttendeeStatus::Declined => ("\u{2717}", Color::Red),
+                AttendeeStatus::Tentative => ("?", Color::Yellow),
+                AttendeeStatus::NeedsAction => ("?", Color::DarkGrey),
+            };
+            execute!(out, SetForegroundColor(color)).unwrap();
+            print!("  {} ", icon);
+            execute!(out, ResetColor).unwrap();
+
+            // Name or email
+            let display_name = attendee.name.as_ref().unwrap_or(&attendee.email);
+            let status_str = match attendee.status {
+                AttendeeStatus::Organizer => " (org)",
+                _ => "",
+            };
+            let name_width = content_width.saturating_sub(5 + status_str.len());
+            print!("{}{}", truncate_str(display_name, name_width), status_str);
+            current_row += 1;
         }
     }
 }
@@ -693,9 +896,13 @@ mod tests {
         DisplayEvent {
             title: "Test".to_string(),
             time_str: time.to_string(),
+            end_time_str: None,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             meeting_url: None,
+            description: None,
+            location: None,
+            attendees: vec![],
         }
     }
 

@@ -5,8 +5,8 @@ mod google;
 mod icloud;
 mod ui;
 
-use cache::{DisplayEvent, EventCache};
-use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, Utc};
+use cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventCache};
+use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, NaiveTime, Utc};
 use config::Config;
 use crossterm::{
     cursor,
@@ -26,6 +26,20 @@ use ui::AuthDisplay;
 pub enum ViewMode {
     Month,
     Week,
+}
+
+/// Navigation mode for two-level navigation in month view
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NavigationMode {
+    Day,   // Navigate between days with h/j/k/l
+    Event, // Navigate between events within selected day with j/k
+}
+
+/// Which event source/panel is currently selected
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EventSource {
+    Google,
+    ICloud,
 }
 
 /// Google authentication state
@@ -102,6 +116,10 @@ struct App {
     icloud_needs_fetch: bool,
     google_loading: bool,
     icloud_loading: bool,
+    // Two-level navigation state
+    navigation_mode: NavigationMode,
+    selected_source: EventSource,
+    selected_event_index: usize, // Index within the selected source
 }
 
 impl App {
@@ -125,6 +143,9 @@ impl App {
             icloud_needs_fetch: false,
             google_loading: false,
             icloud_loading: false,
+            navigation_mode: NavigationMode::Day,
+            selected_source: EventSource::Google,
+            selected_event_index: 0,
         }
     }
 
@@ -183,6 +204,178 @@ impl App {
         };
         (first, last)
     }
+
+    /// Get events for the current source
+    fn get_current_source_events(&self) -> &[DisplayEvent] {
+        match self.selected_source {
+            EventSource::Google => self.events.google.get(self.selected_date),
+            EventSource::ICloud => self.events.icloud.get(self.selected_date),
+        }
+    }
+
+    /// Get the currently selected event if in Event mode
+    fn get_selected_event(&self) -> Option<&DisplayEvent> {
+        if self.navigation_mode == NavigationMode::Event {
+            self.get_current_source_events().get(self.selected_event_index)
+        } else {
+            None
+        }
+    }
+
+    /// Enter event navigation mode, selecting the next upcoming event
+    fn enter_event_mode(&mut self) {
+        let google_events = self.events.google.get(self.selected_date);
+        let icloud_events = self.events.icloud.get(self.selected_date);
+
+        if google_events.is_empty() && icloud_events.is_empty() {
+            return;
+        }
+
+        self.navigation_mode = NavigationMode::Event;
+
+        // If today, try to find current or next event
+        let today = Local::now().date_naive();
+        if self.selected_date == today {
+            let current_time = Local::now().time();
+
+            // Check Google events for current/next
+            if let Some((idx, is_current_or_next)) = find_current_or_next_event(google_events, current_time) {
+                if is_current_or_next {
+                    self.selected_source = EventSource::Google;
+                    self.selected_event_index = idx;
+                    return;
+                }
+            }
+
+            // Check iCloud events for current/next
+            if let Some((idx, is_current_or_next)) = find_current_or_next_event(icloud_events, current_time) {
+                if is_current_or_next {
+                    self.selected_source = EventSource::ICloud;
+                    self.selected_event_index = idx;
+                    return;
+                }
+            }
+
+            // Compare the next events from both sources to find the earliest
+            let google_next = find_current_or_next_event(google_events, current_time);
+            let icloud_next = find_current_or_next_event(icloud_events, current_time);
+
+            match (google_next, icloud_next) {
+                (Some((g_idx, _)), Some((i_idx, _))) => {
+                    // Compare times to pick the earlier one
+                    let g_time = &google_events[g_idx].time_str;
+                    let i_time = &icloud_events[i_idx].time_str;
+                    if g_time <= i_time {
+                        self.selected_source = EventSource::Google;
+                        self.selected_event_index = g_idx;
+                    } else {
+                        self.selected_source = EventSource::ICloud;
+                        self.selected_event_index = i_idx;
+                    }
+                    return;
+                }
+                (Some((idx, _)), None) => {
+                    self.selected_source = EventSource::Google;
+                    self.selected_event_index = idx;
+                    return;
+                }
+                (None, Some((idx, _))) => {
+                    self.selected_source = EventSource::ICloud;
+                    self.selected_event_index = idx;
+                    return;
+                }
+                (None, None) => {}
+            }
+        }
+
+        // Fallback: select first event in first non-empty source
+        if !google_events.is_empty() {
+            self.selected_source = EventSource::Google;
+            self.selected_event_index = 0;
+        } else {
+            self.selected_source = EventSource::ICloud;
+            self.selected_event_index = 0;
+        }
+    }
+
+    /// Exit event navigation mode
+    fn exit_event_mode(&mut self) {
+        self.navigation_mode = NavigationMode::Day;
+        self.selected_source = EventSource::Google;
+        self.selected_event_index = 0;
+    }
+
+    /// Navigate to next event (crosses from Google to iCloud)
+    fn next_event(&mut self) {
+        let current_events = self.get_current_source_events();
+
+        if self.selected_event_index < current_events.len().saturating_sub(1) {
+            // Move within current source
+            self.selected_event_index += 1;
+        } else if self.selected_source == EventSource::Google {
+            // At end of Google, try to move to iCloud
+            let icloud_events = self.events.icloud.get(self.selected_date);
+            if !icloud_events.is_empty() {
+                self.selected_source = EventSource::ICloud;
+                self.selected_event_index = 0;
+            }
+        }
+        // At end of iCloud - do nothing
+    }
+
+    /// Navigate to previous event (crosses from iCloud to Google)
+    fn prev_event(&mut self) {
+        if self.selected_event_index > 0 {
+            // Move within current source
+            self.selected_event_index -= 1;
+        } else if self.selected_source == EventSource::ICloud {
+            // At start of iCloud, try to move to Google
+            let google_events = self.events.google.get(self.selected_date);
+            if !google_events.is_empty() {
+                self.selected_source = EventSource::Google;
+                self.selected_event_index = google_events.len().saturating_sub(1);
+            }
+        }
+        // At start of Google - do nothing
+    }
+}
+
+/// Find current or next event in a list, returns (index, is_current)
+fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) -> Option<(usize, bool)> {
+    for (i, event) in events.iter().enumerate() {
+        if event.time_str == "All day" {
+            continue;
+        }
+
+        // Parse event time
+        let parts: Vec<&str> = event.time_str.split(':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let hour: u32 = parts[0].parse().ok()?;
+        let minute: u32 = parts[1].parse().ok()?;
+        let event_time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+
+        // Check if current (within event time range)
+        if let Some(ref end_str) = event.end_time_str {
+            let end_parts: Vec<&str> = end_str.split(':').collect();
+            if end_parts.len() == 2 {
+                if let (Ok(eh), Ok(em)) = (end_parts[0].parse::<u32>(), end_parts[1].parse::<u32>()) {
+                    if let Some(end_time) = NaiveTime::from_hms_opt(eh, em, 0) {
+                        if event_time <= current_time && current_time < end_time {
+                            return Some((i, true)); // Current event
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if next (starts after current time)
+        if event_time > current_time {
+            return Some((i, false)); // Next event
+        }
+    }
+    None
 }
 
 /// Messages from async tasks to main loop
@@ -290,6 +483,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_message: app.status_message.as_deref(),
             google_loading: app.google_loading,
             icloud_loading: app.icloud_loading,
+            navigation_mode: app.navigation_mode,
+            selected_source: app.selected_source,
+            selected_event_index: app.selected_event_index,
         };
         ui::render(&render_state);
 
@@ -383,12 +579,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
                         .filter_map(|e| {
+                            let attendees = e.attendees.as_ref().map(|atts| {
+                                atts.iter()
+                                    .filter_map(|a| {
+                                        let email = a.email.clone()?;
+                                        let status = if a.organizer == Some(true) {
+                                            AttendeeStatus::Organizer
+                                        } else {
+                                            match a.response_status.as_deref() {
+                                                Some("accepted") => AttendeeStatus::Accepted,
+                                                Some("declined") => AttendeeStatus::Declined,
+                                                Some("tentative") => AttendeeStatus::Tentative,
+                                                _ => AttendeeStatus::NeedsAction,
+                                            }
+                                        };
+                                        Some(DisplayAttendee {
+                                            name: a.display_name.clone(),
+                                            email,
+                                            status,
+                                        })
+                                    })
+                                    .collect()
+                            }).unwrap_or_default();
+
                             Some(DisplayEvent {
                                 title: e.title().to_string(),
                                 time_str: e.time_str(),
+                                end_time_str: e.end_time_str(),
                                 date: e.start_date()?,
                                 accepted: e.is_accepted(),
                                 meeting_url: e.meeting_url(),
+                                description: e.description.clone(),
+                                location: e.location.clone(),
+                                attendees,
                             })
                         })
                         .collect();
@@ -426,12 +649,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::ICloudEvents(events, month_date) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
-                        .map(|e| DisplayEvent {
-                            title: e.title().to_string(),
-                            time_str: e.time_str(),
-                            date: e.start_date(),
-                            accepted: e.accepted,
-                            meeting_url: e.meeting_url(),
+                        .map(|e| {
+                            let attendees = e.attendees.iter()
+                                .map(|a| {
+                                    let status = if a.is_organizer {
+                                        AttendeeStatus::Organizer
+                                    } else {
+                                        match a.partstat.as_str() {
+                                            "ACCEPTED" => AttendeeStatus::Accepted,
+                                            "DECLINED" => AttendeeStatus::Declined,
+                                            "TENTATIVE" => AttendeeStatus::Tentative,
+                                            _ => AttendeeStatus::NeedsAction,
+                                        }
+                                    };
+                                    DisplayAttendee {
+                                        name: a.name.clone(),
+                                        email: a.email.clone(),
+                                        status,
+                                    }
+                                })
+                                .collect();
+
+                            DisplayEvent {
+                                title: e.title().to_string(),
+                                time_str: e.time_str(),
+                                end_time_str: e.end_time_str(),
+                                date: e.start_date(),
+                                accepted: e.accepted,
+                                meeting_url: e.meeting_url(),
+                                description: e.description.clone(),
+                                location: e.location.clone(),
+                                attendees,
+                            }
                         })
                         .collect();
                     app.events.icloud.store(display_events, month_date);
@@ -484,6 +733,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(StdDuration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
                 if key_event.kind == KeyEventKind::Press {
+                    // Handle Event navigation mode (month view only)
+                    if app.navigation_mode == NavigationMode::Event && app.view_mode == ViewMode::Month {
+                        match key_event.code {
+                            KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
+                                app.next_event();
+                            }
+                            KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
+                                app.prev_event();
+                            }
+                            KeyCode::Char('o') | KeyCode::Char('о') => {
+                                // Open meeting link
+                                if let Some(event) = app.get_selected_event() {
+                                    if let Some(ref url) = event.meeting_url {
+                                        let _ = std::process::Command::new("xdg-open")
+                                            .arg(url)
+                                            .spawn();
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                app.exit_event_mode();
+                            }
+                            KeyCode::Char('q') | KeyCode::Char('я') => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Day navigation mode (default)
                     match key_event.code {
                         // Navigation keys (with Bulgarian Phonetic equivalents)
                         KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
@@ -497,6 +777,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right => {
                             app.next_day();
+                        }
+                        KeyCode::Enter => {
+                            // Enter event mode in month view
+                            if app.view_mode == ViewMode::Month {
+                                app.enter_event_mode();
+                            }
                         }
                         KeyCode::Char('t') | KeyCode::Char('т') => {
                             app.goto_today();
@@ -513,6 +799,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ViewMode::Month => ViewMode::Week,
                                 ViewMode::Week => ViewMode::Month,
                             };
+                            // Exit event mode when switching views
+                            app.exit_event_mode();
                         }
                         KeyCode::Char('s') | KeyCode::Char('с') => {
                             // Toggle weekends (only meaningful in week view)
