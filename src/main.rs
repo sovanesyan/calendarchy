@@ -429,7 +429,7 @@ impl App {
         self.selected_event_index = 0;
     }
 
-    /// Navigate to next event (crosses from Google to iCloud)
+    /// Navigate to next event (crosses from Google to iCloud, then to next day)
     fn next_event(&mut self) {
         let current_events = self.get_current_source_events();
 
@@ -442,12 +442,17 @@ impl App {
             if !icloud_events.is_empty() {
                 self.selected_source = EventSource::ICloud;
                 self.selected_event_index = 0;
+            } else {
+                // No iCloud events, try next day
+                self.navigate_to_next_day_with_events();
             }
+        } else {
+            // At end of iCloud, try next day
+            self.navigate_to_next_day_with_events();
         }
-        // At end of iCloud - do nothing
     }
 
-    /// Navigate to previous event (crosses from iCloud to Google)
+    /// Navigate to previous event (crosses from iCloud to Google, then to previous day)
     fn prev_event(&mut self) {
         if self.selected_event_index > 0 {
             // Move within current source
@@ -458,9 +463,69 @@ impl App {
             if !google_events.is_empty() {
                 self.selected_source = EventSource::Google;
                 self.selected_event_index = google_events.len().saturating_sub(1);
+            } else {
+                // No Google events, try previous day
+                self.navigate_to_prev_day_with_events();
             }
+        } else {
+            // At start of Google, try previous day
+            self.navigate_to_prev_day_with_events();
         }
-        // At start of Google - do nothing
+    }
+
+    /// Find and navigate to the next day with events (within 90 days)
+    fn navigate_to_next_day_with_events(&mut self) {
+        let mut check_date = self.selected_date + Duration::days(1);
+        let limit = self.selected_date + Duration::days(90);
+
+        while check_date <= limit {
+            if self.events.has_events(check_date) {
+                self.selected_date = check_date;
+                // Update current_date if we moved to a different month
+                if check_date.month() != self.current_date.month() || check_date.year() != self.current_date.year() {
+                    self.current_date = check_date;
+                }
+                // Select first event on the new day
+                let google_events = self.events.google.get(check_date);
+                if !google_events.is_empty() {
+                    self.selected_source = EventSource::Google;
+                    self.selected_event_index = 0;
+                } else {
+                    self.selected_source = EventSource::ICloud;
+                    self.selected_event_index = 0;
+                }
+                return;
+            }
+            check_date += Duration::days(1);
+        }
+    }
+
+    /// Find and navigate to the previous day with events (within 90 days)
+    fn navigate_to_prev_day_with_events(&mut self) {
+        let mut check_date = self.selected_date - Duration::days(1);
+        let limit = self.selected_date - Duration::days(90);
+
+        while check_date >= limit {
+            if self.events.has_events(check_date) {
+                self.selected_date = check_date;
+                // Update current_date if we moved to a different month
+                if check_date.month() != self.current_date.month() || check_date.year() != self.current_date.year() {
+                    self.current_date = check_date;
+                }
+                // Select last event on the new day (iCloud last, or Google last if no iCloud)
+                let icloud_events = self.events.icloud.get(check_date);
+                let google_events = self.events.google.get(check_date);
+                if !icloud_events.is_empty() {
+                    self.selected_source = EventSource::ICloud;
+                    self.selected_event_index = icloud_events.len().saturating_sub(1);
+                } else {
+                    self.selected_source = EventSource::Google;
+                    self.selected_event_index = google_events.len().saturating_sub(1);
+                }
+                return;
+            }
+            check_date -= Duration::days(1);
+        }
     }
 }
 
