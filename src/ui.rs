@@ -9,7 +9,7 @@ use crossterm::{
 };
 use std::io::{stdout, Write};
 
-const CALENDAR_WIDTH: u16 = 30;
+const CALENDAR_WIDTH: u16 = 22;
 const MIN_PANEL_WIDTH: u16 = 25;
 
 pub struct RenderState<'a> {
@@ -178,8 +178,8 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             google_selected,
         );
 
-        // Calculate Personal panel position: after Work header (2) + events + spacing (1)
-        let work_panel_rows = 2 + google_events.len().max(1) as u16;
+        // Calculate Personal panel position: after Work header (1) + events + spacing (1)
+        let work_panel_rows = 1 + google_events.len().max(1) as u16;
         let personal_y = header_rows + work_panel_rows + 1;
 
         // Render Personal (iCloud) panel below
@@ -584,23 +584,22 @@ fn render_event_panel(
     current_time: NaiveTime,
     selected_index: Option<usize>,
 ) {
-    // Panel header
+    // Panel header: ─ Title ─────────
     execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(accent_color), SetAttribute(Attribute::Bold)).unwrap();
-    let loading_str = if is_loading { " *" } else { "" };
-    let header = format!("{}{}", title, loading_str);
-    print!("{}", truncate_str(&header, width as usize));
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-    // Separator line
-    execute!(out, cursor::MoveTo(x, y + 1)).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    for _ in 0..width.min(40) {
+    print!("\u{2500} ");
+    execute!(out, SetForegroundColor(accent_color)).unwrap();
+    let loading_str = if is_loading { "*" } else { "" };
+    print!("{}{}", title, loading_str);
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    print!(" ");
+    let remaining = width.saturating_sub(title.len() as u16 + 4 + loading_str.len() as u16);
+    for _ in 0..remaining.min(40) {
         print!("\u{2500}");
     }
     execute!(out, ResetColor).unwrap();
 
-    let content_start = y + 2;
+    let content_start = y + 1;
 
     if events.is_empty() {
         execute!(out, cursor::MoveTo(x, content_start)).unwrap();
