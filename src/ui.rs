@@ -76,27 +76,8 @@ pub fn render(state: &RenderState) {
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
 
     let controls = if state.navigation_mode == NavigationMode::Event {
-        // Event navigation mode controls
-        let mut c = String::from(" jk:nav");
-
-        // Check if selected event has meeting link and source
-        let selected_event = match state.selected_source {
-            EventSource::Google => state.events.google.get(state.selected_date).get(state.selected_event_index),
-            EventSource::ICloud => state.events.icloud.get(state.selected_date).get(state.selected_event_index),
-        };
-        if let Some(event) = selected_event {
-            if event.meeting_url.is_some() {
-                c.push_str(" o:open");
-            }
-            // Google events support accept/decline
-            if matches!(event.id, EventId::Google { .. }) {
-                c.push_str(" a:accept d:decline");
-            }
-            c.push_str(" x:delete");
-        }
-
-        c.push_str(" 1:google 2:icloud D:logs Esc:back q:quit");
-        c
+        // Event navigation mode controls (event-specific actions shown in details panel)
+        String::from(" jk:nav 1:google 2:icloud D:logs Esc:back q:quit")
     } else {
         // Day navigation mode controls
         let mut c = String::from(" hjkl:nav t:today r:refresh v:view 1:google 2:icloud D:logs");
@@ -770,6 +751,21 @@ fn render_event_details_column(
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::Green)).unwrap();
         print!("\u{1F4F9} [o] Open meeting link");
+        execute!(out, ResetColor).unwrap();
+        current_row += 1;
+    }
+
+    // Actions section
+    if current_row < y + height - 3 {
+        current_row += 1; // Blank line before actions
+        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        // Google events support accept/decline
+        if matches!(event.id, EventId::Google { .. }) {
+            print!("[a] accept  [d] decline  [x] delete");
+        } else {
+            print!("[x] delete");
+        }
         execute!(out, ResetColor).unwrap();
         current_row += 1;
     }
