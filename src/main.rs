@@ -145,18 +145,6 @@ impl AuthDisplay for GoogleAuthState {
     fn is_authenticated(&self) -> bool {
         matches!(self, GoogleAuthState::Authenticated(_))
     }
-
-    fn status_message(&self) -> String {
-        match self {
-            GoogleAuthState::NotConfigured => "Not configured".to_string(),
-            GoogleAuthState::NotAuthenticated => "Press 'g' to connect".to_string(),
-            GoogleAuthState::AwaitingUserCode { user_code, verification_url, .. } => {
-                format!("{} → {}", verification_url, user_code)
-            }
-            GoogleAuthState::Authenticated(_) => String::new(),
-            GoogleAuthState::Error(msg) => msg.clone(),
-        }
-    }
 }
 
 /// iCloud authentication state
@@ -172,16 +160,6 @@ pub enum ICloudAuthState {
 impl AuthDisplay for ICloudAuthState {
     fn is_authenticated(&self) -> bool {
         matches!(self, ICloudAuthState::Authenticated { .. })
-    }
-
-    fn status_message(&self) -> String {
-        match self {
-            ICloudAuthState::NotConfigured => "Not configured".to_string(),
-            ICloudAuthState::NotAuthenticated => "Press 'i' to connect".to_string(),
-            ICloudAuthState::Discovering => "Discovering...".to_string(),
-            ICloudAuthState::Authenticated { .. } => String::new(),
-            ICloudAuthState::Error(msg) => msg.clone(),
-        }
     }
 }
 

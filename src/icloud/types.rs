@@ -97,7 +97,8 @@ impl ICalEvent {
         None
     }
 
-    /// Parse an iCal VCALENDAR string into events
+    /// Parse an iCal VCALENDAR string into events (test-only)
+    #[cfg(test)]
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
         Self::parse_ical_with_source(ical_data, String::new(), None)
     }
