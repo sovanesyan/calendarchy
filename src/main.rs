@@ -60,6 +60,101 @@ pub fn get_recent_logs(count: usize) -> Vec<String> {
     }
 }
 
+/// Convert a Google CalendarEvent to a DisplayEvent
+fn google_event_to_display(
+    event: google::types::CalendarEvent,
+    calendar_id: String,
+    calendar_name: Option<String>,
+) -> Option<DisplayEvent> {
+    let mut attendees: Vec<DisplayAttendee> = event.attendees.as_ref().map(|atts| {
+        atts.iter()
+            .filter_map(|a| {
+                let email = a.email.clone()?;
+                let status = if a.organizer == Some(true) {
+                    AttendeeStatus::Organizer
+                } else {
+                    match a.response_status.as_deref() {
+                        Some("accepted") => AttendeeStatus::Accepted,
+                        Some("declined") => AttendeeStatus::Declined,
+                        Some("tentative") => AttendeeStatus::Tentative,
+                        _ => AttendeeStatus::NeedsAction,
+                    }
+                };
+                Some(DisplayAttendee {
+                    name: Some(a.display_name.clone().unwrap_or_else(|| name_from_email(&email))),
+                    email,
+                    status,
+                })
+            })
+            .collect()
+    }).unwrap_or_default();
+    sort_attendees(&mut attendees);
+
+    Some(DisplayEvent {
+        id: EventId::Google {
+            calendar_id,
+            event_id: event.id.clone(),
+            calendar_name,
+        },
+        title: event.title().to_string(),
+        time_str: event.time_str(),
+        end_time_str: event.end_time_str(),
+        date: event.start_date()?,
+        accepted: event.is_accepted(),
+        is_organizer: event.is_organizer(),
+        meeting_url: event.meeting_url(),
+        description: event.description.clone(),
+        location: event.location.clone(),
+        attendees,
+    })
+}
+
+/// Convert an iCloud ICalEvent to a DisplayEvent
+fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) -> DisplayEvent {
+    let mut attendees: Vec<DisplayAttendee> = event.attendees.iter()
+        .map(|a| {
+            let status = if a.is_organizer {
+                AttendeeStatus::Organizer
+            } else {
+                match a.partstat.as_str() {
+                    "ACCEPTED" => AttendeeStatus::Accepted,
+                    "DECLINED" => AttendeeStatus::Declined,
+                    "TENTATIVE" => AttendeeStatus::Tentative,
+                    _ => AttendeeStatus::NeedsAction,
+                }
+            };
+            DisplayAttendee {
+                name: Some(a.name.clone().unwrap_or_else(|| name_from_email(&a.email))),
+                email: a.email.clone(),
+                status,
+            }
+        })
+        .collect();
+    sort_attendees(&mut attendees);
+
+    // For iCloud, if there are no attendees, the user created the event
+    let is_organizer = event.attendees.is_empty();
+
+    DisplayEvent {
+        id: EventId::ICloud {
+            calendar_url: event.calendar_url.clone(),
+            event_uid: event.uid.clone(),
+            etag: event.etag.clone(),
+            calendar_name,
+        },
+        title: event.title().to_string(),
+        time_str: event.time_str(),
+        end_time_str: event.end_time_str(),
+        date: event.start_date(),
+        accepted: event.accepted,
+        is_organizer,
+        meeting_url: event.meeting_url(),
+        description: event.description.clone(),
+        location: event.location.clone(),
+        attendees,
+    }
+}
+
 /// View mode for the calendar
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ViewMode {
@@ -622,50 +717,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::GoogleEvents(events, month_date, calendar_id, calendar_name) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
-                        .filter_map(|e| {
-                            let mut attendees: Vec<DisplayAttendee> = e.attendees.as_ref().map(|atts| {
-                                atts.iter()
-                                    .filter_map(|a| {
-                                        let email = a.email.clone()?;
-                                        let status = if a.organizer == Some(true) {
-                                            AttendeeStatus::Organizer
-                                        } else {
-                                            match a.response_status.as_deref() {
-                                                Some("accepted") => AttendeeStatus::Accepted,
-                                                Some("declined") => AttendeeStatus::Declined,
-                                                Some("tentative") => AttendeeStatus::Tentative,
-                                                _ => AttendeeStatus::NeedsAction,
-                                            }
-                                        };
-                                        Some(DisplayAttendee {
-                                            name: Some(a.display_name.clone()
-                                                .unwrap_or_else(|| name_from_email(&email))),
-                                            email,
-                                            status,
-                                        })
-                                    })
-                                    .collect()
-                            }).unwrap_or_default();
-                            sort_attendees(&mut attendees);
-
-                            Some(DisplayEvent {
-                                id: EventId::Google {
-                                    calendar_id: calendar_id.clone(),
-                                    event_id: e.id.clone(),
-                                    calendar_name: calendar_name.clone(),
-                                },
-                                title: e.title().to_string(),
-                                time_str: e.time_str(),
-                                end_time_str: e.end_time_str(),
-                                date: e.start_date()?,
-                                accepted: e.is_accepted(),
-                                is_organizer: e.is_organizer(),
-                                meeting_url: e.meeting_url(),
-                                description: e.description.clone(),
-                                location: e.location.clone(),
-                                attendees,
-                            })
-                        })
+                        .filter_map(|e| google_event_to_display(e, calendar_id.clone(), calendar_name.clone()))
                         .collect();
                     app.events.google.store(display_events, month_date);
                     app.events.save_to_disk();
@@ -704,51 +756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AsyncMessage::ICloudEvents(events, month_date) => {
                     let display_events: Vec<DisplayEvent> = events
                         .into_iter()
-                        .map(|(e, calendar_name)| {
-                            let mut attendees: Vec<DisplayAttendee> = e.attendees.iter()
-                                .map(|a| {
-                                    let status = if a.is_organizer {
-                                        AttendeeStatus::Organizer
-                                    } else {
-                                        match a.partstat.as_str() {
-                                            "ACCEPTED" => AttendeeStatus::Accepted,
-                                            "DECLINED" => AttendeeStatus::Declined,
-                                            "TENTATIVE" => AttendeeStatus::Tentative,
-                                            _ => AttendeeStatus::NeedsAction,
-                                        }
-                                    };
-                                    DisplayAttendee {
-                                        name: Some(a.name.clone()
-                                            .unwrap_or_else(|| name_from_email(&a.email))),
-                                        email: a.email.clone(),
-                                        status,
-                                    }
-                                })
-                                .collect();
-                            sort_attendees(&mut attendees);
-
-                            // For iCloud, if there are no attendees, the user created the event
-                            let is_organizer = e.attendees.is_empty();
-
-                            DisplayEvent {
-                                id: EventId::ICloud {
-                                    calendar_url: e.calendar_url.clone(),
-                                    event_uid: e.uid.clone(),
-                                    etag: e.etag.clone(),
-                                    calendar_name,
-                                },
-                                title: e.title().to_string(),
-                                time_str: e.time_str(),
-                                end_time_str: e.end_time_str(),
-                                date: e.start_date(),
-                                accepted: e.accepted,
-                                is_organizer,
-                                meeting_url: e.meeting_url(),
-                                description: e.description.clone(),
-                                location: e.location.clone(),
-                                attendees,
-                            }
-                        })
+                        .map(|(e, calendar_name)| icloud_event_to_display(e, calendar_name))
                         .collect();
                     app.events.icloud.store(display_events, month_date);
                     app.events.save_to_disk();
