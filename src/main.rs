@@ -12,7 +12,7 @@ use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, NaiveTime, Utc};
 use config::Config;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
@@ -155,14 +155,6 @@ fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) -> D
     }
 }
 
-/// View mode for the calendar
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ViewMode {
-    Month,
-    Week,
-    Day,
-}
-
 /// Navigation mode for two-level navigation in month view
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NavigationMode {
@@ -225,8 +217,6 @@ impl AuthDisplay for ICloudAuthState {
 struct App {
     current_date: NaiveDate,
     selected_date: NaiveDate,
-    view_mode: ViewMode,
-    show_weekends: bool,
     show_logs: bool, // Toggle HTTP request logs display
     events: EventCache,
     google_auth: GoogleAuthState,
@@ -253,8 +243,6 @@ impl App {
         let mut app = Self {
             current_date: today,
             selected_date: today,
-            view_mode: ViewMode::Month,
-            show_weekends: false,
             show_logs: false,
             events,
             google_auth: GoogleAuthState::NotConfigured,
@@ -283,16 +271,6 @@ impl App {
 
     fn prev_day(&mut self) {
         self.selected_date -= Duration::days(1);
-        self.sync_month_if_needed();
-    }
-
-    fn next_week(&mut self) {
-        self.selected_date += Duration::days(7);
-        self.sync_month_if_needed();
-    }
-
-    fn prev_week(&mut self) {
-        self.selected_date -= Duration::days(7);
         self.sync_month_if_needed();
     }
 
@@ -529,20 +507,27 @@ impl App {
         }
     }
 
-    /// Toggle between Month and Week views
-    fn toggle_view_mode(&mut self) {
-        self.view_mode = match self.view_mode {
-            ViewMode::Month => ViewMode::Week,
-            ViewMode::Week => ViewMode::Month,
-            ViewMode::Day => ViewMode::Month,
+
+    /// Move to next month
+    fn next_month(&mut self) {
+        let (year, month) = if self.current_date.month() == 12 {
+            (self.current_date.year() + 1, 1)
+        } else {
+            (self.current_date.year(), self.current_date.month() + 1)
         };
-        // Exit event mode when switching views
-        self.exit_event_mode();
+        self.current_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        self.selected_date = self.current_date;
     }
 
-    /// Enter day view for the selected date
-    fn enter_day_view(&mut self) {
-        self.view_mode = ViewMode::Day;
+    /// Move to previous month
+    fn prev_month(&mut self) {
+        let (year, month) = if self.current_date.month() == 1 {
+            (self.current_date.year() - 1, 12)
+        } else {
+            (self.current_date.year(), self.current_date.month() - 1)
+        };
+        self.current_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        self.selected_date = self.current_date;
     }
 }
 
@@ -689,8 +674,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let render_state = ui::RenderState {
             current_date: app.current_date,
             selected_date: app.selected_date,
-            view_mode: app.view_mode,
-            show_weekends: app.show_weekends,
             events: &app.events,
             google_auth: &app.google_auth,
             icloud_auth: &app.icloud_auth,
@@ -902,16 +885,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(StdDuration::from_millis(100))?
             && let Event::Key(key_event) = event::read()?
                 && key_event.kind == KeyEventKind::Press {
-                    // Handle Event navigation mode (month view only)
-                    if app.navigation_mode == NavigationMode::Event && app.view_mode == ViewMode::Month {
-                        match key_event.code {
-                            KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
+                    // Handle Event navigation mode
+                    if app.navigation_mode == NavigationMode::Event {
+                        match (key_event.code, key_event.modifiers) {
+                            (KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down, _) => {
                                 app.next_event();
                             }
-                            KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
+                            (KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up, _) => {
                                 app.prev_event();
                             }
-                            KeyCode::Char('J') => {
+                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                                // Scroll down 10 events
+                                for _ in 0..10 {
+                                    app.next_event();
+                                }
+                            }
+                            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                                // Scroll up 10 events
+                                for _ in 0..10 {
+                                    app.prev_event();
+                                }
+                            }
+                            (KeyCode::Char('J'), _) => {
                                 // Join meeting
                                 if let Some(event) = app.get_selected_event()
                                     && let Some(ref url) = event.meeting_url {
@@ -920,7 +915,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .spawn();
                                     }
                             }
-                            KeyCode::Char('a') | KeyCode::Char('а') => {
+                            (KeyCode::Char('a') | KeyCode::Char('а'), _) => {
                                 // Accept event (Google only)
                                 if let Some(event) = app.get_selected_event() {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
@@ -945,7 +940,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            KeyCode::Char('d') | KeyCode::Char('д') => {
+                            (KeyCode::Char('d') | KeyCode::Char('д'), m) if !m.contains(KeyModifiers::CONTROL) => {
                                 // Decline event (Google only)
                                 if let Some(event) = app.get_selected_event() {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
@@ -970,7 +965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            KeyCode::Char('x') | KeyCode::Char('ь') => {
+                            (KeyCode::Char('x') | KeyCode::Char('ь'), _) => {
                                 // Delete event
                                 if let Some(event) = app.get_selected_event() {
                                     match event.id.clone() {
@@ -1013,27 +1008,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            KeyCode::Esc => {
+                            (KeyCode::Esc, _) => {
                                 app.exit_event_mode();
                             }
-                            KeyCode::Char('D') => {
+                            (KeyCode::Char('D'), _) => {
                                 app.show_logs = !app.show_logs;
                             }
-                            KeyCode::Char('v') | KeyCode::Char('ж') => {
-                                // Enter day view for the selected date
-                                app.enter_day_view();
-                            }
-                            KeyCode::Char('1') => {
+                            (KeyCode::Char('1'), _) => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://calendar.google.com")
                                     .spawn();
                             }
-                            KeyCode::Char('2') => {
+                            (KeyCode::Char('2'), _) => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://www.icloud.com/calendar")
                                     .spawn();
                             }
-                            KeyCode::Char('q') | KeyCode::Char('я') => {
+                            (KeyCode::Char('q') | KeyCode::Char('я'), _) => {
                                 break;
                             }
                             _ => {}
@@ -1041,90 +1032,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
 
-                    // Handle Day view mode
-                    if app.view_mode == ViewMode::Day {
-                        match key_event.code {
-                            KeyCode::Char('h') | KeyCode::Char('х') | KeyCode::Left => {
-                                app.prev_day();
-                            }
-                            KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right => {
-                                app.next_day();
-                            }
-                            KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
-                                app.next_week();
-                            }
-                            KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
-                                app.prev_week();
-                            }
-                            KeyCode::Char('t') | KeyCode::Char('т') => {
-                                app.goto_today();
-                            }
-                            KeyCode::Esc => {
-                                // Return to month view with event mode
-                                app.view_mode = ViewMode::Month;
-                                app.enter_event_mode();
-                            }
-                            KeyCode::Char('q') | KeyCode::Char('я') => {
-                                break;
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
 
                     // Day navigation mode (default)
-                    match key_event.code {
+                    match (key_event.code, key_event.modifiers) {
                         // Navigation keys (with Bulgarian Phonetic equivalents)
-                        KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down => {
-                            app.next_week();
-                        }
-                        KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up => {
-                            app.prev_week();
-                        }
-                        KeyCode::Char('h') | KeyCode::Char('х') | KeyCode::Left => {
-                            app.prev_day();
-                        }
-                        KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right => {
+                        (KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down, _) => {
                             app.next_day();
                         }
-                        KeyCode::Enter => {
-                            // Enter event mode in month view
-                            if app.view_mode == ViewMode::Month {
-                                app.enter_event_mode();
-                            }
+                        (KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up, _) => {
+                            app.prev_day();
                         }
-                        KeyCode::Char('t') | KeyCode::Char('т') => {
+                        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                            app.next_month();
+                        }
+                        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                            app.prev_month();
+                        }
+                        (KeyCode::Enter, _) => {
+                            app.enter_event_mode();
+                        }
+                        (KeyCode::Char('t') | KeyCode::Char('т'), _) => {
                             app.goto_today();
                         }
-                        KeyCode::Char('r') | KeyCode::Char('р') => {
+                        (KeyCode::Char('r') | KeyCode::Char('р'), _) => {
                             app.events.clear();
                             app.google_needs_fetch = true;
                             app.icloud_needs_fetch = true;
                             app.status_message = Some("Refreshing...".to_string());
                         }
-                        KeyCode::Char('v') | KeyCode::Char('ж') => {
-                            // Toggle between Month and Week views
-                            app.toggle_view_mode();
-                        }
-                        KeyCode::Char('s') | KeyCode::Char('с') => {
-                            // Toggle weekends (only meaningful in week view)
-                            app.show_weekends = !app.show_weekends;
-                        }
-                        KeyCode::Char('D') => {
+                        (KeyCode::Char('D'), _) => {
                             // Toggle HTTP request logs display
                             app.show_logs = !app.show_logs;
                         }
-                        KeyCode::Char('1') => {
+                        (KeyCode::Char('1'), _) => {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://calendar.google.com")
                                 .spawn();
                         }
-                        KeyCode::Char('2') => {
+                        (KeyCode::Char('2'), _) => {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://www.icloud.com/calendar")
                                 .spawn();
                         }
-                        KeyCode::Char('g') | KeyCode::Char('г') => {
+                        (KeyCode::Char('g') | KeyCode::Char('г'), _) => {
                             // Start Google auth flow (only if not already authenticated)
                             if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                 // Already authenticated, ignore
@@ -1150,7 +1100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        KeyCode::Char('i') | KeyCode::Char('и') => {
+                        (KeyCode::Char('i') | KeyCode::Char('и'), _) => {
                             // Start iCloud discovery (re-run to refresh calendar names)
                             if let Some(ref icloud_config) = app.config.icloud {
                                 app.icloud_auth = ICloudAuthState::Discovering;
@@ -1180,7 +1130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        KeyCode::Char('q') | KeyCode::Char('я') | KeyCode::Esc => {
+                        (KeyCode::Char('q') | KeyCode::Char('я') | KeyCode::Esc, _) => {
                             break;
                         }
                         _ => {}

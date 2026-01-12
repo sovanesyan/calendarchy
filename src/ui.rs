@@ -1,6 +1,6 @@
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
-use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, ViewMode};
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike, Weekday};
+use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
 use crossterm::{
     cursor,
     execute,
@@ -56,8 +56,6 @@ fn draw_separator(out: &mut impl Write, x: u16, y: u16, width: u16) {
 pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
-    pub view_mode: ViewMode,
-    pub show_weekends: bool,
     pub show_logs: bool,
     pub events: &'a EventCache,
     pub google_auth: &'a GoogleAuthState,
@@ -181,11 +179,8 @@ pub fn render(state: &RenderState) {
 
     execute!(out, Clear(ClearType::All), cursor::Hide).unwrap();
 
-    match state.view_mode {
-        ViewMode::Month => render_month_view(&mut out, state, today, term_width, term_height),
-        ViewMode::Week => render_week_view(&mut out, state, today, term_width, term_height),
-        ViewMode::Day => render_day_view(&mut out, state, today, term_width, term_height),
-    }
+    // Month view handles both normal and day timeline modes
+    render_month_view(&mut out, state, today, term_width, term_height);
 
     // Render HTTP logs if enabled
     let log_height = if state.show_logs { 8 } else { 0 };
@@ -233,21 +228,12 @@ pub fn render(state: &RenderState) {
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
 
-    let controls = if state.view_mode == ViewMode::Day {
-        // Day view controls
-        String::from(" hl:day jk:week t:today Esc:back q:quit")
-    } else if state.navigation_mode == NavigationMode::Event {
-        // Event navigation mode controls (event-specific actions shown in details panel)
-        String::from(" jk:nav v:day 1:google 2:icloud D:logs Esc:back q:quit")
+    let controls = if state.navigation_mode == NavigationMode::Event {
+        // Event navigation mode controls
+        " jk:nav ^d/^u:scroll 1:google 2:icloud D:logs Esc:back q:quit".to_string()
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" hjkl:nav t:today r:refresh v:view");
-        if state.view_mode == ViewMode::Month {
-            c.push_str(" Enter:events");
-        }
-        if state.view_mode == ViewMode::Week {
-            c.push_str(" s:weekends");
-        }
+        let mut c = String::from(" jk:day ^d/^u:month t:today r:refresh Enter:events");
         if !state.google_auth.is_authenticated() {
             c.push_str(" g:work");
         }
@@ -304,6 +290,10 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         // Separator line
         draw_separator(out, events_x, 1, events_panel_width);
 
+        let google_events = state.events.google.get(state.selected_date);
+        let icloud_events = state.events.icloud.get(state.selected_date);
+        let is_past_day = state.selected_date < today;
+
         // Selection info for highlighting
         let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
             Some(state.selected_event_index)
@@ -315,10 +305,6 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         } else {
             None
         };
-
-        let google_events = state.events.google.get(state.selected_date);
-        let icloud_events = state.events.icloud.get(state.selected_date);
-        let is_past_day = state.selected_date < today;
 
         // Render Work (Google) panel
         render_event_panel(
@@ -370,267 +356,6 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         render_event_details_column(out, details_x, 0, details_panel_width, details_height, selected_event);
     }
-}
-
-fn render_week_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
-    let now = Local::now();
-    let current_time = now.time();
-
-    // Calculate the week (Monday to Sunday) containing selected_date
-    let days_from_monday = state.selected_date.weekday().num_days_from_monday();
-    let week_start = state.selected_date - Duration::days(days_from_monday as i64);
-
-    // Determine which days to show
-    let days_to_show: Vec<i64> = if state.show_weekends {
-        (0..7).collect() // Mon-Sun
-    } else {
-        (0..5).collect() // Mon-Fri
-    };
-    let num_days = days_to_show.len() as u16;
-
-    // Calculate column width
-    let col_width = term_width / num_days;
-    let panel_height = term_height.saturating_sub(3); // Leave room for status and controls
-    let half_height = panel_height / 2;
-
-    // Render header row with day names and dates
-    for (col_idx, &day_offset) in days_to_show.iter().enumerate() {
-        let date = week_start + Duration::days(day_offset);
-        let x = (col_idx as u16) * col_width;
-        let is_selected = date == state.selected_date;
-        let is_today = date == today;
-
-        execute!(out, cursor::MoveTo(x, 0)).unwrap();
-
-        // Day name
-        let day_name = match date.weekday() {
-            Weekday::Mon => "Mon",
-            Weekday::Tue => "Tue",
-            Weekday::Wed => "Wed",
-            Weekday::Thu => "Thu",
-            Weekday::Fri => "Fri",
-            Weekday::Sat => "Sat",
-            Weekday::Sun => "Sun",
-        };
-
-        if is_selected {
-            execute!(out, SetForegroundColor(Color::Black)).unwrap();
-            execute!(out, crossterm::style::SetBackgroundColor(Color::White)).unwrap();
-        } else if is_today {
-            execute!(out, SetForegroundColor(colors::TODAY)).unwrap();
-        } else if date.weekday() == Weekday::Sat || date.weekday() == Weekday::Sun {
-            execute!(out, SetForegroundColor(colors::MUTED)).unwrap();
-        } else {
-            execute!(out, SetForegroundColor(Color::White)).unwrap();
-        }
-
-        let header = format!("{} {:02}", day_name, date.day());
-        print!("{:^width$}", header, width = col_width as usize);
-        execute!(out, ResetColor, crossterm::style::SetBackgroundColor(Color::Reset)).unwrap();
-    }
-
-    // Render each day column
-    for (col_idx, &day_offset) in days_to_show.iter().enumerate() {
-        let date = week_start + Duration::days(day_offset);
-        let x = (col_idx as u16) * col_width;
-        let is_today = date == today;
-        let is_past_day = date < today;
-
-        // Work (Google) - top half
-        render_week_day_panel(
-            out,
-            x,
-            1,
-            col_width.saturating_sub(1),
-            half_height,
-            state.events.google.get(date),
-            is_today,
-            is_past_day,
-            current_time,
-        );
-
-        // Separator line
-        execute!(out, cursor::MoveTo(x, 1 + half_height)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("{}", "─".repeat(col_width.saturating_sub(1) as usize));
-        execute!(out, ResetColor).unwrap();
-
-        // Personal (iCloud) - bottom half
-        render_week_day_panel(
-            out,
-            x,
-            2 + half_height,
-            col_width.saturating_sub(1),
-            half_height.saturating_sub(1),
-            state.events.icloud.get(date),
-            is_today,
-            is_past_day,
-            current_time,
-        );
-    }
-}
-
-fn render_week_day_panel(
-    out: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    events: &[DisplayEvent],
-    is_today: bool,
-    is_past_day: bool,
-    current_time: NaiveTime,
-) {
-    let max_lines = height as usize;
-    let (current_event_idx, next_event_idx) = if is_today {
-        find_current_and_next_events(events, current_time)
-    } else {
-        (None, None)
-    };
-
-    let mut current_line = 0;
-    let mut events_shown = 0;
-    let usable_width = width.saturating_sub(1) as usize; // Leave space for indicator
-
-    for (i, event) in events.iter().enumerate() {
-        if current_line >= max_lines {
-            break;
-        }
-
-        let is_current = current_event_idx == Some(i);
-        let is_next = next_event_idx == Some(i);
-        let is_past_event = is_today && is_event_past(event, current_time) && !is_current;
-        let is_unaccepted = !event.accepted;
-
-        // Gray out: past days, past events today, or unaccepted
-        let event_color = if is_past_day || is_unaccepted || is_past_event {
-            colors::PAST_EVENT
-        } else if is_current {
-            colors::CURRENT_EVENT
-        } else if is_next {
-            colors::NEXT_EVENT
-        } else {
-            Color::Reset
-        };
-
-        // Format: "[icon] HH:MM Title" with wrapping
-        // Reserve 2 chars at start for meeting icon (consistent spacing whether link exists or not)
-        let icon_space = 2;
-        let adjusted_width = usable_width.saturating_sub(icon_space);
-        let time_title = format!("{} {}", event.time_str, event.title);
-        let wrapped_lines = wrap_text(&time_title, adjusted_width);
-
-        for (line_idx, line) in wrapped_lines.iter().enumerate() {
-            if current_line >= max_lines {
-                break;
-            }
-
-            execute!(out, cursor::MoveTo(x, y + current_line as u16)).unwrap();
-
-            // Show indicator only on first line of event
-            if line_idx == 0 {
-                if is_current && !is_unaccepted {
-                    execute!(out, SetForegroundColor(Color::Green)).unwrap();
-                    print!("\u{25CF}");
-                } else if is_next && !is_unaccepted {
-                    execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
-                    print!("\u{25CB}");
-                } else {
-                    print!(" ");
-                }
-
-                // Meeting icon to the left of time (consistent spacing)
-                if let Some(ref url) = event.meeting_url {
-                    print!("\x1b]8;;{}\x1b\\\u{1F4F9}\x1b]8;;\x1b\\", url);
-                } else {
-                    print!("  "); // Reserve space for alignment
-                }
-            } else {
-                print!("   "); // Indent continuation lines (indicator + icon space)
-            }
-
-            execute!(out, SetForegroundColor(event_color)).unwrap();
-            print!("{}", line);
-            execute!(out, ResetColor).unwrap();
-
-            current_line += 1;
-        }
-
-        events_shown += 1;
-    }
-
-    // Show overflow indicator if there are more events
-    if events_shown < events.len() && current_line < max_lines {
-        execute!(out, cursor::MoveTo(x, y + current_line as u16)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("+{}", events.len() - events_shown);
-        execute!(out, ResetColor).unwrap();
-    }
-}
-
-/// Wrap text to fit within a given width
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![];
-    }
-
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-    let mut current_width = 0;
-
-    for word in text.split_whitespace() {
-        let word_width = word.chars().count();
-
-        if current_width == 0 {
-            // First word on line
-            if word_width > max_width {
-                // Word is too long, force break it
-                for ch in word.chars() {
-                    if current_width >= max_width {
-                        lines.push(current_line);
-                        current_line = String::new();
-                        current_width = 0;
-                    }
-                    current_line.push(ch);
-                    current_width += 1;
-                }
-            } else {
-                current_line = word.to_string();
-                current_width = word_width;
-            }
-        } else if current_width + 1 + word_width <= max_width {
-            // Word fits on current line
-            current_line.push(' ');
-            current_line.push_str(word);
-            current_width += 1 + word_width;
-        } else {
-            // Word doesn't fit, start new line
-            lines.push(current_line);
-            if word_width > max_width {
-                // Word is too long, force break it
-                current_line = String::new();
-                current_width = 0;
-                for ch in word.chars() {
-                    if current_width >= max_width {
-                        lines.push(current_line);
-                        current_line = String::new();
-                        current_width = 0;
-                    }
-                    current_line.push(ch);
-                    current_width += 1;
-                }
-            } else {
-                current_line = word.to_string();
-                current_width = word_width;
-            }
-        }
-    }
-
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-
-    lines
 }
 
 fn render_calendar(
@@ -1070,186 +795,6 @@ fn days_in_month(date: NaiveDate) -> u32 {
         }
         _ => 30,
     }
-}
-
-/// Render day view with hourly timeline
-fn render_day_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
-    let now = Local::now();
-    let current_time = now.time();
-    let is_today = state.selected_date == today;
-
-    // Header with date
-    execute!(out, cursor::MoveTo(0, 0)).unwrap();
-    execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
-    print!("{}", state.selected_date.format("%A, %B %d, %Y"));
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-    if is_today {
-        execute!(out, SetForegroundColor(colors::TODAY)).unwrap();
-        print!(" (Today)");
-        execute!(out, ResetColor).unwrap();
-    }
-
-    // Separator
-    draw_separator(out, 0, 1, term_width);
-
-    // Collect all events for this day
-    let google_events = state.events.google.get(state.selected_date);
-    let icloud_events = state.events.icloud.get(state.selected_date);
-
-    // Time column width
-    let time_col_width = 6u16; // "HH:MM "
-    let content_width = term_width.saturating_sub(time_col_width + 1);
-
-    // Calculate visible hours based on events and current time
-    let (start_hour, end_hour) = calculate_visible_hours(google_events, icloud_events, is_today, current_time);
-
-    let available_rows = term_height.saturating_sub(4) as usize;
-    let hours_to_show = end_hour - start_hour;
-    let rows_per_hour = (available_rows / hours_to_show).max(1);
-
-    // Render timeline
-    let mut current_row = 2u16;
-
-    for hour in start_hour..end_hour {
-        if current_row >= term_height.saturating_sub(2) {
-            break;
-        }
-
-        // Hour label
-        execute!(out, cursor::MoveTo(0, current_row)).unwrap();
-        execute!(out, SetForegroundColor(colors::MUTED)).unwrap();
-        print!("{:02}:00 ", hour);
-        execute!(out, ResetColor).unwrap();
-
-        // Vertical line
-        execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
-        print!("\u{2502}");
-        execute!(out, ResetColor).unwrap();
-
-        // Current time indicator
-        if is_today && current_time.hour() == hour as u32 {
-            execute!(out, cursor::MoveTo(time_col_width, current_row)).unwrap();
-            execute!(out, SetForegroundColor(colors::CURRENT_EVENT)).unwrap();
-            let mins = current_time.minute();
-            let indicator_offset = (mins as usize * rows_per_hour) / 60;
-            if indicator_offset == 0 {
-                print!("\u{25B6}"); // Current time marker
-            }
-        }
-
-        // Find events that occur in this hour
-        let hour_events: Vec<(&DisplayEvent, bool)> = google_events.iter()
-            .map(|e| (e, true)) // true = Google
-            .chain(icloud_events.iter().map(|e| (e, false)))
-            .filter(|(e, _)| {
-                if let Some(start) = parse_event_time(&e.time_str) {
-                    start.hour() == hour as u32
-                } else if e.time_str == "All day" {
-                    hour == start_hour // Show all-day events at start
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        // Render events for this hour
-        if !hour_events.is_empty() {
-            let event_x = time_col_width + 2;
-            for (offset, (event, is_google)) in hour_events.iter().enumerate() {
-                let event_row = current_row + offset as u16;
-                if event_row >= term_height.saturating_sub(2) {
-                    break;
-                }
-
-                execute!(out, cursor::MoveTo(event_x, event_row)).unwrap();
-
-                // Source indicator
-                let source_color = if *is_google { colors::GOOGLE_ACCENT } else { colors::ICLOUD_ACCENT };
-                execute!(out, SetForegroundColor(source_color)).unwrap();
-                print!("\u{25CF} ");
-
-                // Determine event color
-                let is_past = is_today && is_event_past(event, current_time);
-                let is_current = is_today && !is_past && {
-                    if let (Some(start), Some(end)) = (parse_event_time(&event.time_str), event.end_time_str.as_ref().and_then(|s| parse_event_time(s))) {
-                        start <= current_time && current_time < end
-                    } else {
-                        false
-                    }
-                };
-
-                let event_color = if !event.accepted {
-                    colors::PAST_EVENT
-                } else if is_current {
-                    colors::CURRENT_EVENT
-                } else if is_past {
-                    colors::PAST_EVENT
-                } else {
-                    Color::White
-                };
-
-                execute!(out, SetForegroundColor(event_color)).unwrap();
-
-                // Time and title
-                let time_title = if event.time_str == "All day" {
-                    format!("[All day] {}", event.title)
-                } else if let Some(ref end) = event.end_time_str {
-                    format!("{}-{} {}", event.time_str, end, event.title)
-                } else {
-                    format!("{} {}", event.time_str, event.title)
-                };
-
-                print!("{}", truncate_str(&time_title, content_width.saturating_sub(4) as usize));
-                execute!(out, ResetColor).unwrap();
-            }
-        }
-
-        // Move to next hour
-        current_row += rows_per_hour as u16;
-    }
-
-}
-
-/// Calculate the visible hour range based on events
-fn calculate_visible_hours(
-    google_events: &[DisplayEvent],
-    icloud_events: &[DisplayEvent],
-    is_today: bool,
-    current_time: NaiveTime,
-) -> (usize, usize) {
-    let mut earliest = 9usize; // Default start
-    let mut latest = 18usize;  // Default end
-
-    // Find earliest and latest event times
-    for event in google_events.iter().chain(icloud_events.iter()) {
-        if let Some(start) = parse_event_time(&event.time_str) {
-            earliest = earliest.min(start.hour() as usize);
-            if let Some(end) = event.end_time_str.as_ref().and_then(|s| parse_event_time(s)) {
-                latest = latest.max(end.hour() as usize + 1);
-            } else {
-                latest = latest.max(start.hour() as usize + 1);
-            }
-        }
-    }
-
-    // Include current hour if today
-    if is_today {
-        let current_hour = current_time.hour() as usize;
-        earliest = earliest.min(current_hour);
-        latest = latest.max(current_hour + 1);
-    }
-
-    // Ensure reasonable bounds
-    earliest = earliest.max(0);
-    latest = latest.min(24);
-
-    // Ensure at least 1 hour difference
-    if latest <= earliest {
-        latest = earliest + 1;
-    }
-
-    (earliest, latest)
 }
 
 #[cfg(test)]
