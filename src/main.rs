@@ -213,6 +213,15 @@ impl AuthDisplay for ICloudAuthState {
     }
 }
 
+/// Pending action awaiting confirmation
+#[derive(Debug, Clone)]
+pub enum PendingAction {
+    AcceptEvent { calendar_id: String, event_id: String },
+    DeclineEvent { calendar_id: String, event_id: String },
+    DeleteGoogleEvent { calendar_id: String, event_id: String },
+    DeleteICloudEvent { calendar_url: String, event_uid: String, etag: Option<String> },
+}
+
 /// Application state
 struct App {
     current_date: NaiveDate,
@@ -231,6 +240,8 @@ struct App {
     navigation_mode: NavigationMode,
     selected_source: EventSource,
     selected_event_index: usize, // Index within the selected source
+    // Confirmation state
+    pending_action: Option<PendingAction>,
 }
 
 impl App {
@@ -256,6 +267,7 @@ impl App {
             navigation_mode: NavigationMode::Day,
             selected_source: EventSource::Google,
             selected_event_index: 0,
+            pending_action: None,
         };
 
         // Auto-enter event mode with current/next event selected
@@ -684,6 +696,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             selected_source: app.selected_source,
             selected_event_index: app.selected_event_index,
             show_logs: app.show_logs,
+            pending_action: app.pending_action.as_ref(),
         };
         ui::render(&render_state);
 
@@ -885,6 +898,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(StdDuration::from_millis(100))?
             && let Event::Key(key_event) = event::read()?
                 && key_event.kind == KeyEventKind::Press {
+                    // Handle pending confirmation first
+                    if let Some(action) = app.pending_action.take() {
+                        match key_event.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                // Execute the confirmed action
+                                match action {
+                                    PendingAction::AcceptEvent { calendar_id, event_id } => {
+                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                            let tokens = tokens.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let client = CalendarClient::new();
+                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "accepted").await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event accepted".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to accept: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Accepting event...".to_string());
+                                        }
+                                    }
+                                    PendingAction::DeclineEvent { calendar_id, event_id } => {
+                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                            let tokens = tokens.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let client = CalendarClient::new();
+                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "declined").await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event declined".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to decline: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Declining event...".to_string());
+                                        }
+                                    }
+                                    PendingAction::DeleteGoogleEvent { calendar_id, event_id } => {
+                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
+                                            let tokens = tokens.clone();
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let client = CalendarClient::new();
+                                                match client.delete_event(&tokens, &calendar_id, &event_id).await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Deleting event...".to_string());
+                                        }
+                                    }
+                                    PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag } => {
+                                        if let Some(ref icloud_config) = app.config.icloud {
+                                            let auth = ICloudAuth::new(icloud_config.clone());
+                                            let client = CalDavClient::new(auth);
+                                            let tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                match client.delete_event(&calendar_url, &event_uid, etag.as_deref()).await {
+                                                    Ok(()) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
+                                                    }
+                                                }
+                                            });
+                                            app.status_message = Some("Deleting event...".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                // Cancel - action already taken from pending_action
+                                app.status_message = Some("Cancelled".to_string());
+                            }
+                            _ => {
+                                // Put the action back if not confirmed/cancelled
+                                app.pending_action = Some(action);
+                            }
+                        }
+                        continue;
+                    }
+
                     // Handle Event navigation mode
                     if app.navigation_mode == NavigationMode::Event {
                         match (key_event.code, key_event.modifiers) {
@@ -916,24 +1021,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                             }
                             (KeyCode::Char('a') | KeyCode::Char('а'), _) => {
-                                // Accept event (Google only)
+                                // Accept event (Google only) - set pending action
                                 if let Some(event) = app.get_selected_event() {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
-                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
-                                            let tokens = tokens.clone();
-                                            let tx = tx.clone();
-                                            tokio::spawn(async move {
-                                                let client = CalendarClient::new();
-                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "accepted").await {
-                                                    Ok(()) => {
-                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event accepted".to_string())).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to accept: {}", e))).await;
-                                                    }
-                                                }
-                                            });
-                                            app.status_message = Some("Accepting event...".to_string());
+                                        if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
+                                            app.pending_action = Some(PendingAction::AcceptEvent { calendar_id, event_id });
                                         }
                                     } else {
                                         app.status_message = Some("Accept not supported for iCloud".to_string());
@@ -941,24 +1033,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             (KeyCode::Char('d') | KeyCode::Char('д'), m) if !m.contains(KeyModifiers::CONTROL) => {
-                                // Decline event (Google only)
+                                // Decline event (Google only) - set pending action
                                 if let Some(event) = app.get_selected_event() {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
-                                        if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
-                                            let tokens = tokens.clone();
-                                            let tx = tx.clone();
-                                            tokio::spawn(async move {
-                                                let client = CalendarClient::new();
-                                                match client.respond_to_event(&tokens, &calendar_id, &event_id, "declined").await {
-                                                    Ok(()) => {
-                                                        let _ = tx.send(AsyncMessage::EventActionSuccess("Event declined".to_string())).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to decline: {}", e))).await;
-                                                    }
-                                                }
-                                            });
-                                            app.status_message = Some("Declining event...".to_string());
+                                        if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
+                                            app.pending_action = Some(PendingAction::DeclineEvent { calendar_id, event_id });
                                         }
                                     } else {
                                         app.status_message = Some("Decline not supported for iCloud".to_string());
@@ -966,43 +1045,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             (KeyCode::Char('x') | KeyCode::Char('ь'), _) => {
-                                // Delete event
+                                // Delete event - set pending action
                                 if let Some(event) = app.get_selected_event() {
                                     match event.id.clone() {
                                         EventId::Google { calendar_id, event_id, .. } => {
-                                            if let GoogleAuthState::Authenticated(ref tokens) = app.google_auth {
-                                                let tokens = tokens.clone();
-                                                let tx = tx.clone();
-                                                tokio::spawn(async move {
-                                                    let client = CalendarClient::new();
-                                                    match client.delete_event(&tokens, &calendar_id, &event_id).await {
-                                                        Ok(()) => {
-                                                            let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
-                                                        }
-                                                    }
-                                                });
-                                                app.status_message = Some("Deleting event...".to_string());
+                                            if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
+                                                app.pending_action = Some(PendingAction::DeleteGoogleEvent { calendar_id, event_id });
                                             }
                                         }
                                         EventId::ICloud { calendar_url, event_uid, etag, .. } => {
-                                            if let Some(ref icloud_config) = app.config.icloud {
-                                                let auth = ICloudAuth::new(icloud_config.clone());
-                                                let client = CalDavClient::new(auth);
-                                                let tx = tx.clone();
-                                                tokio::spawn(async move {
-                                                    match client.delete_event(&calendar_url, &event_uid, etag.as_deref()).await {
-                                                        Ok(()) => {
-                                                            let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(AsyncMessage::EventActionError(format!("Failed to delete: {}", e))).await;
-                                                        }
-                                                    }
-                                                });
-                                                app.status_message = Some("Deleting event...".to_string());
+                                            if app.config.icloud.is_some() {
+                                                app.pending_action = Some(PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag });
                                             }
                                         }
                                     }

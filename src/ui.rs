@@ -1,5 +1,5 @@
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
-use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode};
+use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, PendingAction};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
 use crossterm::{
     cursor,
@@ -67,6 +67,8 @@ pub struct RenderState<'a> {
     pub navigation_mode: NavigationMode,
     pub selected_source: EventSource,
     pub selected_event_index: usize,
+    // Confirmation state
+    pub pending_action: Option<&'a PendingAction>,
 }
 
 /// Information about an upcoming event for the countdown display
@@ -199,6 +201,11 @@ pub fn render(state: &RenderState) {
         execute!(out, ResetColor).unwrap();
     }
 
+    // Render confirmation modal if there's a pending action
+    if let Some(action) = state.pending_action {
+        render_confirmation_modal(&mut out, action, term_width, term_height);
+    }
+
     // Render status bar at bottom
     let status_row = term_height.saturating_sub(2);
     execute!(out, cursor::MoveTo(0, status_row)).unwrap();
@@ -228,7 +235,10 @@ pub fn render(state: &RenderState) {
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
 
-    let controls = if state.navigation_mode == NavigationMode::Event {
+    let controls = if state.pending_action.is_some() {
+        // Confirmation mode controls
+        " y/Enter:confirm n/Esc:cancel".to_string()
+    } else if state.navigation_mode == NavigationMode::Event {
         // Event navigation mode controls
         " jk:nav ^d/^u:scroll 1:google 2:icloud D:logs Esc:back q:quit".to_string()
     } else {
@@ -647,8 +657,8 @@ fn render_event_details_column(
         current_row += 1;
     }
 
-    // Accept/Decline (Google events only, not for organizer)
-    if matches!(event.id, EventId::Google { .. }) && !event.is_organizer && current_row < y + height - 3 {
+    // Accept/Decline (Google events only)
+    if matches!(event.id, EventId::Google { .. }) && current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         if event.accepted {
@@ -660,8 +670,8 @@ fn render_event_details_column(
         current_row += 1;
     }
 
-    // Delete (not for organizer)
-    if !event.is_organizer && current_row < y + height - 3 {
+    // Delete
+    if current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         print!("[x] Delete");
@@ -779,6 +789,68 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
         format!("{}…", truncated)
     }
+}
+
+/// Render a centered confirmation modal
+fn render_confirmation_modal(out: &mut impl Write, action: &PendingAction, term_width: u16, term_height: u16) {
+    let prompt = match action {
+        PendingAction::AcceptEvent { .. } => "Accept this event?",
+        PendingAction::DeclineEvent { .. } => "Decline this event?",
+        PendingAction::DeleteGoogleEvent { .. } | PendingAction::DeleteICloudEvent { .. } => "Delete this event?",
+    };
+
+    // Modal dimensions
+    let modal_width = 30u16;
+    let modal_height = 5u16;
+    let start_x = (term_width.saturating_sub(modal_width)) / 2;
+    let start_y = (term_height.saturating_sub(modal_height)) / 2;
+
+    // Draw modal box
+    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
+
+    // Top border
+    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
+    print!("┌");
+    for _ in 0..modal_width - 2 {
+        print!("─");
+    }
+    print!("┐");
+
+    // Middle rows
+    for row in 1..modal_height - 1 {
+        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
+        print!("│");
+        for _ in 0..modal_width - 2 {
+            print!(" ");
+        }
+        print!("│");
+    }
+
+    // Bottom border
+    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
+    print!("└");
+    for _ in 0..modal_width - 2 {
+        print!("─");
+    }
+    print!("┘");
+
+    // Title
+    execute!(out, cursor::MoveTo(start_x + 2, start_y + 1)).unwrap();
+    execute!(out, SetForegroundColor(colors::NEXT_EVENT), SetAttribute(Attribute::Bold)).unwrap();
+    print!("{}", prompt);
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    // Options
+    execute!(out, cursor::MoveTo(start_x + 2, start_y + 3)).unwrap();
+    execute!(out, SetForegroundColor(colors::ACTION)).unwrap();
+    print!("[y/Enter]");
+    execute!(out, SetForegroundColor(Color::White)).unwrap();
+    print!(" Yes  ");
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    print!("[n/Esc]");
+    execute!(out, SetForegroundColor(Color::White)).unwrap();
+    print!(" No");
+    execute!(out, ResetColor).unwrap();
 }
 
 fn days_in_month(date: NaiveDate) -> u32 {
