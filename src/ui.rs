@@ -8,9 +8,26 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use std::io::{stdout, Write};
+use std::sync::Mutex;
 
 const CALENDAR_WIDTH: u16 = 22;
 const MIN_PANEL_WIDTH: u16 = 25;
+
+// Track previous render state to avoid unnecessary clearing
+#[derive(Default)]
+struct PrevRenderState {
+    selected_date: Option<NaiveDate>,
+    selected_source: Option<EventSource>,
+    selected_event_index: Option<usize>,
+    navigation_mode: Option<NavigationMode>,
+}
+
+static PREV_STATE: Mutex<PrevRenderState> = Mutex::new(PrevRenderState {
+    selected_date: None,
+    selected_source: None,
+    selected_event_index: None,
+    navigation_mode: None,
+});
 
 // Semantic color constants
 mod colors {
@@ -179,7 +196,8 @@ pub fn render(state: &RenderState) {
     // Get terminal size
     let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
 
-    execute!(out, Clear(ClearType::All), cursor::Hide).unwrap();
+    // Move to home position instead of clearing (alternate screen handles buffer)
+    execute!(out, cursor::MoveTo(0, 0)).unwrap();
 
     // Month view handles both normal and day timeline modes
     render_month_view(&mut out, state, today, term_width, term_height);
@@ -240,7 +258,7 @@ pub fn render(state: &RenderState) {
         " y/Enter:confirm n/Esc:cancel".to_string()
     } else if state.navigation_mode == NavigationMode::Event {
         // Event navigation mode controls
-        " jk:nav ^d/^u:scroll 1:google 2:icloud D:logs Esc:back q:quit".to_string()
+        " jk:nav ^d/^u:scroll t:today r:refresh Esc:back q:quit".to_string()
     } else {
         // Day navigation mode controls
         let mut c = String::from(" jk:day ^d/^u:month t:today r:refresh Enter:events");
@@ -287,9 +305,25 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     // Render calendar on left
     render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
 
+    // Check if we need to clear (only when state changes)
+    let needs_clear = {
+        let prev = PREV_STATE.lock().unwrap();
+        prev.selected_date != Some(state.selected_date)
+            || prev.selected_source != Some(state.selected_source)
+            || prev.selected_event_index != Some(state.selected_event_index)
+            || prev.navigation_mode != Some(state.navigation_mode)
+    };
+
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
         let events_x = CALENDAR_WIDTH + 1;
+
+        // Clear the events panel area only when content changes
+        if needs_clear {
+            for row in 0..term_height.saturating_sub(2) {
+                execute!(out, cursor::MoveTo(events_x, row), Clear(ClearType::UntilNewLine)).unwrap();
+            }
+        }
 
         // Events column header: selected date
         execute!(out, cursor::MoveTo(events_x, 0)).unwrap();
@@ -358,6 +392,13 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         let details_x = CALENDAR_WIDTH + events_panel_width + 2;
         let details_height = term_height.saturating_sub(3);
 
+        // Clear the details panel area only when content changes
+        if needs_clear {
+            for row in 0..term_height.saturating_sub(2) {
+                execute!(out, cursor::MoveTo(details_x, row), Clear(ClearType::UntilNewLine)).unwrap();
+            }
+        }
+
         // Get the selected event
         let selected_event = match state.selected_source {
             EventSource::Google => state.events.google.get(state.selected_date).get(state.selected_event_index),
@@ -365,6 +406,15 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         };
 
         render_event_details_column(out, details_x, 0, details_panel_width, details_height, selected_event);
+    }
+
+    // Update previous state
+    {
+        let mut prev = PREV_STATE.lock().unwrap();
+        prev.selected_date = Some(state.selected_date);
+        prev.selected_source = Some(state.selected_source);
+        prev.selected_event_index = Some(state.selected_event_index);
+        prev.navigation_mode = Some(state.navigation_mode);
     }
 }
 

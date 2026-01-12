@@ -14,7 +14,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
@@ -231,6 +231,7 @@ struct App {
     google_auth: GoogleAuthState,
     icloud_auth: ICloudAuthState,
     status_message: Option<String>,
+    status_message_time: Option<std::time::Instant>,
     config: Config,
     google_needs_fetch: bool,
     icloud_needs_fetch: bool,
@@ -259,6 +260,7 @@ impl App {
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
             status_message: None,
+            status_message_time: None,
             config: Config::default(),
             google_needs_fetch: false,
             icloud_needs_fetch: false,
@@ -274,6 +276,20 @@ impl App {
         app.enter_event_mode();
 
         app
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_message_time = Some(std::time::Instant::now());
+    }
+
+    fn clear_expired_status(&mut self) {
+        if let Some(time) = self.status_message_time {
+            if time.elapsed() > std::time::Duration::from_secs(3) {
+                self.status_message = None;
+                self.status_message_time = None;
+            }
+        }
     }
 
     fn next_day(&mut self) {
@@ -654,7 +670,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if app.config.google.is_none() && app.config.icloud.is_none() {
-        app.status_message = Some("No calendars configured. Edit ~/.config/calendarchy/config.json".to_string());
+        app.set_status("No calendars configured. Edit ~/.config/calendarchy/config.json");
     }
 
     // Channel for async messages
@@ -677,11 +693,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-    // Enable raw mode
+    // Enable raw mode and enter alternate screen
     enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
 
     // Main loop
     loop {
+        // Clear expired status messages
+        app.clear_expired_status();
+
         // Render
         let render_state = ui::RenderState {
             current_date: app.current_date,
@@ -786,7 +806,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = config::save_google_tokens(&tokens);
                     app.google_auth = GoogleAuthState::Authenticated(tokens);
                     app.google_needs_fetch = true;
-                    app.status_message = Some("Connected to Google Calendar!".to_string());
+                    app.set_status("Connected to Google Calendar!");
                 }
                 AsyncMessage::GoogleAuthPending => {}
                 AsyncMessage::GoogleAuthError(msg) => {
@@ -802,7 +822,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.google_loading = false;
                 }
                 AsyncMessage::GoogleFetchError(msg) => {
-                    app.status_message = Some(format!("Google: {}", msg));
+                    app.set_status(format!("Google: {}", msg));
                     app.google_loading = false;
                 }
                 AsyncMessage::GoogleTokenRefreshed(tokens) => {
@@ -813,7 +833,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AsyncMessage::GoogleRefreshFailed(msg) => {
                     app.google_auth = GoogleAuthState::NotAuthenticated;
-                    app.status_message = Some(format!("Token refresh failed: {}", msg));
+                    app.set_status(format!("Token refresh failed: {}", msg));
                     app.google_loading = false;
                 }
 
@@ -826,7 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let count = calendars.len();
                     app.icloud_auth = ICloudAuthState::Authenticated { calendars };
                     app.icloud_needs_fetch = true;
-                    app.status_message = Some(format!("Connected to {} iCloud calendar(s)!", count));
+                    app.set_status(format!("Connected to {} iCloud calendar(s)!", count));
                 }
                 AsyncMessage::ICloudDiscoveryError(msg) => {
                     app.icloud_auth = ICloudAuthState::Error(msg);
@@ -841,13 +861,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.icloud_loading = false;
                 }
                 AsyncMessage::ICloudFetchError(msg) => {
-                    app.status_message = Some(format!("iCloud: {}", msg));
+                    app.set_status(format!("iCloud: {}", msg));
                     app.icloud_loading = false;
                 }
 
                 // Event action messages
                 AsyncMessage::EventActionSuccess(msg) => {
-                    app.status_message = Some(msg);
+                    app.set_status(msg);
                     // Refresh events to reflect the change
                     app.events.clear();
                     app.google_needs_fetch = true;
@@ -856,7 +876,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.exit_event_mode();
                 }
                 AsyncMessage::EventActionError(msg) => {
-                    app.status_message = Some(msg);
+                    app.set_status(msg);
                 }
             }
         }
@@ -919,7 +939,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             });
-                                            app.status_message = Some("Accepting event...".to_string());
+                                            app.set_status("Accepting event...");
                                         }
                                     }
                                     PendingAction::DeclineEvent { calendar_id, event_id } => {
@@ -937,7 +957,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             });
-                                            app.status_message = Some("Declining event...".to_string());
+                                            app.set_status("Declining event...");
                                         }
                                     }
                                     PendingAction::DeleteGoogleEvent { calendar_id, event_id } => {
@@ -955,7 +975,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             });
-                                            app.status_message = Some("Deleting event...".to_string());
+                                            app.set_status("Deleting event...");
                                         }
                                     }
                                     PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag } => {
@@ -973,14 +993,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                 }
                                             });
-                                            app.status_message = Some("Deleting event...".to_string());
+                                            app.set_status("Deleting event...");
                                         }
                                     }
                                 }
                             }
                             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                 // Cancel - action already taken from pending_action
-                                app.status_message = Some("Cancelled".to_string());
+                                app.set_status("Cancelled");
                             }
                             _ => {
                                 // Put the action back if not confirmed/cancelled
@@ -1028,7 +1048,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app.pending_action = Some(PendingAction::AcceptEvent { calendar_id, event_id });
                                         }
                                     } else {
-                                        app.status_message = Some("Accept not supported for iCloud".to_string());
+                                        app.set_status("Accept not supported for iCloud");
                                     }
                                 }
                             }
@@ -1040,7 +1060,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app.pending_action = Some(PendingAction::DeclineEvent { calendar_id, event_id });
                                         }
                                     } else {
-                                        app.status_message = Some("Decline not supported for iCloud".to_string());
+                                        app.set_status("Decline not supported for iCloud");
                                     }
                                 }
                             }
@@ -1060,6 +1080,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
+                            }
+                            (KeyCode::Char('t') | KeyCode::Char('т'), _) => {
+                                app.goto_today();
+                            }
+                            (KeyCode::Char('r') | KeyCode::Char('р'), _) => {
+                                app.events.clear();
+                                app.google_needs_fetch = true;
+                                app.icloud_needs_fetch = true;
+                                app.set_status("Refreshing...");
                             }
                             (KeyCode::Esc, _) => {
                                 app.exit_event_mode();
@@ -1111,7 +1140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.events.clear();
                             app.google_needs_fetch = true;
                             app.icloud_needs_fetch = true;
-                            app.status_message = Some("Refreshing...".to_string());
+                            app.set_status("Refreshing...");
                         }
                         (KeyCode::Char('D'), _) => {
                             // Toggle HTTP request logs display
@@ -1193,12 +1222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Cleanup
     disable_raw_mode()?;
-    execute!(
-        stdout(),
-        cursor::Show,
-        Clear(ClearType::All),
-        cursor::MoveTo(0, 0)
-    )?;
+    execute!(stdout(), LeaveAlternateScreen, cursor::Show)?;
 
     Ok(())
 }
