@@ -324,6 +324,12 @@ impl App {
         }
     }
 
+    /// Go to today and select the current or next event
+    fn goto_now(&mut self) {
+        self.goto_today();
+        self.enter_event_mode(); // This already selects current/next event
+    }
+
     fn month_range(&self) -> (NaiveDate, NaiveDate) {
         let first = self.current_date.with_day(1).unwrap();
         let last = if self.current_date.month() == 12 {
@@ -1090,6 +1096,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.icloud_needs_fetch = true;
                                 app.set_status("Refreshing...");
                             }
+                            (KeyCode::Char('n') | KeyCode::Char('н'), _) => {
+                                app.goto_now();
+                            }
                             (KeyCode::Esc, _) => {
                                 app.exit_event_mode();
                             }
@@ -1141,6 +1150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.google_needs_fetch = true;
                             app.icloud_needs_fetch = true;
                             app.set_status("Refreshing...");
+                        }
+                        (KeyCode::Char('n') | KeyCode::Char('н'), _) => {
+                            app.goto_now();
                         }
                         (KeyCode::Char('D'), _) => {
                             // Toggle HTTP request logs display

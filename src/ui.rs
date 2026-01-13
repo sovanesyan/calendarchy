@@ -1,6 +1,6 @@
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
 use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, PendingAction};
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use crossterm::{
     cursor,
     execute,
@@ -54,6 +54,10 @@ mod colors {
     pub const TIME: Color = Color::White;
     pub const LOCATION: Color = Color::Yellow;
     pub const ACTION: Color = Color::Green;
+
+    // Week availability
+    pub const BUSY_BLOCK: Color = Color::Blue;
+    pub const FREE_BLOCK: Color = Color::Grey;
 
     // Status bar
     pub const LOG_TEXT: Color = Color::DarkCyan;
@@ -258,10 +262,10 @@ pub fn render(state: &RenderState) {
         " y/Enter:confirm n/Esc:cancel".to_string()
     } else if state.navigation_mode == NavigationMode::Event {
         // Event navigation mode controls
-        " jk:nav ^d/^u:scroll t:today r:refresh Esc:back q:quit".to_string()
+        " jk:nav ^d/^u:scroll n:now t:today r:refresh Esc:back q:quit".to_string()
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" jk:day ^d/^u:month t:today r:refresh Enter:events");
+        let mut c = String::from(" jk:day ^d/^u:month n:now t:today r:refresh Enter:events");
         if !state.google_auth.is_authenticated() {
             c.push_str(" g:work");
         }
@@ -504,6 +508,99 @@ fn render_calendar(
         }
     }
 
+    // Render week availability below the calendar grid
+    render_week_availability(out, events, selected_date);
+}
+
+/// Check if a given hour (0-23) is busy on a given date
+fn is_hour_busy(events: &[DisplayEvent], hour: u32) -> bool {
+    for event in events {
+        // Skip all-day events - they don't block specific hours
+        if event.time_str == "All day" {
+            continue;
+        }
+
+        // Parse start time
+        if let Some(start_time) = parse_event_time(&event.time_str) {
+            let start_hour = start_time.hour();
+
+            // Parse end time if available
+            let end_hour = if let Some(ref end_str) = event.end_time_str {
+                if end_str == "All day" {
+                    continue;
+                }
+                parse_event_time(end_str).map(|t| {
+                    // If end time is earlier than start (e.g., end at 00:00 means end of day)
+                    let eh = t.hour();
+                    if eh == 0 { 24 } else { eh }
+                }).unwrap_or(start_hour + 1)
+            } else {
+                start_hour + 1 // Assume 1 hour duration if no end time
+            };
+
+            // Check if the hour falls within this event's range
+            if hour >= start_hour && hour < end_hour {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Get the Monday of the week containing the given date
+fn get_week_monday(date: NaiveDate) -> NaiveDate {
+    let weekday = date.weekday().num_days_from_monday();
+    date - Duration::days(weekday as i64)
+}
+
+/// Render week availability grid below the calendar
+fn render_week_availability(
+    out: &mut impl Write,
+    events: &EventCache,
+    selected_date: NaiveDate,
+) {
+    let start_row = 10u16; // Below the calendar grid
+    let monday = get_week_monday(selected_date);
+
+    // Header row: Mo Tu We Th Fr
+    execute!(out, cursor::MoveTo(0, start_row)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    print!("   M  T  W  T  F");
+    execute!(out, ResetColor).unwrap();
+
+    // Render each hour row (8am - 7pm = 12 rows)
+    for hour_offset in 0..12u32 {
+        let hour = 8 + hour_offset;
+        let row = start_row + 1 + hour_offset as u16;
+
+        execute!(out, cursor::MoveTo(0, row)).unwrap();
+
+        // Hour label
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("{:2} ", hour);
+        execute!(out, ResetColor).unwrap();
+
+        // Check each weekday (Mon-Fri)
+        for day_offset in 0..5i64 {
+            let date = monday + Duration::days(day_offset);
+
+            // Get events for this date from both sources
+            let google_events = events.google.get(date);
+            let icloud_events = events.icloud.get(date);
+
+            // Check if this hour is busy
+            let is_busy = is_hour_busy(google_events, hour) || is_hour_busy(icloud_events, hour);
+
+            if is_busy {
+                execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
+                print!("██ ");
+            } else {
+                execute!(out, SetForegroundColor(colors::FREE_BLOCK)).unwrap();
+                print!("░░ ");
+            }
+        }
+        execute!(out, ResetColor).unwrap();
+    }
 }
 
 /// Render event panel with title and events
@@ -804,7 +901,7 @@ fn is_event_past(event: &DisplayEvent, current_time: NaiveTime) -> bool {
 
 /// Find indices of current (happening now) and next upcoming event
 /// Returns (current_index, next_index)
-fn find_current_and_next_events(events: &[DisplayEvent], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
+pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
     let mut current_idx: Option<usize> = None;
     let mut next_idx: Option<usize> = None;
 
