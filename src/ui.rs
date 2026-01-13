@@ -4,14 +4,19 @@ use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use crossterm::{
     cursor,
     execute,
-    style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
+    style::{Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
 use std::io::{stdout, Write};
 use std::sync::Mutex;
 
-const CALENDAR_WIDTH: u16 = 22;
+const CALENDAR_WIDTH_WITH_WEEKENDS: u16 = 23;
+const CALENDAR_WIDTH_NO_WEEKENDS: u16 = 19;
 const MIN_PANEL_WIDTH: u16 = 25;
+
+fn calendar_width(show_weekends: bool) -> u16 {
+    if show_weekends { CALENDAR_WIDTH_WITH_WEEKENDS } else { CALENDAR_WIDTH_NO_WEEKENDS }
+}
 
 // Track previous render state to avoid unnecessary clearing
 #[derive(Default)]
@@ -57,7 +62,7 @@ mod colors {
 
     // Week availability
     pub const BUSY_BLOCK: Color = Color::Blue;
-    pub const FREE_BLOCK: Color = Color::Grey;
+    pub const FREE_BLOCK: Color = Color::Rgb { r: 200, g: 200, b: 200 };
 
     // Status bar
     pub const LOG_TEXT: Color = Color::DarkCyan;
@@ -78,6 +83,7 @@ pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
     pub show_logs: bool,
+    pub show_weekends: bool,
     pub events: &'a EventCache,
     pub google_auth: &'a GoogleAuthState,
     pub icloud_auth: &'a ICloudAuthState,
@@ -293,13 +299,15 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     let events_panel_width: u16;
     let details_panel_width: u16;
 
+    let cal_width = calendar_width(state.show_weekends);
+
     if in_event_mode {
-        let available = term_width.saturating_sub(CALENDAR_WIDTH + 2);
+        let available = term_width.saturating_sub(cal_width + 2);
         // Details panel: fixed width or 1/3 of available
         details_panel_width = (available / 3).clamp(MIN_PANEL_WIDTH, 40);
         events_panel_width = available.saturating_sub(details_panel_width + 1);
     } else {
-        events_panel_width = term_width.saturating_sub(CALENDAR_WIDTH + 1);
+        events_panel_width = term_width.saturating_sub(cal_width + 1);
         details_panel_width = 0;
     }
 
@@ -307,7 +315,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     let header_rows = 2u16;
 
     // Render calendar on left
-    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
+    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading, state.show_weekends);
 
     // Check if we need to clear (only when state changes)
     let needs_clear = {
@@ -320,7 +328,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
-        let events_x = CALENDAR_WIDTH + 1;
+        let events_x = cal_width + 1;
 
         // Clear the events panel area only when content changes
         if needs_clear {
@@ -393,7 +401,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
     // Render details panel on the right when in Event mode
     if in_event_mode && details_panel_width >= MIN_PANEL_WIDTH {
-        let details_x = CALENDAR_WIDTH + events_panel_width + 2;
+        let details_x = cal_width + events_panel_width + 2;
         let details_height = term_height.saturating_sub(3);
 
         // Clear the details panel area only when content changes
@@ -429,11 +437,11 @@ fn render_calendar(
     today: NaiveDate,
     events: &EventCache,
     is_loading: bool,
+    show_weekends: bool,
 ) {
     execute!(out, cursor::MoveTo(0, 0)).unwrap();
 
     // Month header
-    let first_day = current_date.with_day(1).unwrap();
     execute!(
         out,
         SetForegroundColor(Color::Cyan),
@@ -441,6 +449,7 @@ fn render_calendar(
     )
     .unwrap();
 
+    let cal_width = calendar_width(show_weekends);
     let loading_indicator = if is_loading { " *" } else { "" };
     let header = format!(
         "{} {}{}",
@@ -448,27 +457,33 @@ fn render_calendar(
         current_date.year(),
         loading_indicator
     );
-    print!("{}", truncate_str(&header, CALENDAR_WIDTH as usize));
+    print!("{}", truncate_str(&header, cal_width as usize));
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
     // Separator line
-    draw_separator(out, 0, 1, CALENDAR_WIDTH - 1);
+    draw_separator(out, 0, 1, cal_width - 1);
 
     // Weekday header
     execute!(out, cursor::MoveTo(0, 2)).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("Mo Tu We Th Fr Sa Su");
+    if show_weekends {
+        print!("Mo Tu We Th Fr Sa Su");
+    } else {
+        print!("Mo Tu We Th Fr");
+    }
     execute!(out, ResetColor).unwrap();
 
     // Calendar grid
+    let first_day = current_date.with_day(1).unwrap();
     let start_weekday = first_day.weekday().num_days_from_monday();
     let days_in_month = days_in_month(current_date);
+    let cols = if show_weekends { 7 } else { 5 };
 
     for row in 0..6 {
         execute!(out, cursor::MoveTo(0, 3 + row as u16)).unwrap();
 
-        for col in 0..7 {
-            let cell = row * 7 + col;
+        for col in 0..cols {
+            let cell = row * 7 + col; // Always use 7-day weeks for calculation
             if cell < start_weekday || cell >= start_weekday + days_in_month {
                 print!("   ");
             } else {
@@ -493,7 +508,7 @@ fn render_calendar(
                         SetAttribute(Attribute::Bold)
                     )
                     .unwrap();
-                } else if is_weekend {
+                } else if is_weekend && show_weekends {
                     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
                 }
 
@@ -509,11 +524,12 @@ fn render_calendar(
     }
 
     // Render week availability below the calendar grid
-    render_week_availability(out, events, selected_date);
+    render_week_availability(out, events, selected_date, show_weekends);
 }
 
-/// Check if a given hour (0-23) is busy on a given date
-fn is_hour_busy(events: &[DisplayEvent], hour: u32) -> bool {
+/// Check if a given 30-minute slot is busy
+/// slot_start is minutes from midnight (e.g., 8*60 = 480 for 8:00am)
+fn is_slot_busy(events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> bool {
     for event in events {
         // Skip all-day events - they don't block specific hours
         if event.time_str == "All day" {
@@ -522,24 +538,24 @@ fn is_hour_busy(events: &[DisplayEvent], hour: u32) -> bool {
 
         // Parse start time
         if let Some(start_time) = parse_event_time(&event.time_str) {
-            let start_hour = start_time.hour();
+            let event_start = start_time.hour() * 60 + start_time.minute();
 
             // Parse end time if available
-            let end_hour = if let Some(ref end_str) = event.end_time_str {
+            let event_end = if let Some(ref end_str) = event.end_time_str {
                 if end_str == "All day" {
                     continue;
                 }
                 parse_event_time(end_str).map(|t| {
-                    // If end time is earlier than start (e.g., end at 00:00 means end of day)
-                    let eh = t.hour();
-                    if eh == 0 { 24 } else { eh }
-                }).unwrap_or(start_hour + 1)
+                    let mins = t.hour() * 60 + t.minute();
+                    // Midnight means end of day
+                    if mins == 0 { 24 * 60 } else { mins }
+                }).unwrap_or(event_start + 60)
             } else {
-                start_hour + 1 // Assume 1 hour duration if no end time
+                event_start + 60 // Assume 1 hour duration if no end time
             };
 
-            // Check if the hour falls within this event's range
-            if hour >= start_hour && hour < end_hour {
+            // Check if the slot overlaps with this event
+            if slot_start < event_end && slot_end > event_start {
                 return true;
             }
         }
@@ -558,17 +574,24 @@ fn render_week_availability(
     out: &mut impl Write,
     events: &EventCache,
     selected_date: NaiveDate,
+    show_weekends: bool,
 ) {
     let start_row = 10u16; // Below the calendar grid
     let monday = get_week_monday(selected_date);
+    let num_days = if show_weekends { 7 } else { 5 };
 
-    // Header row: Mo Tu We Th Fr
+    // Header row
     execute!(out, cursor::MoveTo(0, start_row)).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("   M  T  W  T  F");
+    if show_weekends {
+        print!("    M  T  W  T  F  S  S");
+    } else {
+        print!("    M  T  W  T  F");
+    }
     execute!(out, ResetColor).unwrap();
 
     // Render each hour row (8am - 7pm = 12 rows)
+    // Each cell shows 30-min resolution using half-blocks
     for hour_offset in 0..12u32 {
         let hour = 8 + hour_offset;
         let row = start_row + 1 + hour_offset as u16;
@@ -580,24 +603,47 @@ fn render_week_availability(
         print!("{:2} ", hour);
         execute!(out, ResetColor).unwrap();
 
-        // Check each weekday (Mon-Fri)
-        for day_offset in 0..5i64 {
+        // Check each weekday
+        for day_offset in 0..num_days as i64 {
             let date = monday + Duration::days(day_offset);
 
             // Get events for this date from both sources
             let google_events = events.google.get(date);
             let icloud_events = events.icloud.get(date);
 
-            // Check if this hour is busy
-            let is_busy = is_hour_busy(google_events, hour) || is_hour_busy(icloud_events, hour);
+            // Check 30-minute slots
+            let slot1_start = hour * 60;       // :00
+            let slot1_end = hour * 60 + 30;    // :30
+            let slot2_start = hour * 60 + 30;  // :30
+            let slot2_end = (hour + 1) * 60;   // :00 next hour
 
-            if is_busy {
-                execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
-                print!("██ ");
-            } else {
-                execute!(out, SetForegroundColor(colors::FREE_BLOCK)).unwrap();
-                print!("░░ ");
+            let first_half_busy = is_slot_busy(google_events, slot1_start, slot1_end)
+                || is_slot_busy(icloud_events, slot1_start, slot1_end);
+            let second_half_busy = is_slot_busy(google_events, slot2_start, slot2_end)
+                || is_slot_busy(icloud_events, slot2_start, slot2_end);
+
+            // Vertical half-blocks: top = first 30 min, bottom = second 30 min
+            // ▀ draws top with fg, bottom with bg
+            match (first_half_busy, second_half_busy) {
+                (true, true) => {
+                    execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
+                    print!("██");
+                }
+                (true, false) => {
+                    execute!(out, SetForegroundColor(colors::BUSY_BLOCK), SetBackgroundColor(colors::FREE_BLOCK)).unwrap();
+                    print!("▀▀");
+                }
+                (false, true) => {
+                    execute!(out, SetForegroundColor(colors::FREE_BLOCK), SetBackgroundColor(colors::BUSY_BLOCK)).unwrap();
+                    print!("▀▀");
+                }
+                (false, false) => {
+                    execute!(out, SetForegroundColor(colors::FREE_BLOCK)).unwrap();
+                    print!("██");
+                }
             }
+            execute!(out, ResetColor).unwrap();
+            print!(" ");
         }
         execute!(out, ResetColor).unwrap();
     }

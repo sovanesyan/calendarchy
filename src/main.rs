@@ -14,7 +14,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
@@ -227,6 +227,7 @@ struct App {
     current_date: NaiveDate,
     selected_date: NaiveDate,
     show_logs: bool, // Toggle HTTP request logs display
+    show_weekends: bool, // Toggle weekend visibility in calendar views
     events: EventCache,
     google_auth: GoogleAuthState,
     icloud_auth: ICloudAuthState,
@@ -256,6 +257,7 @@ impl App {
             current_date: today,
             selected_date: today,
             show_logs: false,
+            show_weekends: false,
             events,
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
@@ -722,6 +724,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             selected_source: app.selected_source,
             selected_event_index: app.selected_event_index,
             show_logs: app.show_logs,
+            show_weekends: app.show_weekends,
             pending_action: app.pending_action.as_ref(),
         };
         ui::render(&render_state);
@@ -920,10 +923,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
 
-        // Handle keyboard input with timeout
-        if event::poll(StdDuration::from_millis(100))?
-            && let Event::Key(key_event) = event::read()?
-                && key_event.kind == KeyEventKind::Press {
+        // Handle input events with timeout
+        if event::poll(StdDuration::from_millis(100))? {
+            match event::read()? {
+                Event::Resize(_, _) => {
+                    // Clear screen on resize - next loop iteration will re-render
+                    execute!(stdout(), Clear(ClearType::All)).ok();
+                }
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     // Handle pending confirmation first
                     if let Some(action) = app.pending_action.take() {
                         match key_event.code {
@@ -1105,6 +1112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (KeyCode::Char('D'), _) => {
                                 app.show_logs = !app.show_logs;
                             }
+                            (KeyCode::Char('w') | KeyCode::Char('ц'), _) => {
+                                app.show_weekends = !app.show_weekends;
+                                execute!(stdout(), Clear(ClearType::All)).ok();
+                            }
                             (KeyCode::Char('1'), _) => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://calendar.google.com")
@@ -1157,6 +1168,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('D'), _) => {
                             // Toggle HTTP request logs display
                             app.show_logs = !app.show_logs;
+                        }
+                        (KeyCode::Char('w') | KeyCode::Char('ц'), _) => {
+                            // Toggle weekend visibility
+                            app.show_weekends = !app.show_weekends;
+                            execute!(stdout(), Clear(ClearType::All)).ok();
                         }
                         (KeyCode::Char('1'), _) => {
                             let _ = std::process::Command::new("xdg-open")
@@ -1230,6 +1246,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
+                _ => {}
+            }
+        }
     }
 
     // Cleanup
