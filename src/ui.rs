@@ -1,5 +1,7 @@
+use crate::app::{EventSource, NavigationMode, PendingAction};
+use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
-use crate::{get_recent_logs, EventSource, GoogleAuthState, ICloudAuthState, NavigationMode, PendingAction};
+use crate::logging::get_recent_logs;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use crossterm::{
     cursor,
@@ -964,11 +966,6 @@ pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: Naive
     }
 
     (current_idx, next_idx)
-}
-
-/// Trait for auth state display
-pub trait AuthDisplay {
-    fn is_authenticated(&self) -> bool;
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

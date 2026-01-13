@@ -1,7 +1,7 @@
 use crate::error::{check_caldav_response, check_caldav_response_no_body, CalendarchyError, Result};
 use crate::icloud::auth::ICloudAuth;
 use crate::icloud::types::ICalEvent;
-use crate::{log_request, log_response};
+use crate::logging::{log_request, log_response};
 use chrono::NaiveDate;
 use quick_xml::events::Event;
 use quick_xml::Reader;

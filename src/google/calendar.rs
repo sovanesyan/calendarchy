@@ -1,6 +1,6 @@
 use crate::error::{check_google_response, check_google_response_no_body, CalendarchyError, Result};
 use crate::google::types::{CalendarEvent, EventsListResponse, TokenInfo};
-use crate::{log_request, log_response};
+use crate::logging::{log_request, log_response};
 use chrono::NaiveDate;
 use reqwest::{Client, StatusCode};
 

@@ -1,7 +1,7 @@
 use crate::config::GoogleConfig;
 use crate::error::{CalendarchyError, Result};
 use crate::google::types::{DeviceCodeResponse, TokenInfo, TokenResponse};
-use crate::{log_request, log_response};
+use crate::logging::{log_request, log_response};
 use chrono::Utc;
 use reqwest::Client;
 
