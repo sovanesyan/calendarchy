@@ -286,11 +286,11 @@ impl App {
     }
 
     fn clear_expired_status(&mut self) {
-        if let Some(time) = self.status_message_time {
-            if time.elapsed() > std::time::Duration::from_secs(3) {
-                self.status_message = None;
-                self.status_message_time = None;
-            }
+        if let Some(time) = self.status_message_time
+            && time.elapsed() > std::time::Duration::from_secs(3)
+        {
+            self.status_message = None;
+            self.status_message_time = None;
         }
     }
 

@@ -384,6 +384,5 @@ impl CalDavClient {
 #[derive(Debug, Clone)]
 pub struct CalendarInfo {
     pub url: String,
-    #[allow(dead_code)]
     pub name: Option<String>,
 }

@@ -2,7 +2,6 @@ use reqwest::{Response, StatusCode};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum CalendarchyError {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
@@ -13,6 +12,7 @@ pub enum CalendarchyError {
     #[error("API error: {0}")]
     Api(String),
 
+    #[allow(dead_code)]
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -31,6 +31,7 @@ pub enum CalendarchyError {
     #[error("Token expired")]
     TokenExpired,
 
+    #[allow(dead_code)]
     #[error("Not authenticated")]
     NotAuthenticated,
 }

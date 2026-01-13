@@ -98,7 +98,6 @@ impl GoogleAuth {
     }
 
     /// Refresh an expired token
-    #[allow(dead_code)]
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenInfo> {
         log_request("POST", &format!("{} (refresh)", TOKEN_URL));
         let response = self

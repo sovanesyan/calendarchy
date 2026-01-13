@@ -11,7 +11,6 @@ pub struct ICalAttendee {
 
 /// An event from iCloud Calendar (parsed from iCal/VCALENDAR format)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ICalEvent {
     pub uid: String,
     pub summary: Option<String>,

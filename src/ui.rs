@@ -51,8 +51,6 @@ mod colors {
     // UI elements
     pub const HEADER: Color = Color::Cyan;
     pub const SEPARATOR: Color = Color::DarkGrey;
-    pub const MUTED: Color = Color::DarkGrey;
-    pub const TODAY: Color = Color::Green;
 
     // Details panel
     pub const TITLE: Color = Color::White;
@@ -149,21 +147,21 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
             .filter(|e| e.accepted && e.time_str != "All day")
             .collect();
 
-        if let Some(event) = future_events.first() {
-            if let Some(start_time) = parse_event_time(&event.time_str) {
-                // Calculate minutes from now until the event
-                // Remaining today + full days + time into target day
-                let remaining_today = (NaiveTime::from_hms_opt(23, 59, 59).unwrap() - current_time).num_minutes();
-                let full_days_minutes = (days_ahead - 1) * 24 * 60;
-                let target_day_minutes = (start_time - NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_minutes();
-                let minutes_until = remaining_today + full_days_minutes + target_day_minutes + 1;
+        if let Some(event) = future_events.first()
+            && let Some(start_time) = parse_event_time(&event.time_str)
+        {
+            // Calculate minutes from now until the event
+            // Remaining today + full days + time into target day
+            let remaining_today = (NaiveTime::from_hms_opt(23, 59, 59).unwrap() - current_time).num_minutes();
+            let full_days_minutes = (days_ahead - 1) * 24 * 60;
+            let target_day_minutes = (start_time - NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_minutes();
+            let minutes_until = remaining_today + full_days_minutes + target_day_minutes + 1;
 
-                return Some(NextEventInfo {
-                    event,
-                    is_current: false,
-                    minutes_until,
-                });
-            }
+            return Some(NextEventInfo {
+                event,
+                is_current: false,
+                minutes_until,
+            });
         }
     }
 
@@ -174,9 +172,7 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
 fn format_countdown(info: &NextEventInfo, max_title_len: usize) -> String {
     let title = truncate_str(&info.event.title, max_title_len);
 
-    if info.is_current {
-        format!("Now: {}", title)
-    } else if info.minutes_until <= 0 {
+    if info.is_current || info.minutes_until <= 0 {
         format!("Now: {}", title)
     } else if info.minutes_until < 60 {
         format!("Next: {} in {}m", title, info.minutes_until)
