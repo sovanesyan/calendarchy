@@ -954,9 +954,18 @@ pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: Naive
             if event.time_str == "All day" {
                 continue; // Skip all-day events
             }
+
+            // Check if event is currently happening (started but not ended)
             if event_time <= current_time {
-                // This event has started - it's the current candidate
-                current_idx = Some(i);
+                // Check if event has ended
+                let has_ended = event.end_time_str.as_ref().map_or(false, |end_str| {
+                    parse_event_time(end_str).map_or(false, |end_time| current_time >= end_time)
+                });
+
+                if !has_ended {
+                    // Event is still ongoing - it's the current candidate
+                    current_idx = Some(i);
+                }
             } else if next_idx.is_none() {
                 // First event that hasn't started yet
                 next_idx = Some(i);
