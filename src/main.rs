@@ -25,6 +25,7 @@ use crossterm::{
 use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
 use std::io::stdout;
+use std::os::unix::process::CommandExt;
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc;
 
@@ -476,6 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     && let Some(ref url) = event.meeting_url {
                                         let _ = std::process::Command::new("xdg-open")
                                             .arg(url)
+                                            .process_group(0)
                                             .spawn();
                                     }
                             }
@@ -545,11 +547,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (KeyCode::Char('1'), _) => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://calendar.google.com")
+                                    .process_group(0)
                                     .spawn();
                             }
                             (KeyCode::Char('2'), _) => {
                                 let _ = std::process::Command::new("xdg-open")
                                     .arg("https://www.icloud.com/calendar")
+                                    .process_group(0)
                                     .spawn();
                             }
                             (KeyCode::Char('q') | KeyCode::Char('я'), _) => {
@@ -603,11 +607,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('1'), _) => {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://calendar.google.com")
+                                .process_group(0)
                                 .spawn();
                         }
                         (KeyCode::Char('2'), _) => {
                             let _ = std::process::Command::new("xdg-open")
                                 .arg("https://www.icloud.com/calendar")
+                                .process_group(0)
                                 .spawn();
                         }
                         (KeyCode::Char('g') | KeyCode::Char('г'), _) => {
