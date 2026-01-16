@@ -48,6 +48,7 @@ mod colors {
     pub const CURRENT_EVENT: Color = Color::Green;
     pub const NEXT_EVENT: Color = Color::Yellow;
     pub const PAST_EVENT: Color = Color::DarkGrey;
+    pub const FREE_EVENT: Color = Color::DarkGrey;
     pub const SELECTED: Color = Color::Cyan;
 
     // UI elements
@@ -534,6 +535,16 @@ fn is_slot_busy(events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> bool
             continue;
         }
 
+        // Skip free events - they don't block time
+        if event.is_free {
+            continue;
+        }
+
+        // Skip unaccepted events (declined/tentative) - they don't block time
+        if !event.accepted {
+            continue;
+        }
+
         // Parse start time
         if let Some(start_time) = parse_event_time(&event.time_str) {
             let event_start = start_time.hour() * 60 + start_time.minute();
@@ -706,13 +717,16 @@ fn render_event_panel(
         let is_next = next_event_idx == Some(i);
         let is_past_event = is_today && is_event_past(event, current_time) && !is_current;
         let is_unaccepted = !event.accepted;
+        let is_free_event = event.is_free;
 
         // Choose color based on event status
-        // Gray out: past days, past events today, or unaccepted
+        // Gray out: past days, past events today, unaccepted, or free events
         let event_color = if is_selected {
             colors::SELECTED
         } else if is_past_day || is_unaccepted || is_past_event {
             colors::PAST_EVENT
+        } else if is_free_event {
+            colors::FREE_EVENT
         } else if is_current {
             colors::CURRENT_EVENT
         } else if is_next {
@@ -725,10 +739,10 @@ fn render_event_panel(
         if is_selected {
             execute!(out, SetForegroundColor(Color::Cyan)).unwrap();
             print!("\u{25B6}"); // Right-pointing triangle
-        } else if is_current && !is_unaccepted {
+        } else if is_current && !is_unaccepted && !is_free_event {
             execute!(out, SetForegroundColor(Color::Green)).unwrap();
             print!("\u{25CF}"); // Filled circle
-        } else if is_next && !is_unaccepted {
+        } else if is_next && !is_unaccepted && !is_free_event {
             execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
             print!("\u{25CB}"); // Empty circle
         } else {
@@ -737,7 +751,7 @@ fn render_event_panel(
 
         // Time
         execute!(out, SetForegroundColor(event_color)).unwrap();
-        if is_selected || ((is_current || is_next) && !is_unaccepted) {
+        if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
             execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         }
         print!("{:>7} ", event.time_str);
@@ -745,7 +759,7 @@ fn render_event_panel(
 
         // Title
         execute!(out, SetForegroundColor(event_color)).unwrap();
-        if is_selected || ((is_current || is_next) && !is_unaccepted) {
+        if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
             execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         }
         let title_width = width.saturating_sub(10) as usize;
@@ -1078,6 +1092,7 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
+            is_free: false,
             meeting_url: None,
             description: None,
             location: None,

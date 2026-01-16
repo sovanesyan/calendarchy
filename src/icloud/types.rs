@@ -21,6 +21,8 @@ pub struct ICalEvent {
     pub url: Option<String>,
     pub accepted: bool, // true if accepted or no PARTSTAT found
     pub attendees: Vec<ICalAttendee>,
+    /// "TRANSPARENT" = free, "OPAQUE" = busy (default)
+    pub transp: Option<String>,
     /// The calendar URL this event belongs to (set by CalDavClient)
     pub calendar_url: String,
     /// The etag for conditional updates
@@ -93,6 +95,11 @@ impl ICalEvent {
         None
     }
 
+    /// Check if the event is marked as "free" (doesn't block time)
+    pub fn is_free(&self) -> bool {
+        self.transp.as_deref() == Some("TRANSPARENT")
+    }
+
     /// Parse an iCal VCALENDAR string into events (test-only)
     #[cfg(test)]
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
@@ -147,6 +154,7 @@ impl ICalEvent {
                                 builder.attendees.push(attendee);
                             }
                         }
+                        "TRANSP" => builder.transp = Some(value.to_string()),
                         _ => {}
                     }
                 }
@@ -167,6 +175,7 @@ struct ICalEventBuilder {
     url: Option<String>,
     partstat: Option<String>, // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
     attendees: Vec<ICalAttendee>,
+    transp: Option<String>,
     calendar_url: String,
     etag: Option<String>,
 }
@@ -191,6 +200,7 @@ impl ICalEventBuilder {
             url: self.url,
             accepted,
             attendees: self.attendees,
+            transp: self.transp,
             calendar_url: self.calendar_url,
             etag: self.etag,
         })

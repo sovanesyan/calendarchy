@@ -64,6 +64,8 @@ pub struct DisplayEvent {
     pub date: NaiveDate,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
     pub is_organizer: bool, // true if the user created/organizes this event
+    #[serde(default)] // backwards compat with old cache
+    pub is_free: bool, // true if event is marked as "free" (doesn't block time)
     pub meeting_url: Option<String>, // Zoom, Meet, Teams link if available
     pub description: Option<String>,
     pub location: Option<String>,
@@ -228,6 +230,7 @@ mod tests {
             date,
             accepted: true,
             is_organizer: false,
+            is_free: false,
             meeting_url: None,
             description: None,
             location: None,

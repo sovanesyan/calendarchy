@@ -45,6 +45,8 @@ pub struct CalendarEvent {
     pub location: Option<String>,
     pub description: Option<String>,
     pub status: Option<String>,
+    /// "transparent" = free, "opaque" = busy (default)
+    pub transparency: Option<String>,
     pub attendees: Option<Vec<Attendee>>,
     pub conference_data: Option<ConferenceData>,
     pub hangout_link: Option<String>,
@@ -159,6 +161,11 @@ impl CalendarEvent {
         }
     }
 
+    /// Check if the event is marked as "free" (doesn't block time)
+    pub fn is_free(&self) -> bool {
+        self.transparency.as_deref() == Some("transparent")
+    }
+
     /// Extract meeting URL (Zoom, Google Meet, etc.)
     pub fn meeting_url(&self) -> Option<String> {
         // Check hangout_link first (Google Meet)
@@ -226,6 +233,7 @@ mod tests {
             location: None,
             description: None,
             status: None,
+            transparency: None,
             attendees: None,
             conference_data: None,
             hangout_link: None,
@@ -249,6 +257,7 @@ mod tests {
             location: None,
             description: None,
             status: None,
+            transparency: None,
             attendees: None,
             conference_data: None,
             hangout_link: None,
