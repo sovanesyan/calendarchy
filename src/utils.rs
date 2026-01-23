@@ -49,17 +49,6 @@ pub fn name_from_email(email: &str) -> String {
         .join(" ")
 }
 
-/// Common meeting URL patterns
-pub const MEETING_URL_PATTERNS: &[&str] = &[
-    "https://zoom.us/",
-    "https://us02web.zoom.us/",
-    "https://us04web.zoom.us/",
-    "https://us05web.zoom.us/",
-    "https://us06web.zoom.us/",
-    "https://meet.google.com/",
-    "https://teams.microsoft.com/",
-];
-
 /// Check if a URL is a meeting URL (Zoom, Meet, Teams)
 pub fn is_meeting_url(url: &str) -> bool {
     url.contains("zoom.us")
@@ -69,14 +58,20 @@ pub fn is_meeting_url(url: &str) -> bool {
 
 /// Extract a meeting URL (Zoom, Meet, Teams) from text
 pub fn extract_meeting_url(text: &str) -> Option<String> {
-    for pattern in MEETING_URL_PATTERNS {
-        if let Some(start) = text.find(pattern) {
-            // Extract URL until whitespace or end
-            let url_part = &text[start..];
-            let end = url_part
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
-                .unwrap_or(url_part.len());
-            return Some(url_part[..end].to_string());
+    // First try flexible patterns that match any subdomain
+    let flexible_patterns = ["zoom.us/j/", "meet.google.com/", "teams.microsoft.com/"];
+
+    for pattern in flexible_patterns {
+        if let Some(pattern_pos) = text.find(pattern) {
+            // Find the start of the URL (search backwards for https://)
+            let before = &text[..pattern_pos];
+            if let Some(https_offset) = before.rfind("https://") {
+                let url_part = &text[https_offset..];
+                let end = url_part
+                    .find(|c: char| c.is_whitespace() || c == '"' || c == '>' || c == '<')
+                    .unwrap_or(url_part.len());
+                return Some(url_part[..end].to_string());
+            }
         }
     }
     None
@@ -103,6 +98,11 @@ mod tests {
         assert_eq!(
             extract_meeting_url("https://us04web.zoom.us/j/456"),
             Some("https://us04web.zoom.us/j/456".to_string())
+        );
+        // Custom corporate subdomain
+        assert_eq!(
+            extract_meeting_url("https://dext.zoom.us/j/98429926780?pwd=abc"),
+            Some("https://dext.zoom.us/j/98429926780?pwd=abc".to_string())
         );
     }
 
