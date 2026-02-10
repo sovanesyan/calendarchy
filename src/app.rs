@@ -3,6 +3,28 @@ use crate::cache::{DisplayEvent, EventCache};
 use crate::config::Config;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime};
 
+/// Search state for the interactive search modal
+pub struct SearchState {
+    pub query: String,
+    pub results: Vec<SearchResult>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+}
+
+/// Whether a search result matched on title or participant
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MatchType {
+    Title,
+    Participant,
+}
+
+/// A single search result with its source
+pub struct SearchResult {
+    pub event: DisplayEvent,
+    pub source: EventSource,
+    pub match_type: MatchType,
+}
+
 /// Navigation mode for two-level navigation in month view
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NavigationMode {
@@ -46,6 +68,7 @@ pub struct App {
     pub selected_source: EventSource,
     pub selected_event_index: usize,
     pub pending_action: Option<PendingAction>,
+    pub search: Option<SearchState>,
 }
 
 impl App {
@@ -73,6 +96,7 @@ impl App {
             selected_source: EventSource::Google,
             selected_event_index: 0,
             pending_action: None,
+            search: None,
         };
 
         app.enter_event_mode();
@@ -334,6 +358,134 @@ impl App {
         self.current_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         self.selected_date = self.current_date;
     }
+
+    pub fn open_search(&mut self) {
+        self.search = Some(SearchState {
+            query: String::new(),
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        });
+    }
+
+    pub fn close_search(&mut self) {
+        self.search = None;
+    }
+
+    pub fn update_search_results(&mut self) {
+        let search = match self.search.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let query_lower = search.query.to_lowercase();
+        let mut results: Vec<SearchResult> = Vec::new();
+        let today = Local::now().date_naive();
+
+        if !query_lower.is_empty() {
+            for event in self.events.google.all_events() {
+                if event.date >= today {
+                    if let Some(match_type) = event_match_type(event, &query_lower) {
+                        results.push(SearchResult {
+                            event: event.clone(),
+                            source: EventSource::Google,
+                            match_type,
+                        });
+                    }
+                }
+            }
+            for event in self.events.icloud.all_events() {
+                if event.date >= today {
+                    if let Some(match_type) = event_match_type(event, &query_lower) {
+                        results.push(SearchResult {
+                            event: event.clone(),
+                            source: EventSource::ICloud,
+                            match_type,
+                        });
+                    }
+                }
+            }
+            results.sort_by(|a, b| {
+                let a_title = a.event.title.to_lowercase().contains(&query_lower);
+                let b_title = b.event.title.to_lowercase().contains(&query_lower);
+                b_title.cmp(&a_title)
+                    .then_with(|| a.event.date.cmp(&b.event.date))
+                    .then_with(|| a.event.time_str.cmp(&b.event.time_str))
+            });
+        }
+
+        if let Some(ref mut search) = self.search {
+            search.results = results;
+            if search.selected_index >= search.results.len() {
+                search.selected_index = search.results.len().saturating_sub(1);
+            }
+            // Clamp scroll offset
+            if search.selected_index < search.scroll_offset {
+                search.scroll_offset = search.selected_index;
+            }
+        }
+    }
+
+    pub fn select_search_result(&mut self) {
+        let (date, source, event_title) = match self.search.as_ref() {
+            Some(s) => {
+                match s.results.get(s.selected_index) {
+                    Some(r) => (r.event.date, r.source, r.event.title.clone()),
+                    None => return,
+                }
+            }
+            None => return,
+        };
+
+        // Navigate to the date
+        let month_changed = date.month() != self.current_date.month()
+            || date.year() != self.current_date.year();
+        self.selected_date = date;
+        if month_changed {
+            self.current_date = date.with_day(1).unwrap();
+            self.google_needs_fetch = true;
+            self.icloud_needs_fetch = true;
+        }
+
+        // Enter event mode on the correct source/index
+        self.navigation_mode = NavigationMode::Event;
+        self.selected_source = source;
+
+        let events = match source {
+            EventSource::Google => self.events.google.get(date),
+            EventSource::ICloud => self.events.icloud.get(date),
+        };
+        self.selected_event_index = events.iter()
+            .position(|e| e.title == event_title)
+            .unwrap_or(0);
+
+        self.close_search();
+    }
+}
+
+/// Check if an event matches the search query (case-insensitive)
+#[cfg(test)]
+fn event_matches_query(event: &DisplayEvent, query_lower: &str) -> bool {
+    event_match_type(event, query_lower).is_some()
+}
+
+/// Determine how an event matches the search query, returning the match type.
+/// Title matches take priority over participant matches.
+pub fn event_match_type(event: &DisplayEvent, query_lower: &str) -> Option<MatchType> {
+    if event.title.to_lowercase().contains(query_lower) {
+        return Some(MatchType::Title);
+    }
+    for attendee in &event.attendees {
+        if let Some(ref name) = attendee.name {
+            if name.to_lowercase().contains(query_lower) {
+                return Some(MatchType::Participant);
+            }
+        }
+        if attendee.email.to_lowercase().contains(query_lower) {
+            return Some(MatchType::Participant);
+        }
+    }
+    None
 }
 
 /// Find current or next event in a list, returns (index, is_current)
@@ -390,5 +542,138 @@ fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) 
         Some((idx, true))
     } else {
         first_next.map(|idx| (idx, false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::{DisplayAttendee, AttendeeStatus, EventId};
+
+    fn make_event_with_attendees(title: &str, attendees: Vec<DisplayAttendee>) -> DisplayEvent {
+        DisplayEvent {
+            id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
+            title: title.to_string(),
+            time_str: "10:00".to_string(),
+            end_time_str: None,
+            date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            accepted: true,
+            is_organizer: false,
+            is_free: false,
+            meeting_url: None,
+            description: None,
+            location: None,
+            attendees,
+        }
+    }
+
+    #[test]
+    fn test_event_matches_query_title() {
+        let event = make_event_with_attendees("Sprint Planning", vec![]);
+        assert!(event_matches_query(&event, "sprint"));
+        assert!(event_matches_query(&event, "planning"));
+    }
+
+    #[test]
+    fn test_event_matches_query_attendee_name() {
+        let event = make_event_with_attendees("Meeting", vec![
+            DisplayAttendee {
+                name: Some("Alice Johnson".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert!(event_matches_query(&event, "alice"));
+        assert!(event_matches_query(&event, "johnson"));
+    }
+
+    #[test]
+    fn test_event_matches_query_attendee_email() {
+        let event = make_event_with_attendees("Meeting", vec![
+            DisplayAttendee {
+                name: None,
+                email: "bob@company.org".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert!(event_matches_query(&event, "bob@company"));
+        assert!(event_matches_query(&event, "company.org"));
+    }
+
+    #[test]
+    fn test_event_matches_query_case_insensitive() {
+        let event = make_event_with_attendees("Team Standup", vec![
+            DisplayAttendee {
+                name: Some("Charlie Brown".to_string()),
+                email: "Charlie@Example.COM".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert!(event_matches_query(&event, "team standup"));
+        assert!(event_matches_query(&event, "charlie brown"));
+        assert!(event_matches_query(&event, "charlie@example.com"));
+    }
+
+    #[test]
+    fn test_event_match_type_title() {
+        let event = make_event_with_attendees("Sprint Planning", vec![
+            DisplayAttendee {
+                name: Some("Alice".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert_eq!(event_match_type(&event, "sprint"), Some(MatchType::Title));
+    }
+
+    #[test]
+    fn test_event_match_type_participant() {
+        let event = make_event_with_attendees("Sprint Planning", vec![
+            DisplayAttendee {
+                name: Some("Alice Johnson".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert_eq!(event_match_type(&event, "alice"), Some(MatchType::Participant));
+    }
+
+    #[test]
+    fn test_event_match_type_title_takes_priority() {
+        // "Alice" appears in both title and attendees — title wins
+        let event = make_event_with_attendees("Meeting with Alice", vec![
+            DisplayAttendee {
+                name: Some("Alice Johnson".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert_eq!(event_match_type(&event, "alice"), Some(MatchType::Title));
+    }
+
+    #[test]
+    fn test_event_match_type_no_match() {
+        let event = make_event_with_attendees("Sprint Planning", vec![
+            DisplayAttendee {
+                name: Some("Alice".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert_eq!(event_match_type(&event, "bob"), None);
+    }
+
+    #[test]
+    fn test_event_matches_query_no_match() {
+        let event = make_event_with_attendees("Sprint Planning", vec![
+            DisplayAttendee {
+                name: Some("Alice".to_string()),
+                email: "alice@example.com".to_string(),
+                status: AttendeeStatus::Accepted,
+            },
+        ]);
+        assert!(!event_matches_query(&event, "retro"));
+        assert!(!event_matches_query(&event, "bob"));
+        assert!(!event_matches_query(&event, "xyz"));
     }
 }

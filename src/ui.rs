@@ -1,4 +1,4 @@
-use crate::app::{EventSource, NavigationMode, PendingAction};
+use crate::app::{EventSource, MatchType, NavigationMode, PendingAction, SearchState};
 use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
 use crate::logging::get_recent_logs;
@@ -97,6 +97,8 @@ pub struct RenderState<'a> {
     pub selected_event_index: usize,
     // Confirmation state
     pub pending_action: Option<&'a PendingAction>,
+    // Search state
+    pub search: Option<&'a SearchState>,
 }
 
 /// Information about an upcoming event for the countdown display
@@ -205,32 +207,37 @@ pub fn render(state: &RenderState) {
     // Get terminal size
     let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
 
-    // Move to home position instead of clearing (alternate screen handles buffer)
-    execute!(out, cursor::MoveTo(0, 0)).unwrap();
+    // When search modal is active, skip redrawing underlying content to avoid flicker
+    if let Some(search) = state.search {
+        render_search_modal(&mut out, search, term_width, term_height);
+    } else {
+        // Move to home position instead of clearing (alternate screen handles buffer)
+        execute!(out, cursor::MoveTo(0, 0)).unwrap();
 
-    // Month view handles both normal and day timeline modes
-    render_month_view(&mut out, state, today, term_width, term_height);
+        // Month view handles both normal and day timeline modes
+        render_month_view(&mut out, state, today, term_width, term_height);
 
-    // Render HTTP logs if enabled
-    let log_height = if state.show_logs { 8 } else { 0 };
-    if state.show_logs {
-        let logs = get_recent_logs(log_height as usize);
-        let log_start_row = term_height.saturating_sub(2 + log_height);
+        // Render HTTP logs if enabled
+        let log_height = if state.show_logs { 8 } else { 0 };
+        if state.show_logs {
+            let logs = get_recent_logs(log_height as usize);
+            let log_start_row = term_height.saturating_sub(2 + log_height);
 
-        execute!(out, SetForegroundColor(colors::LOG_TEXT)).unwrap();
-        for (i, log) in logs.iter().rev().enumerate() {
-            let row = log_start_row + i as u16;
-            if row < term_height.saturating_sub(2) {
-                execute!(out, cursor::MoveTo(0, row)).unwrap();
-                print!(" {}", truncate_str(log, term_width as usize - 2));
+            execute!(out, SetForegroundColor(colors::LOG_TEXT)).unwrap();
+            for (i, log) in logs.iter().rev().enumerate() {
+                let row = log_start_row + i as u16;
+                if row < term_height.saturating_sub(2) {
+                    execute!(out, cursor::MoveTo(0, row)).unwrap();
+                    print!(" {}", truncate_str(log, term_width as usize - 2));
+                }
             }
+            execute!(out, ResetColor).unwrap();
         }
-        execute!(out, ResetColor).unwrap();
-    }
 
-    // Render confirmation modal if there's a pending action
-    if let Some(action) = state.pending_action {
-        render_confirmation_modal(&mut out, action, term_width, term_height);
+        // Render confirmation modal if there's a pending action
+        if let Some(action) = state.pending_action {
+            render_confirmation_modal(&mut out, action, term_width, term_height);
+        }
     }
 
     // Render status bar at bottom
@@ -267,10 +274,10 @@ pub fn render(state: &RenderState) {
         " y/Enter:confirm n/Esc:cancel".to_string()
     } else if state.navigation_mode == NavigationMode::Event {
         // Event navigation mode controls
-        " jk:nav ^d/^u:scroll n:now t:today r:refresh Esc:back q:quit".to_string()
+        " jk:nav ^d/^u:scroll f:find n:now t:today r:refresh Esc:back q:quit".to_string()
     } else {
         // Day navigation mode controls
-        let mut c = String::from(" jk:day ^d/^u:month n:now t:today r:refresh Enter:events");
+        let mut c = String::from(" jk:day ^d/^u:month f:find n:now t:today r:refresh Enter:events");
         if !state.google_auth.is_authenticated() {
             c.push_str(" g:work");
         }
@@ -998,6 +1005,228 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
         format!("{}…", truncated)
     }
+}
+
+/// Format a smart "when" string combining date and time based on proximity
+fn format_smart_when(date: NaiveDate, time_str: &str, today: NaiveDate) -> String {
+    let days = (date - today).num_days();
+    let is_all_day = time_str == "All day";
+
+    if days == 0 {
+        if is_all_day { "today".to_string() } else { format!("today {}", time_str) }
+    } else if days == 1 {
+        if is_all_day { "tmrw".to_string() } else { format!("tmrw {}", time_str) }
+    } else if days >= 2 && days <= 6 {
+        let weekday = date.format("%a").to_string();
+        if is_all_day { weekday } else { format!("{} {}", weekday, time_str) }
+    } else {
+        date.format("%b %d").to_string()
+    }
+}
+
+/// Render a centered search modal
+fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u16, term_height: u16) {
+    use crate::app::EventSource;
+    use crate::cache::EventId;
+
+    let modal_width = 60u16.min(term_width.saturating_sub(4));
+    let modal_height = (term_height * 3 / 4).max(10).min(term_height.saturating_sub(4));
+    let start_x = (term_width.saturating_sub(modal_width)) / 2;
+    let start_y = (term_height.saturating_sub(modal_height)) / 2;
+
+    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
+
+    // Top border with title
+    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
+    print!("┌─ Search ");
+    let remaining_top = modal_width.saturating_sub(11);
+    for _ in 0..remaining_top {
+        print!("─");
+    }
+    print!("┐");
+
+    // Empty rows
+    for row in 1..modal_height - 1 {
+        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
+        print!("│");
+        for _ in 0..modal_width - 2 {
+            print!(" ");
+        }
+        print!("│");
+    }
+
+    // Bottom border
+    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
+    print!("└");
+    for _ in 0..modal_width - 2 {
+        print!("─");
+    }
+    print!("┘");
+
+    execute!(out, ResetColor).unwrap();
+
+    // Input field
+    let content_x = start_x + 2;
+    let content_width = (modal_width - 4) as usize;
+    execute!(out, cursor::MoveTo(content_x, start_y + 1)).unwrap();
+    execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
+    let query_display = truncate_str(&search.query, content_width.saturating_sub(3));
+    print!("> {}_ ", query_display);
+    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+
+    // Separator
+    execute!(out, cursor::MoveTo(content_x, start_y + 2)).unwrap();
+    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
+    for _ in 0..content_width {
+        print!("─");
+    }
+    execute!(out, ResetColor).unwrap();
+
+    // Results area
+    let results_start_y = start_y + 3;
+    let results_height = (modal_height - 5) as usize; // 3 top (border+input+sep) + 2 bottom (hint+border)
+
+    if search.query.is_empty() {
+        execute!(out, cursor::MoveTo(content_x, results_start_y)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("Type to search events...");
+        execute!(out, ResetColor).unwrap();
+    } else if search.results.is_empty() {
+        execute!(out, cursor::MoveTo(content_x, results_start_y)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("No matching events");
+        execute!(out, ResetColor).unwrap();
+    } else {
+        let num_title_matches = search.results.iter()
+            .filter(|r| r.match_type == MatchType::Title)
+            .count();
+        let has_title_header = num_title_matches > 0;
+        let has_people_header = num_title_matches < search.results.len();
+
+        // Total visual rows = results + header rows
+        let num_headers = has_title_header as usize + has_people_header as usize;
+        let total_visual_rows = search.results.len() + num_headers;
+
+        // Map selected_index to its visual row (accounting for headers above it)
+        let selected_visual_row = {
+            let mut row = search.selected_index;
+            if has_title_header { row += 1; } // title header before first result
+            if has_people_header && search.selected_index >= num_title_matches {
+                row += 1; // people header before participant results
+            }
+            row
+        };
+
+        // Calculate visible window based on visual rows
+        let visible_start = if selected_visual_row >= results_height {
+            selected_visual_row - results_height + 1
+        } else {
+            0
+        };
+
+        let today = Local::now().date_naive();
+        let mut visual_row: usize = 0;
+        let mut result_idx: usize = 0;
+
+        // Build visual rows: headers interleaved with results
+        while visual_row < total_visual_rows && (visual_row < visible_start + results_height) {
+            // Check if we need a title header at this visual row
+            if has_title_header && visual_row == 0 {
+                if visual_row >= visible_start {
+                    let row = results_start_y + (visual_row - visible_start) as u16;
+                    execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+                    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                    print!("\u{2500} Titles ");
+                    let remaining = content_width.saturating_sub(9);
+                    for _ in 0..remaining {
+                        print!("\u{2500}");
+                    }
+                    execute!(out, ResetColor).unwrap();
+                }
+                visual_row += 1;
+                continue;
+            }
+
+            // Check if we need a people header at this visual row
+            let people_header_row = num_title_matches + if has_title_header { 1 } else { 0 };
+            if has_people_header && visual_row == people_header_row {
+                if visual_row >= visible_start {
+                    let row = results_start_y + (visual_row - visible_start) as u16;
+                    execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+                    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                    print!("\u{2500} People ");
+                    let remaining = content_width.saturating_sub(9);
+                    for _ in 0..remaining {
+                        print!("\u{2500}");
+                    }
+                    execute!(out, ResetColor).unwrap();
+                }
+                visual_row += 1;
+                continue;
+            }
+
+            // Render a result row
+            if result_idx >= search.results.len() {
+                break;
+            }
+            let result = &search.results[result_idx];
+            let is_selected = result_idx == search.selected_index;
+
+            if visual_row >= visible_start {
+                let row = results_start_y + (visual_row - visible_start) as u16;
+                execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+
+                // Selection indicator
+                if is_selected {
+                    execute!(out, SetForegroundColor(colors::SELECTED)).unwrap();
+                    print!("▶ ");
+                } else {
+                    print!("  ");
+                }
+
+                // Smart when column
+                let when = format_smart_when(result.event.date, &result.event.time_str, today);
+                execute!(out, SetForegroundColor(if is_selected { colors::SELECTED } else { Color::DarkGrey })).unwrap();
+                print!("{:>11} ", when);
+
+                // Source color indicator
+                let source_color = match result.source {
+                    EventSource::Google => colors::GOOGLE_ACCENT,
+                    EventSource::ICloud => colors::ICLOUD_ACCENT,
+                };
+                execute!(out, SetForegroundColor(source_color)).unwrap();
+                let source_char = match result.event.id {
+                    EventId::Google { .. } => "G",
+                    EventId::ICloud { .. } => "I",
+                };
+                print!("{} ", source_char);
+
+                // Title
+                let title_space = content_width.saturating_sub(2 + 12 + 2);
+                execute!(out, SetForegroundColor(if is_selected { colors::SELECTED } else { Color::White })).unwrap();
+                if is_selected {
+                    execute!(out, SetAttribute(Attribute::Bold)).unwrap();
+                }
+                print!("{}", truncate_str(&result.event.title, title_space));
+                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+            }
+
+            result_idx += 1;
+            visual_row += 1;
+        }
+    }
+
+    // Bottom hint
+    let hint_y = start_y + modal_height - 2;
+    execute!(out, cursor::MoveTo(content_x, hint_y)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    let count_str = if search.results.is_empty() {
+        String::new()
+    } else {
+        format!("{}/{} ", search.selected_index + 1, search.results.len())
+    };
+    print!("{}\u{2191}\u{2193}:navigate Enter:select Esc:close", count_str);
+    execute!(out, ResetColor).unwrap();
 }
 
 /// Render a centered confirmation modal
