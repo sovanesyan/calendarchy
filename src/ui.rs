@@ -80,6 +80,17 @@ fn draw_separator(out: &mut impl Write, x: u16, y: u16, width: u16) {
     execute!(out, ResetColor).unwrap();
 }
 
+fn draw_section_header(out: &mut impl Write, x: u16, y: u16, label: &str, width: usize) {
+    execute!(out, cursor::MoveTo(x, y)).unwrap();
+    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    print!("\u{2500} {} ", label);
+    let remaining = width.saturating_sub(label.len() + 3);
+    for _ in 0..remaining {
+        print!("\u{2500}");
+    }
+    execute!(out, ResetColor).unwrap();
+}
+
 pub struct RenderState<'a> {
     pub current_date: NaiveDate,
     pub selected_date: NaiveDate,
@@ -1127,39 +1138,18 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
         let today = Local::now().date_naive();
         let mut visual_row: usize = 0;
         let mut result_idx: usize = 0;
+        let people_header_row = num_title_matches + has_title_header as usize;
 
         // Build visual rows: headers interleaved with results
         while visual_row < total_visual_rows && (visual_row < visible_start + results_height) {
-            // Check if we need a title header at this visual row
-            if has_title_header && visual_row == 0 {
+            // Check if we need a section header at this visual row
+            let is_header = (has_title_header && visual_row == 0)
+                || (has_people_header && visual_row == people_header_row);
+            if is_header {
                 if visual_row >= visible_start {
-                    let row = results_start_y + (visual_row - visible_start) as u16;
-                    execute!(out, cursor::MoveTo(content_x, row)).unwrap();
-                    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                    print!("\u{2500} Titles ");
-                    let remaining = content_width.saturating_sub(9);
-                    for _ in 0..remaining {
-                        print!("\u{2500}");
-                    }
-                    execute!(out, ResetColor).unwrap();
-                }
-                visual_row += 1;
-                continue;
-            }
-
-            // Check if we need a people header at this visual row
-            let people_header_row = num_title_matches + if has_title_header { 1 } else { 0 };
-            if has_people_header && visual_row == people_header_row {
-                if visual_row >= visible_start {
-                    let row = results_start_y + (visual_row - visible_start) as u16;
-                    execute!(out, cursor::MoveTo(content_x, row)).unwrap();
-                    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                    print!("\u{2500} People ");
-                    let remaining = content_width.saturating_sub(9);
-                    for _ in 0..remaining {
-                        print!("\u{2500}");
-                    }
-                    execute!(out, ResetColor).unwrap();
+                    let screen_row = results_start_y + (visual_row - visible_start) as u16;
+                    let label = if visual_row == 0 { "Titles" } else { "People" };
+                    draw_section_header(out, content_x, screen_row, label, content_width);
                 }
                 visual_row += 1;
                 continue;

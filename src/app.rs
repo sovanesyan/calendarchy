@@ -383,26 +383,17 @@ impl App {
         let today = Local::now().date_naive();
 
         if !query_lower.is_empty() {
-            for event in self.events.google.all_events() {
-                if event.date >= today {
-                    if let Some(match_type) = event_match_type(event, &query_lower) {
-                        results.push(SearchResult {
-                            event: event.clone(),
-                            source: EventSource::Google,
-                            match_type,
-                        });
-                    }
-                }
-            }
-            for event in self.events.icloud.all_events() {
-                if event.date >= today {
-                    if let Some(match_type) = event_match_type(event, &query_lower) {
-                        results.push(SearchResult {
-                            event: event.clone(),
-                            source: EventSource::ICloud,
-                            match_type,
-                        });
-                    }
+            let matched_events = self.events.google.all_events().map(|e| (e, EventSource::Google))
+                .chain(self.events.icloud.all_events().map(|e| (e, EventSource::ICloud)));
+            for (event, source) in matched_events {
+                if event.date >= today
+                    && let Some(match_type) = event_match_type(event, &query_lower)
+                {
+                    results.push(SearchResult {
+                        event: event.clone(),
+                        source,
+                        match_type,
+                    });
                 }
             }
             results.sort_by(|a, b| {
@@ -476,10 +467,10 @@ pub fn event_match_type(event: &DisplayEvent, query_lower: &str) -> Option<Match
         return Some(MatchType::Title);
     }
     for attendee in &event.attendees {
-        if let Some(ref name) = attendee.name {
-            if name.to_lowercase().contains(query_lower) {
-                return Some(MatchType::Participant);
-            }
+        if let Some(ref name) = attendee.name
+            && name.to_lowercase().contains(query_lower)
+        {
+            return Some(MatchType::Participant);
         }
         if attendee.email.to_lowercase().contains(query_lower) {
             return Some(MatchType::Participant);
