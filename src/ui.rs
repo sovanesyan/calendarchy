@@ -578,19 +578,6 @@ fn parse_event_range(event: &DisplayEvent) -> Option<(u32, u32)> {
     Some((event_start, event_end))
 }
 
-/// Check if a given 30-minute slot is busy
-/// slot_start is minutes from midnight (e.g., 8*60 = 480 for 8:00am)
-fn is_slot_busy(events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> bool {
-    for event in events {
-        if let Some((event_start, event_end)) = parse_event_range(event) {
-            if slot_start < event_end && slot_end > event_start {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Detect overlapping events across two source panels.
 /// Returns sets of indices into google_events and icloud_events that overlap with any other event.
 fn compute_overlapping_events(
@@ -641,6 +628,14 @@ fn compute_overlapping_events(
     }
 
     (google_overlaps, icloud_overlaps)
+}
+
+/// Count how many time-blocking events cover a given slot (across both sources).
+fn count_slot_events(google_events: &[DisplayEvent], icloud_events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> usize {
+    google_events.iter().chain(icloud_events.iter())
+        .filter_map(parse_event_range)
+        .filter(|(es, ee)| slot_start < *ee && slot_end > *es)
+        .count()
 }
 
 /// Get the Monday of the week containing the given date
@@ -697,24 +692,36 @@ fn render_week_availability(
             let slot2_start = hour * 60 + 30;  // :30
             let slot2_end = (hour + 1) * 60;   // :00 next hour
 
-            let first_half_busy = is_slot_busy(google_events, slot1_start, slot1_end)
-                || is_slot_busy(icloud_events, slot1_start, slot1_end);
-            let second_half_busy = is_slot_busy(google_events, slot2_start, slot2_end)
-                || is_slot_busy(icloud_events, slot2_start, slot2_end);
+            let first_half_count = count_slot_events(google_events, icloud_events, slot1_start, slot1_end);
+            let second_half_count = count_slot_events(google_events, icloud_events, slot2_start, slot2_end);
+
+            let first_half_busy = first_half_count > 0;
+            let second_half_busy = second_half_count > 0;
+
+            let color_for = |count: usize| -> Color {
+                if count >= 2 { colors::OVERLAP_EVENT } else { colors::BUSY_BLOCK }
+            };
 
             // Vertical half-blocks: top = first 30 min, bottom = second 30 min
             // ▀ draws top with fg, bottom with bg
             match (first_half_busy, second_half_busy) {
                 (true, true) => {
-                    execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
-                    print!("██");
+                    let top = color_for(first_half_count);
+                    let bot = color_for(second_half_count);
+                    if top == bot {
+                        execute!(out, SetForegroundColor(top)).unwrap();
+                        print!("██");
+                    } else {
+                        execute!(out, SetForegroundColor(top), SetBackgroundColor(bot)).unwrap();
+                        print!("▀▀");
+                    }
                 }
                 (true, false) => {
-                    execute!(out, SetForegroundColor(colors::BUSY_BLOCK), SetBackgroundColor(colors::FREE_BLOCK)).unwrap();
+                    execute!(out, SetForegroundColor(color_for(first_half_count)), SetBackgroundColor(colors::FREE_BLOCK)).unwrap();
                     print!("▀▀");
                 }
                 (false, true) => {
-                    execute!(out, SetForegroundColor(colors::FREE_BLOCK), SetBackgroundColor(colors::BUSY_BLOCK)).unwrap();
+                    execute!(out, SetForegroundColor(colors::FREE_BLOCK), SetBackgroundColor(color_for(second_half_count))).unwrap();
                     print!("▀▀");
                 }
                 (false, false) => {
