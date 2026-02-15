@@ -9,6 +9,7 @@ use crossterm::{
     style::{Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
+use std::collections::HashSet;
 use std::io::{stdout, Write};
 use std::sync::Mutex;
 
@@ -60,6 +61,9 @@ mod colors {
     pub const TIME: Color = Color::White;
     pub const LOCATION: Color = Color::Yellow;
     pub const ACTION: Color = Color::Green;
+
+    // Overlap indicator
+    pub const OVERLAP_EVENT: Color = Color::Red;
 
     // Week availability
     pub const BUSY_BLOCK: Color = Color::Blue;
@@ -366,6 +370,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         let google_events = state.events.google.get(state.selected_date);
         let icloud_events = state.events.icloud.get(state.selected_date);
         let is_past_day = state.selected_date < today;
+        let (google_overlaps, icloud_overlaps) = compute_overlapping_events(google_events, icloud_events);
 
         // Selection info for highlighting
         let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
@@ -393,6 +398,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             is_past_day,
             current_time,
             google_selected,
+            &google_overlaps,
         );
 
         // Calculate Personal panel position: after Work header (1) + events + spacing (1)
@@ -413,6 +419,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             is_past_day,
             current_time,
             icloud_selected,
+            &icloud_overlaps,
         );
     }
 
@@ -544,50 +551,96 @@ fn render_calendar(
     render_week_availability(out, events, selected_date, show_weekends);
 }
 
+/// Parse an event's time range into (start_minutes, end_minutes) from midnight.
+/// Returns None for all-day, free, or unaccepted events (not time-blocking).
+fn parse_event_range(event: &DisplayEvent) -> Option<(u32, u32)> {
+    if event.time_str == "All day" || event.is_free || !event.accepted {
+        return None;
+    }
+
+    let start_time = parse_event_time(&event.time_str)?;
+    let event_start = start_time.hour() * 60 + start_time.minute();
+
+    let event_end = if let Some(ref end_str) = event.end_time_str {
+        if end_str == "All day" {
+            return None;
+        }
+        parse_event_time(end_str)
+            .map(|t| {
+                let mins = t.hour() * 60 + t.minute();
+                if mins == 0 { 24 * 60 } else { mins }
+            })
+            .unwrap_or(event_start + 60)
+    } else {
+        event_start + 60
+    };
+
+    Some((event_start, event_end))
+}
+
 /// Check if a given 30-minute slot is busy
 /// slot_start is minutes from midnight (e.g., 8*60 = 480 for 8:00am)
 fn is_slot_busy(events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> bool {
     for event in events {
-        // Skip all-day events - they don't block specific hours
-        if event.time_str == "All day" {
-            continue;
-        }
-
-        // Skip free events - they don't block time
-        if event.is_free {
-            continue;
-        }
-
-        // Skip unaccepted events (declined/tentative) - they don't block time
-        if !event.accepted {
-            continue;
-        }
-
-        // Parse start time
-        if let Some(start_time) = parse_event_time(&event.time_str) {
-            let event_start = start_time.hour() * 60 + start_time.minute();
-
-            // Parse end time if available
-            let event_end = if let Some(ref end_str) = event.end_time_str {
-                if end_str == "All day" {
-                    continue;
-                }
-                parse_event_time(end_str).map(|t| {
-                    let mins = t.hour() * 60 + t.minute();
-                    // Midnight means end of day
-                    if mins == 0 { 24 * 60 } else { mins }
-                }).unwrap_or(event_start + 60)
-            } else {
-                event_start + 60 // Assume 1 hour duration if no end time
-            };
-
-            // Check if the slot overlaps with this event
+        if let Some((event_start, event_end)) = parse_event_range(event) {
             if slot_start < event_end && slot_end > event_start {
                 return true;
             }
         }
     }
     false
+}
+
+/// Detect overlapping events across two source panels.
+/// Returns sets of indices into google_events and icloud_events that overlap with any other event.
+fn compute_overlapping_events(
+    google_events: &[DisplayEvent],
+    icloud_events: &[DisplayEvent],
+) -> (HashSet<usize>, HashSet<usize>) {
+    let mut google_overlaps = HashSet::new();
+    let mut icloud_overlaps = HashSet::new();
+
+    // Parse ranges once
+    let google_ranges: Vec<Option<(u32, u32)>> = google_events.iter().map(parse_event_range).collect();
+    let icloud_ranges: Vec<Option<(u32, u32)>> = icloud_events.iter().map(parse_event_range).collect();
+
+    // Check within Google events
+    for i in 0..google_ranges.len() {
+        for j in (i + 1)..google_ranges.len() {
+            if let (Some((s_a, e_a)), Some((s_b, e_b))) = (google_ranges[i], google_ranges[j]) {
+                if s_a < e_b && s_b < e_a {
+                    google_overlaps.insert(i);
+                    google_overlaps.insert(j);
+                }
+            }
+        }
+    }
+
+    // Check within iCloud events
+    for i in 0..icloud_ranges.len() {
+        for j in (i + 1)..icloud_ranges.len() {
+            if let (Some((s_a, e_a)), Some((s_b, e_b))) = (icloud_ranges[i], icloud_ranges[j]) {
+                if s_a < e_b && s_b < e_a {
+                    icloud_overlaps.insert(i);
+                    icloud_overlaps.insert(j);
+                }
+            }
+        }
+    }
+
+    // Check cross-source overlaps
+    for (gi, g_range) in google_ranges.iter().enumerate() {
+        for (ii, i_range) in icloud_ranges.iter().enumerate() {
+            if let (Some((s_a, e_a)), Some((s_b, e_b))) = (g_range, i_range) {
+                if s_a < e_b && s_b < e_a {
+                    google_overlaps.insert(gi);
+                    icloud_overlaps.insert(ii);
+                }
+            }
+        }
+    }
+
+    (google_overlaps, icloud_overlaps)
 }
 
 /// Get the Monday of the week containing the given date
@@ -690,6 +743,7 @@ fn render_event_panel(
     is_past_day: bool,
     current_time: NaiveTime,
     selected_index: Option<usize>,
+    overlapping_indices: &HashSet<usize>,
 ) {
     // Panel header: ─ Title ─────────
     execute!(out, cursor::MoveTo(x, y)).unwrap();
@@ -736,15 +790,18 @@ fn render_event_panel(
         let is_past_event = is_today && is_event_past(event, current_time) && !is_current;
         let is_unaccepted = !event.accepted;
         let is_free_event = event.is_free;
+        let is_overlapping = overlapping_indices.contains(&i);
 
         // Choose color based on event status
-        // Gray out: past days, past events today, unaccepted, or free events
+        // Priority: Selected > Past/Unaccepted > Free > Overlap (Red) > Current (Green) > Next (Yellow) > Default
         let event_color = if is_selected {
             colors::SELECTED
         } else if is_past_day || is_unaccepted || is_past_event {
             colors::PAST_EVENT
         } else if is_free_event {
             colors::FREE_EVENT
+        } else if is_overlapping {
+            colors::OVERLAP_EVENT
         } else if is_current {
             colors::CURRENT_EVENT
         } else if is_next {
@@ -757,6 +814,9 @@ fn render_event_panel(
         if is_selected {
             execute!(out, SetForegroundColor(Color::Cyan)).unwrap();
             print!("\u{25B6}"); // Right-pointing triangle
+        } else if is_overlapping && !is_past_day && !is_unaccepted && !is_free_event && !is_past_event {
+            execute!(out, SetForegroundColor(colors::OVERLAP_EVENT)).unwrap();
+            print!("!");
         } else if is_current && !is_unaccepted && !is_free_event {
             execute!(out, SetForegroundColor(Color::Green)).unwrap();
             print!("\u{25CF}"); // Filled circle
@@ -1471,5 +1531,120 @@ mod tests {
     fn test_days_in_month_february_400_year_leap() {
         let date = NaiveDate::from_ymd_opt(2000, 2, 1).unwrap();
         assert_eq!(days_in_month(date), 29);
+    }
+
+    fn make_event_with_end(time: &str, end: &str) -> DisplayEvent {
+        let mut e = make_event(time);
+        e.end_time_str = Some(end.to_string());
+        e
+    }
+
+    fn make_icloud_event(time: &str) -> DisplayEvent {
+        DisplayEvent {
+            id: EventId::ICloud { calendar_url: "test".to_string(), event_uid: "test-uid".to_string(), etag: None, calendar_name: None },
+            title: "iCloud Test".to_string(),
+            time_str: time.to_string(),
+            end_time_str: None,
+            date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            accepted: true,
+            is_organizer: false,
+            is_free: false,
+            meeting_url: None,
+            description: None,
+            location: None,
+            attendees: vec![],
+        }
+    }
+
+    fn make_icloud_event_with_end(time: &str, end: &str) -> DisplayEvent {
+        let mut e = make_icloud_event(time);
+        e.end_time_str = Some(end.to_string());
+        e
+    }
+
+    #[test]
+    fn test_overlap_no_events() {
+        let (g, i) = compute_overlapping_events(&[], &[]);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_non_overlapping() {
+        let google = vec![make_event_with_end("09:00", "10:00")];
+        let icloud = vec![make_icloud_event_with_end("10:00", "11:00")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_cross_source() {
+        let google = vec![make_event_with_end("09:00", "10:00")];
+        let icloud = vec![make_icloud_event_with_end("09:30", "10:30")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.contains(&0));
+        assert!(i.contains(&0));
+    }
+
+    #[test]
+    fn test_overlap_same_source() {
+        let google = vec![
+            make_event_with_end("09:00", "10:00"),
+            make_event_with_end("09:30", "10:30"),
+        ];
+        let (g, i) = compute_overlapping_events(&google, &[]);
+        assert!(g.contains(&0));
+        assert!(g.contains(&1));
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_adjacent_no_overlap() {
+        // end == start → strict inequality means no overlap
+        let google = vec![make_event_with_end("09:00", "10:00")];
+        let icloud = vec![make_icloud_event_with_end("10:00", "11:00")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_skips_all_day() {
+        let google = vec![make_event("All day")];
+        let icloud = vec![make_icloud_event_with_end("09:00", "10:00")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_skips_free() {
+        let mut google = vec![make_event_with_end("09:00", "10:00")];
+        google[0].is_free = true;
+        let icloud = vec![make_icloud_event_with_end("09:00", "10:00")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_skips_unaccepted() {
+        let mut google = vec![make_event_with_end("09:00", "10:00")];
+        google[0].accepted = false;
+        let icloud = vec![make_icloud_event_with_end("09:00", "10:00")];
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.is_empty());
+        assert!(i.is_empty());
+    }
+
+    #[test]
+    fn test_overlap_default_1hr_duration() {
+        // No end time → defaults to start + 60 min
+        let google = vec![make_event("09:00")]; // 09:00-10:00
+        let icloud = vec![make_icloud_event("09:30")]; // 09:30-10:30
+        let (g, i) = compute_overlapping_events(&google, &icloud);
+        assert!(g.contains(&0));
+        assert!(i.contains(&0));
     }
 }
