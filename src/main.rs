@@ -153,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             show_logs: app.show_logs,
             show_weekends: app.show_weekends,
             pending_action: app.pending_action.as_ref(),
+            search: app.search.as_ref(),
         };
         ui::render(&render_state);
 
@@ -358,6 +359,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     execute!(stdout(), Clear(ClearType::All)).ok();
                 }
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    // Handle search mode input first
+                    if app.search.is_some() {
+                        match key_event.code {
+                            KeyCode::Esc => {
+                                app.close_search();
+                                execute!(stdout(), Clear(ClearType::All)).ok();
+                            }
+                            KeyCode::Enter => {
+                                app.select_search_result();
+                                execute!(stdout(), Clear(ClearType::All)).ok();
+                            }
+                            KeyCode::Backspace => {
+                                if let Some(ref mut search) = app.search {
+                                    search.query.pop();
+                                }
+                                app.update_search_results();
+                            }
+                            KeyCode::Down | KeyCode::Tab => {
+                                if let Some(ref mut search) = app.search {
+                                    if !search.results.is_empty() {
+                                        search.selected_index = (search.selected_index + 1).min(search.results.len() - 1);
+                                    }
+                                }
+                            }
+                            KeyCode::Up | KeyCode::BackTab => {
+                                if let Some(ref mut search) = app.search {
+                                    search.selected_index = search.selected_index.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                if let Some(ref mut search) = app.search {
+                                    search.query.push(c);
+                                }
+                                app.update_search_results();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Handle pending confirmation first
                     if let Some(action) = app.pending_action.take() {
                         match key_event.code {
@@ -540,6 +581,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (KeyCode::Char('D'), _) => {
                                 app.show_logs = !app.show_logs;
                             }
+                            (KeyCode::Char('f') | KeyCode::Char('ф'), _) => {
+                                app.open_search();
+                            }
                             (KeyCode::Char('w') | KeyCode::Char('ц'), _) => {
                                 app.show_weekends = !app.show_weekends;
                                 execute!(stdout(), Clear(ClearType::All)).ok();
@@ -598,6 +642,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('D'), _) => {
                             // Toggle HTTP request logs display
                             app.show_logs = !app.show_logs;
+                        }
+                        (KeyCode::Char('f') | KeyCode::Char('ф'), _) => {
+                            app.open_search();
                         }
                         (KeyCode::Char('w') | KeyCode::Char('ц'), _) => {
                             // Toggle weekend visibility

@@ -126,6 +126,10 @@ impl SourceCache {
             .unwrap_or(false)
     }
 
+    pub fn all_events(&self) -> impl Iterator<Item = &DisplayEvent> {
+        self.by_date.values().flat_map(|v| v.iter())
+    }
+
     pub fn clear(&mut self) {
         self.by_date.clear();
         self.fetched_months.clear();
