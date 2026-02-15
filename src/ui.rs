@@ -653,6 +653,11 @@ fn render_week_availability(
 ) {
     let start_row = 10u16; // Below the calendar grid
     let monday = get_week_monday(selected_date);
+    let today = Local::now().date_naive();
+    let current_minutes = {
+        let now = Local::now().time();
+        now.hour() * 60 + now.minute()
+    };
     let num_days = if show_weekends { 7 } else { 5 };
 
     // Header row
@@ -698,16 +703,34 @@ fn render_week_availability(
             let first_half_busy = first_half_count > 0;
             let second_half_busy = second_half_count > 0;
 
-            let color_for = |count: usize| -> Color {
-                if count >= 2 { colors::OVERLAP_EVENT } else { colors::BUSY_BLOCK }
+            let is_past_day = date < today;
+            let first_half_past = is_past_day || (date == today && current_minutes >= slot1_end);
+            let second_half_past = is_past_day || (date == today && current_minutes >= slot2_end);
+
+            let dim = |color: Color| -> Color {
+                match color {
+                    Color::Blue => Color::Rgb { r: 90, g: 90, b: 170 },
+                    Color::Red => Color::Rgb { r: 170, g: 75, b: 75 },
+                    Color::Rgb { r: 200, g: 200, b: 200 } => Color::Rgb { r: 150, g: 150, b: 150 },
+                    other => other,
+                }
+            };
+
+            let color_for = |count: usize, past: bool| -> Color {
+                let c = if count >= 2 { colors::OVERLAP_EVENT } else { colors::BUSY_BLOCK };
+                if past { dim(c) } else { c }
+            };
+
+            let free_color = |past: bool| -> Color {
+                if past { dim(colors::FREE_BLOCK) } else { colors::FREE_BLOCK }
             };
 
             // Vertical half-blocks: top = first 30 min, bottom = second 30 min
             // ▀ draws top with fg, bottom with bg
             match (first_half_busy, second_half_busy) {
                 (true, true) => {
-                    let top = color_for(first_half_count);
-                    let bot = color_for(second_half_count);
+                    let top = color_for(first_half_count, first_half_past);
+                    let bot = color_for(second_half_count, second_half_past);
                     if top == bot {
                         execute!(out, SetForegroundColor(top)).unwrap();
                         print!("██");
@@ -717,15 +740,15 @@ fn render_week_availability(
                     }
                 }
                 (true, false) => {
-                    execute!(out, SetForegroundColor(color_for(first_half_count)), SetBackgroundColor(colors::FREE_BLOCK)).unwrap();
+                    execute!(out, SetForegroundColor(color_for(first_half_count, first_half_past)), SetBackgroundColor(free_color(second_half_past))).unwrap();
                     print!("▀▀");
                 }
                 (false, true) => {
-                    execute!(out, SetForegroundColor(colors::FREE_BLOCK), SetBackgroundColor(color_for(second_half_count))).unwrap();
+                    execute!(out, SetForegroundColor(free_color(first_half_past)), SetBackgroundColor(color_for(second_half_count, second_half_past))).unwrap();
                     print!("▀▀");
                 }
                 (false, false) => {
-                    execute!(out, SetForegroundColor(colors::FREE_BLOCK)).unwrap();
+                    execute!(out, SetForegroundColor(free_color(first_half_past))).unwrap();
                     print!("██");
                 }
             }
