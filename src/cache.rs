@@ -46,7 +46,7 @@ impl AttendeeStatus {
 }
 
 /// Event identifier for API actions (accept/decline/delete)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventId {
     /// Google Calendar event (calendar_id, event_id, calendar_name for display)
     Google { calendar_id: String, event_id: String, calendar_name: Option<String> },

@@ -11,6 +11,37 @@ use crossterm::{
 };
 use std::collections::HashSet;
 use std::io::{stdout, Write};
+use std::sync::OnceLock;
+
+/// Terminal background color, queried once at startup via OSC 11.
+/// Used to derive theme-adaptive shades (free slots, past fading).
+static TERM_BG: OnceLock<(u8, u8, u8)> = OnceLock::new();
+
+pub fn set_term_bg(r: u8, g: u8, b: u8) {
+    let _ = TERM_BG.set((r, g, b));
+}
+
+/// Falls back to a dark background if the terminal never answered the query
+fn term_bg() -> (u8, u8, u8) {
+    *TERM_BG.get().unwrap_or(&(30, 32, 38))
+}
+
+/// Blend a color toward the terminal background (0.0 = unchanged, 1.0 = background)
+fn blend_toward_bg(color: (u8, u8, u8), amount: f32) -> Color {
+    let bg = term_bg();
+    let mix = |c: u8, b: u8| -> u8 { (c as f32 + (b as f32 - c as f32) * amount).round() as u8 };
+    Color::Rgb { r: mix(color.0, bg.0), g: mix(color.1, bg.1), b: mix(color.2, bg.2) }
+}
+
+/// The "free slot" shade: the real background nudged just enough to be visible,
+/// darker on light themes and lighter on dark ones
+fn free_block_color() -> Color {
+    let (r, g, b) = term_bg();
+    let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+    let shift: i16 = if luma > 128.0 { -20 } else { 24 };
+    let adj = |c: u8| -> u8 { (c as i16 + shift).clamp(0, 255) as u8 };
+    Color::Rgb { r: adj(r), g: adj(g), b: adj(b) }
+}
 
 const CALENDAR_WIDTH: u16 = 23;
 const MIN_PANEL_WIDTH: u16 = 25;
@@ -20,9 +51,9 @@ const MIN_PANEL_WIDTH: u16 = 25;
 mod colors {
     use crossterm::style::Color;
 
-    // Calendar sources
-    pub const GOOGLE_ACCENT: Color = Color::Blue;
-    pub const ICLOUD_ACCENT: Color = Color::Magenta;
+    // Calendar sources (muted so panel labels read as chrome, not content)
+    pub const GOOGLE_ACCENT: Color = Color::Rgb { r: 96, g: 125, b: 168 };
+    pub const ICLOUD_ACCENT: Color = Color::Rgb { r: 152, g: 115, b: 168 };
 
     // Event states
     pub const CURRENT_EVENT: Color = Color::Green;
@@ -38,15 +69,18 @@ mod colors {
     // Details panel
     pub const TITLE: Color = Color::White;
     pub const TIME: Color = Color::White;
-    pub const LOCATION: Color = Color::Yellow;
     pub const ACTION: Color = Color::Green;
 
     // Overlap indicator
     pub const OVERLAP_EVENT: Color = Color::Red;
 
-    // Week availability
-    pub const BUSY_BLOCK: Color = Color::Blue;
-    pub const FREE_BLOCK: Color = Color::Rgb { r: 200, g: 200, b: 200 };
+    // Week availability. Mid-tone marks that read on light and dark themes;
+    // the free shade and past fading are derived from the real terminal
+    // background at runtime (see free_block_color / blend_toward_bg).
+    pub const BUSY_RGB: (u8, u8, u8) = (84, 113, 156);
+    pub const HEATMAP_OVERLAP_RGB: (u8, u8, u8) = (156, 85, 85);
+    pub const BUSY_BLOCK: Color = Color::Rgb { r: BUSY_RGB.0, g: BUSY_RGB.1, b: BUSY_RGB.2 };
+    pub const HEATMAP_OVERLAP: Color = Color::Rgb { r: HEATMAP_OVERLAP_RGB.0, g: HEATMAP_OVERLAP_RGB.1, b: HEATMAP_OVERLAP_RGB.2 };
 
     // Status bar
     pub const LOG_TEXT: Color = Color::DarkCyan;
@@ -54,15 +88,6 @@ mod colors {
 }
 
 // Terminal write helpers
-fn draw_separator(out: &mut impl Write, x: u16, y: u16, width: u16) {
-    execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
-    for _ in 0..width.min(40) {
-        print!("\u{2500}");
-    }
-    execute!(out, ResetColor).unwrap();
-}
-
 fn draw_section_header(out: &mut impl Write, x: u16, y: u16, label: &str, width: usize) {
     execute!(out, cursor::MoveTo(x, y)).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
@@ -82,6 +107,7 @@ pub struct RenderState<'a> {
     pub google_auth: &'a GoogleAuthState,
     pub icloud_auth: &'a ICloudAuthState,
     pub status_message: Option<&'a str>,
+    pub status_is_error: bool,
     pub google_loading: bool,
     pub icloud_loading: bool,
     // Two-level navigation state
@@ -92,6 +118,8 @@ pub struct RenderState<'a> {
     pub pending_action: Option<&'a PendingAction>,
     // Search state
     pub search: Option<&'a SearchState>,
+    // Help overlay
+    pub show_help: bool,
     // Setup wizard
     pub setup: Option<&'a SetupState>,
 }
@@ -168,29 +196,25 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
     None
 }
 
-/// Format the countdown string for display
-fn format_countdown(info: &NextEventInfo, max_title_len: usize) -> String {
-    let title = truncate_str(&info.event.title, max_title_len);
-
-    if info.is_current || info.minutes_until <= 0 {
-        format!("Now: {}", title)
-    } else if info.minutes_until < 60 {
-        format!("Next: {} in {}m", title, info.minutes_until)
-    } else if info.minutes_until < 24 * 60 {
-        let hours = info.minutes_until / 60;
-        let mins = info.minutes_until % 60;
+/// Format a minutes-until value like "43m", "2h 15m", "3d 2h"
+fn format_duration(minutes: i64) -> String {
+    if minutes < 60 {
+        format!("{}m", minutes)
+    } else if minutes < 24 * 60 {
+        let hours = minutes / 60;
+        let mins = minutes % 60;
         if mins > 0 {
-            format!("Next: {} in {}h {}m", title, hours, mins)
+            format!("{}h {}m", hours, mins)
         } else {
-            format!("Next: {} in {}h", title, hours)
+            format!("{}h", hours)
         }
     } else {
-        let days = info.minutes_until / (24 * 60);
-        let hours = (info.minutes_until % (24 * 60)) / 60;
+        let days = minutes / (24 * 60);
+        let hours = (minutes % (24 * 60)) / 60;
         if hours > 0 {
-            format!("Next: {} in {}d {}h", title, days, hours)
+            format!("{}d {}h", days, hours)
         } else {
-            format!("Next: {} in {}d", title, days)
+            format!("{}d", days)
         }
     }
 }
@@ -202,10 +226,15 @@ pub fn render(state: &RenderState) {
     // Get terminal size
     let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
 
+    // Batch the whole frame so the clear+redraw appears atomically (no flicker
+    // on terminals supporting synchronized output — alacritty/ghostty/kitty/foot)
+    execute!(out, terminal::BeginSynchronizedUpdate).unwrap();
+
     // Setup wizard takes over the whole screen
     if let Some(setup) = state.setup {
         execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0)).unwrap();
         render_setup_wizard(&mut out, setup, term_width, term_height);
+        execute!(out, terminal::EndSynchronizedUpdate).unwrap();
         out.flush().unwrap();
         return;
     }
@@ -241,6 +270,11 @@ pub fn render(state: &RenderState) {
         if let Some(action) = state.pending_action {
             render_confirmation_modal(&mut out, action, term_width, term_height);
         }
+
+        // Render help overlay on top of everything
+        if state.show_help {
+            render_help_modal(&mut out, term_width, term_height);
+        }
     }
 
     // Render status bar at bottom
@@ -248,22 +282,30 @@ pub fn render(state: &RenderState) {
     execute!(out, cursor::MoveTo(0, status_row)).unwrap();
 
     if let Some(msg) = state.status_message {
-        execute!(out, SetForegroundColor(colors::STATUS_MESSAGE)).unwrap();
+        let color = if state.status_is_error { Color::Red } else { colors::STATUS_MESSAGE };
+        execute!(out, SetForegroundColor(color)).unwrap();
         print!(" {}", truncate_str(msg, term_width as usize - 2));
         execute!(out, ResetColor).unwrap();
     } else {
         // Show countdown to next event when no status message
         let current_time = Local::now().time();
         if let Some(next_info) = find_next_event(state.events, today, current_time) {
-            let countdown = format_countdown(&next_info, 30);
-            if next_info.is_current {
+            let title = truncate_str(&next_info.event.title, 30);
+            if next_info.is_current || next_info.minutes_until <= 0 {
                 execute!(out, SetForegroundColor(colors::CURRENT_EVENT)).unwrap();
+                print!(" Now: {}", title);
             } else if next_info.minutes_until <= 15 {
                 execute!(out, SetForegroundColor(colors::NEXT_EVENT)).unwrap();
+                print!(" Next: {} in {}", title, format_duration(next_info.minutes_until));
             } else {
-                execute!(out, SetForegroundColor(Color::White)).unwrap();
+                // Calm default: only the event title at full brightness
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!(" Next: ");
+                execute!(out, ResetColor).unwrap();
+                print!("{}", title);
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!(" in {}", format_duration(next_info.minutes_until));
             }
-            print!(" {}", countdown);
             execute!(out, ResetColor).unwrap();
         }
     }
@@ -272,27 +314,29 @@ pub fn render(state: &RenderState) {
     execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
 
-    let controls = if state.pending_action.is_some() {
+    let controls = if state.show_help {
+        // Help overlay controls
+        " any key:close".to_string()
+    } else if state.pending_action.is_some() {
         // Confirmation mode controls
         " y/Enter:confirm n/Esc:cancel".to_string()
-    } else if state.navigation_mode == NavigationMode::Event {
-        // Event navigation mode controls
-        " jk:nav ^d/^u:scroll f:find n:now t:today r:refresh Esc:back q:quit".to_string()
     } else {
-        // Day navigation mode controls
-        let mut c = String::from(" jk:day ^d/^u:month f:find n:now t:today r:refresh Enter:events");
-        if !state.google_auth.is_authenticated() {
-            c.push_str(" g:work");
+        // Calm footer: the full keymap lives in the ? overlay
+        let mut c = String::from(" ? help \u{00B7} q quit");
+        if state.navigation_mode == NavigationMode::Day {
+            if !state.google_auth.is_authenticated() {
+                c.push_str(" \u{00B7} g connect work");
+            }
+            if !state.icloud_auth.is_authenticated() {
+                c.push_str(" \u{00B7} i connect personal");
+            }
         }
-        if !state.icloud_auth.is_authenticated() {
-            c.push_str(" i:personal");
-        }
-        c.push_str(" q:quit");
         c
     };
     print!("{}", controls);
     execute!(out, ResetColor).unwrap();
 
+    execute!(out, terminal::EndSynchronizedUpdate).unwrap();
     out.flush().unwrap();
 }
 
@@ -324,7 +368,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     let header_rows = 2u16;
 
     // Render calendar on left
-    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading);
+    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading, term_height);
 
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
@@ -332,12 +376,9 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         // Events column header: selected date
         execute!(out, cursor::MoveTo(events_x, 0)).unwrap();
-        execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
+        execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         print!("{}", state.selected_date.format("%a %b %d"));
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-        // Separator line
-        draw_separator(out, events_x, 1, events_panel_width);
 
         let google_events = state.events.google.get(state.selected_date);
         let icloud_events = state.events.icloud.get(state.selected_date);
@@ -356,6 +397,28 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             None
         };
 
+        // Budget vertical space between the two panels so a busy day can't push
+        // the Personal panel (or the status bar) off screen
+        let log_rows: u16 = if state.show_logs { 8 } else { 0 };
+        let reserved_bottom = 2 + log_rows; // status + controls rows
+        let available = term_height.saturating_sub(header_rows + reserved_bottom) as usize;
+        // two panel headers + one blank row between panels
+        let content_budget = available.saturating_sub(3).max(2);
+        let google_needed = google_events.len().max(1);
+        let icloud_needed = icloud_events.len().max(1);
+        let (google_rows, icloud_rows) = if google_needed + icloud_needed <= content_budget {
+            (google_needed, icloud_needed)
+        } else {
+            let half = content_budget / 2;
+            if google_needed <= half {
+                (google_needed, content_budget - google_needed)
+            } else if icloud_needed <= content_budget - half {
+                (content_budget - icloud_needed, icloud_needed)
+            } else {
+                (half.max(1), content_budget.saturating_sub(half).max(1))
+            }
+        };
+
         // Render Work (Google) panel
         render_event_panel(
             out,
@@ -371,10 +434,11 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             current_time,
             google_selected,
             &google_overlaps,
+            google_rows,
         );
 
-        // Calculate Personal panel position: after Work header (1) + events + spacing (1)
-        let work_panel_rows = 1 + google_events.len().max(1) as u16;
+        // Calculate Personal panel position: after Work header (1) + rendered rows + spacing (1)
+        let work_panel_rows = 1 + google_needed.min(google_rows) as u16;
         let personal_y = header_rows + work_panel_rows + 1;
 
         // Render Personal (iCloud) panel below
@@ -392,7 +456,14 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             current_time,
             icloud_selected,
             &icloud_overlaps,
+            icloud_rows,
         );
+    } else if events_panel_width >= 4 {
+        // Terminal too narrow for the event panels — say so instead of showing nothing
+        execute!(out, cursor::MoveTo(cal_width + 1, 0)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("{}", truncate_str("Too narrow for events", events_panel_width as usize));
+        execute!(out, ResetColor).unwrap();
     }
 
     // Render details panel on the right when in Event mode
@@ -419,30 +490,23 @@ fn render_calendar(
     today: NaiveDate,
     events: &EventCache,
     is_loading: bool,
+    term_height: u16,
 ) {
     execute!(out, cursor::MoveTo(0, 0)).unwrap();
 
     // Month header
-    execute!(
-        out,
-        SetForegroundColor(Color::Cyan),
-        SetAttribute(Attribute::Bold)
-    )
-    .unwrap();
+    execute!(out, SetAttribute(Attribute::Bold)).unwrap();
 
     let cal_width = CALENDAR_WIDTH;
     let loading_indicator = if is_loading { " *" } else { "" };
     let header = format!(
         "{} {}{}",
-        current_date.format("%B").to_string().to_uppercase(),
+        current_date.format("%B"),
         current_date.year(),
         loading_indicator
     );
     print!("{}", truncate_str(&header, cal_width as usize));
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-    // Separator line
-    draw_separator(out, 0, 1, cal_width - 1);
 
     // Weekday header
     execute!(out, cursor::MoveTo(0, 2)).unwrap();
@@ -469,13 +533,13 @@ fn render_calendar(
                 let is_today = date == today;
                 let is_selected = date == selected_date;
                 let is_weekend = col >= 5;
-                let has_events = events.has_events(date);
 
                 if is_selected {
+                    // Explicit colors: Reverse over a dark theme made the cursor nearly invisible
                     execute!(
                         out,
-                        SetForegroundColor(Color::Black),
-                        SetAttribute(Attribute::Reverse)
+                        SetBackgroundColor(Color::Cyan),
+                        SetForegroundColor(Color::Black)
                     )
                     .unwrap();
                 } else if is_today {
@@ -489,11 +553,7 @@ fn render_calendar(
                     execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
                 }
 
-                if has_events && !is_selected {
-                    print!("{:2}\u{2022}", day);
-                } else {
-                    print!("{:2} ", day);
-                }
+                print!("{:2} ", day);
 
                 execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
             }
@@ -501,7 +561,7 @@ fn render_calendar(
     }
 
     // Render week availability below the calendar grid
-    render_week_availability(out, events, selected_date);
+    render_week_availability(out, events, selected_date, term_height);
 }
 
 /// Parse an event's time range into (start_minutes, end_minutes) from midnight.
@@ -602,6 +662,7 @@ fn render_week_availability(
     out: &mut impl Write,
     events: &EventCache,
     selected_date: NaiveDate,
+    term_height: u16,
 ) {
     let start_row = 10u16; // Below the calendar grid
     let monday = get_week_monday(selected_date);
@@ -611,18 +672,33 @@ fn render_week_availability(
         now.hour() * 60 + now.minute()
     };
     let num_days = 7;
+    let max_row = term_height.saturating_sub(2); // don't collide with the status bar
 
-    // Header row
+    // Header row: highlight the selected day's column (and today's)
     execute!(out, cursor::MoveTo(0, start_row)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("    M  T  W  T  F  S  S");
-    execute!(out, ResetColor).unwrap();
+    print!("   ");
+    for day_offset in 0..7i64 {
+        let date = monday + Duration::days(day_offset);
+        let letter = ["M", "T", "W", "T", "F", "S", "S"][day_offset as usize];
+        if date == selected_date {
+            execute!(out, SetForegroundColor(colors::SELECTED), SetAttribute(Attribute::Bold)).unwrap();
+        } else if date == today {
+            execute!(out, SetForegroundColor(Color::Green)).unwrap();
+        } else {
+            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        }
+        print!(" {} ", letter);
+        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    }
 
     // Render each hour row (8am - 7pm = 12 rows)
     // Each cell shows 30-min resolution using half-blocks
     for hour_offset in 0..12u32 {
         let hour = 8 + hour_offset;
         let row = start_row + 1 + hour_offset as u16;
+        if row >= max_row {
+            break;
+        }
 
         execute!(out, cursor::MoveTo(0, row)).unwrap();
 
@@ -655,26 +731,19 @@ fn render_week_availability(
             let first_half_past = is_past_day || (date == today && current_minutes >= slot1_end);
             let second_half_past = is_past_day || (date == today && current_minutes >= slot2_end);
 
-            let dim = |color: Color| -> Color {
-                match color {
-                    Color::Blue => Color::Rgb { r: 90, g: 90, b: 170 },
-                    Color::Red => Color::Rgb { r: 170, g: 75, b: 75 },
-                    Color::Rgb { r: 200, g: 200, b: 200 } => Color::Rgb { r: 150, g: 150, b: 150 },
-                    other => other,
+            // Past slots fade toward the real terminal background
+            let color_for = |count: usize, past: bool| -> Color {
+                let rgb = if count >= 2 { colors::HEATMAP_OVERLAP_RGB } else { colors::BUSY_RGB };
+                if past {
+                    blend_toward_bg(rgb, 0.55)
+                } else {
+                    Color::Rgb { r: rgb.0, g: rgb.1, b: rgb.2 }
                 }
             };
+            let free = free_block_color();
 
-            let color_for = |count: usize, past: bool| -> Color {
-                let c = if count >= 2 { colors::OVERLAP_EVENT } else { colors::BUSY_BLOCK };
-                if past { dim(c) } else { c }
-            };
-
-            let free_color = |past: bool| -> Color {
-                if past { dim(colors::FREE_BLOCK) } else { colors::FREE_BLOCK }
-            };
-
-            // Vertical half-blocks: top = first 30 min, bottom = second 30 min
-            // ▀ draws top with fg, bottom with bg
+            // Vertical half-blocks: ▀ = first half-hour busy, ▄ = second.
+            // The free half is painted with the derived free shade via bg color.
             match (first_half_busy, second_half_busy) {
                 (true, true) => {
                     let top = color_for(first_half_count, first_half_past);
@@ -688,15 +757,15 @@ fn render_week_availability(
                     }
                 }
                 (true, false) => {
-                    execute!(out, SetForegroundColor(color_for(first_half_count, first_half_past)), SetBackgroundColor(free_color(second_half_past))).unwrap();
+                    execute!(out, SetForegroundColor(color_for(first_half_count, first_half_past)), SetBackgroundColor(free)).unwrap();
                     print!("▀▀");
                 }
                 (false, true) => {
-                    execute!(out, SetForegroundColor(free_color(first_half_past)), SetBackgroundColor(color_for(second_half_count, second_half_past))).unwrap();
-                    print!("▀▀");
+                    execute!(out, SetForegroundColor(color_for(second_half_count, second_half_past)), SetBackgroundColor(free)).unwrap();
+                    print!("▄▄");
                 }
                 (false, false) => {
-                    execute!(out, SetForegroundColor(free_color(first_half_past))).unwrap();
+                    execute!(out, SetForegroundColor(free)).unwrap();
                     print!("██");
                 }
             }
@@ -704,6 +773,42 @@ fn render_week_availability(
             print!(" ");
         }
         execute!(out, ResetColor).unwrap();
+    }
+
+    // Events outside the 08:00–20:00 window would otherwise be invisible here —
+    // mark the affected days with ▴ (earlier) / ▾ (later)
+    let marker_row = start_row + 13;
+    if marker_row < max_row {
+        let mut markers = [" "; 7];
+        let mut any = false;
+        for day_offset in 0..7i64 {
+            let date = monday + Duration::days(day_offset);
+            let mut early = false;
+            let mut late = false;
+            for (start, end) in events.google.get(date).iter()
+                .chain(events.icloud.get(date).iter())
+                .filter_map(parse_event_range)
+            {
+                early |= start < 8 * 60;
+                late |= end > 20 * 60;
+            }
+            markers[day_offset as usize] = match (early, late) {
+                (true, true) => "\u{2195}",   // ↕
+                (true, false) => "\u{25B4}",  // ▴
+                (false, true) => "\u{25BE}",  // ▾
+                (false, false) => " ",
+            };
+            any |= early || late;
+        }
+        if any {
+            execute!(out, cursor::MoveTo(0, marker_row)).unwrap();
+            execute!(out, SetForegroundColor(Color::DarkYellow)).unwrap();
+            print!("   ");
+            for marker in markers {
+                print!(" {} ", marker);
+            }
+            execute!(out, ResetColor).unwrap();
+        }
     }
 }
 
@@ -722,20 +827,13 @@ fn render_event_panel(
     current_time: NaiveTime,
     selected_index: Option<usize>,
     overlapping_indices: &HashSet<usize>,
+    max_rows: usize,
 ) {
-    // Panel header: ─ Title ─────────
+    // Panel header: just the label in a muted accent — no rules
     execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("\u{2500} ");
     execute!(out, SetForegroundColor(accent_color)).unwrap();
     let loading_str = if is_loading { "*" } else { "" };
     print!("{}{}", title, loading_str);
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!(" ");
-    let remaining = width.saturating_sub(title.len() as u16 + 4 + loading_str.len() as u16);
-    for _ in 0..remaining.min(40) {
-        print!("\u{2500}");
-    }
     execute!(out, ResetColor).unwrap();
 
     let content_start = y + 1;
@@ -759,8 +857,24 @@ fn render_event_panel(
         (None, None)
     };
 
-    for (i, event) in events.iter().enumerate() {
-        execute!(out, cursor::MoveTo(x, content_start + i as u16)).unwrap();
+    // Scroll window: keep the selected event visible, reserve the last row
+    // for a "+N more" indicator when the panel can't fit everything
+    let total = events.len();
+    let (start, visible) = if total <= max_rows {
+        (0usize, total)
+    } else {
+        let visible = max_rows.saturating_sub(1).max(1);
+        let sel = selected_index.unwrap_or(0);
+        let mut start = if sel >= visible { sel + 1 - visible } else { 0 };
+        if start + visible > total {
+            start = total - visible;
+        }
+        (start, visible)
+    };
+
+    for (row, i) in (start..start + visible).enumerate() {
+        let event = &events[i];
+        execute!(out, cursor::MoveTo(x, content_start + row as u16)).unwrap();
 
         let is_selected = selected_index == Some(i);
         let is_current = current_event_idx == Some(i);
@@ -771,17 +885,18 @@ fn render_event_panel(
         let is_overlapping = overlapping_indices.contains(&i);
 
         // Choose color based on event status
-        // Priority: Selected > Past/Unaccepted > Free > Overlap (Red) > Current (Green) > Next (Yellow) > Default
+        // Priority: Selected > Past/Unaccepted > Free > Current (Green) > Overlap (Red) > Next (Yellow) > Default
+        // "Happening now" beats the overlap warning — the red still shows on the other event
         let event_color = if is_selected {
             colors::SELECTED
         } else if is_past_day || is_unaccepted || is_past_event {
             colors::PAST_EVENT
         } else if is_free_event {
             colors::FREE_EVENT
-        } else if is_overlapping {
-            colors::OVERLAP_EVENT
         } else if is_current {
             colors::CURRENT_EVENT
+        } else if is_overlapping {
+            colors::OVERLAP_EVENT
         } else if is_next {
             colors::NEXT_EVENT
         } else {
@@ -792,12 +907,12 @@ fn render_event_panel(
         if is_selected {
             execute!(out, SetForegroundColor(Color::Cyan)).unwrap();
             print!("\u{25B6}"); // Right-pointing triangle
-        } else if is_overlapping && !is_past_day && !is_unaccepted && !is_free_event && !is_past_event {
-            execute!(out, SetForegroundColor(colors::OVERLAP_EVENT)).unwrap();
-            print!("!");
         } else if is_current && !is_unaccepted && !is_free_event {
             execute!(out, SetForegroundColor(Color::Green)).unwrap();
             print!("\u{25CF}"); // Filled circle
+        } else if is_overlapping && !is_past_day && !is_unaccepted && !is_free_event && !is_past_event {
+            execute!(out, SetForegroundColor(colors::OVERLAP_EVENT)).unwrap();
+            print!("!");
         } else if is_next && !is_unaccepted && !is_free_event {
             execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
             print!("\u{25CB}"); // Empty circle
@@ -805,22 +920,46 @@ fn render_event_panel(
             print!(" ");
         }
 
-        // Time
+        // Time (carries the status color; two-space gutter before the title)
         execute!(out, SetForegroundColor(event_color)).unwrap();
         if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
             execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         }
-        print!("{:>7} ", event.time_str);
+        print!("{:>7}  ", event.time_str);
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
 
-        // Title
-        execute!(out, SetForegroundColor(event_color)).unwrap();
-        if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
+        // Title stays uncolored unless the row is selected or receding —
+        // status colors live on the marker and time only
+        let title_color = if is_selected {
+            colors::SELECTED
+        } else if is_past_day || is_unaccepted || is_past_event {
+            colors::PAST_EVENT
+        } else if is_free_event {
+            colors::FREE_EVENT
+        } else {
+            Color::Reset
+        };
+        execute!(out, SetForegroundColor(title_color)).unwrap();
+        if is_selected {
             execute!(out, SetAttribute(Attribute::Bold)).unwrap();
         }
-        let title_width = width.saturating_sub(10) as usize;
+        let title_width = width.saturating_sub(11) as usize;
         print!("{}", truncate_str(&event.title, title_width));
         execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    }
+
+    // Clipped-events indicator on the reserved last row
+    if total > visible {
+        let below = total - (start + visible);
+        execute!(out, cursor::MoveTo(x, content_start + visible as u16)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        let indicator = match (start > 0, below > 0) {
+            (true, true) => format!(" \u{2026} {} above \u{00B7} {} more", start, below),
+            (true, false) => format!(" \u{2026} {} above", start),
+            _ => format!(" \u{2026} +{} more", below),
+        };
+        print!("{}", truncate_str(&indicator, width as usize));
+        execute!(out, ResetColor).unwrap();
     }
 }
 
@@ -833,135 +972,100 @@ fn render_event_details_column(
     height: u16,
     event: Option<&DisplayEvent>,
 ) {
-    // Header
-    execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
-    print!("Details");
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
-
-    // Separator line
-    draw_separator(out, x, y + 1, width);
-
     let content_x = x;
     let content_width = width as usize;
-    let mut current_row = y + 2;
+    let max_row = y + height.saturating_sub(1);
 
     let Some(event) = event else {
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+        execute!(out, cursor::MoveTo(content_x, y)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
         print!("No event selected");
         execute!(out, ResetColor).unwrap();
         return;
     };
 
-    // Title
+    let mut current_row = y;
+
+    // Title doubles as the panel header
     execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
     execute!(out, SetForegroundColor(colors::TITLE), SetAttribute(Attribute::Bold)).unwrap();
     print!("{}", truncate_str(&event.title, content_width));
     execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
     current_row += 1;
 
-    // Time
+    // Time, with the calendar source as a dim suffix
     execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+    let time_text = match event.end_time_str {
+        Some(ref end) => format!("{} \u{2013} {}", event.time_str, end),
+        None => event.time_str.clone(),
+    };
     execute!(out, SetForegroundColor(colors::TIME)).unwrap();
-    if let Some(ref end) = event.end_time_str {
-        print!("\u{1F552} {} - {}", event.time_str, end);
-    } else {
-        print!("\u{1F552} {}", event.time_str);
+    print!("{}", truncate_str(&time_text, content_width));
+    let (source, calendar_name) = match &event.id {
+        EventId::Google { calendar_name, .. } => ("Google", calendar_name),
+        EventId::ICloud { calendar_name, .. } => ("iCloud", calendar_name),
+    };
+    let source_text = match calendar_name {
+        Some(name) => format!(" \u{00B7} {} \u{00B7} {}", source, name),
+        None => format!(" \u{00B7} {}", source),
+    };
+    let remaining = content_width.saturating_sub(time_text.len());
+    if remaining > 4 {
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("{}", truncate_str(&source_text, remaining));
     }
     execute!(out, ResetColor).unwrap();
     current_row += 1;
 
     // Location
     if let Some(ref loc) = event.location
-        && !loc.is_empty() && current_row < y + height - 3 {
+        && !loc.is_empty() && current_row < max_row {
             execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-            execute!(out, SetForegroundColor(colors::LOCATION)).unwrap();
-            print!("\u{1F4CD} {}", truncate_str(loc, content_width.saturating_sub(3)));
+            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+            print!("{}", truncate_str(loc, content_width));
             execute!(out, ResetColor).unwrap();
             current_row += 1;
         }
 
-    // Calendar source
-    if current_row < y + height - 3 {
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        match &event.id {
-            EventId::Google { calendar_name, .. } => {
-                if let Some(name) = calendar_name {
-                    print!("Google - {}", name);
-                } else {
-                    print!("Google");
-                }
-            }
-            EventId::ICloud { calendar_name, .. } => {
-                if let Some(name) = calendar_name {
-                    print!("iCloud - {}", name);
-                } else {
-                    print!("iCloud");
-                }
-            }
+    // Actions on one dim line
+    current_row += 1; // blank line before actions
+    if current_row < max_row {
+        let mut actions: Vec<&str> = Vec::new();
+        if event.meeting_url.is_some() {
+            actions.push("J join");
         }
-        execute!(out, ResetColor).unwrap();
-        current_row += 1;
-    }
-
-    // Actions section
-    current_row += 1; // Blank line before actions
-
-    // Meeting link
-    if event.meeting_url.is_some() && current_row < y + height - 3 {
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(colors::ACTION)).unwrap();
-        print!("[J] Join");
-        execute!(out, ResetColor).unwrap();
-        current_row += 1;
-    }
-
-    // Accept/Decline (Google events only)
-    if matches!(event.id, EventId::Google { .. }) && current_row < y + height - 3 {
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        if event.accepted {
-            print!("[d] Decline");
-        } else {
-            print!("[a] Accept");
+        if matches!(event.id, EventId::Google { .. }) {
+            actions.push(if event.accepted { "d decline" } else { "a accept" });
         }
-        execute!(out, ResetColor).unwrap();
-        current_row += 1;
-    }
+        actions.push("x delete");
 
-    // Delete
-    if current_row < y + height - 3 {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
         execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("[x] Delete");
+        print!("{}", truncate_str(&actions.join("  "), content_width));
         execute!(out, ResetColor).unwrap();
-        current_row += 1;
-    }
-
-    // Separator
-    if current_row < y + height - 2 {
         current_row += 1;
     }
 
     // Participants
-    if !event.attendees.is_empty() && current_row < y + height - 2 {
+    current_row += 1; // blank line before participants
+    if !event.attendees.is_empty() && current_row < max_row {
         execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
-        print!("Participants:");
-        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        print!("Participants");
+        execute!(out, ResetColor).unwrap();
         current_row += 1;
 
-        let max_row = y + height - 1;
-        for attendee in &event.attendees {
+        let total = event.attendees.len();
+        for (idx, attendee) in event.attendees.iter().enumerate() {
             if current_row >= max_row {
+                break;
+            }
+            // On the last available row, summarize the rest instead of showing one more name
+            let remaining = total - idx;
+            if current_row == max_row - 1 && remaining > 1 {
                 execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
                 execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                let remaining = event.attendees.len() - (current_row - y - 7) as usize;
-                if remaining > 0 {
-                    print!("  ... +{} more", remaining);
-                }
+                print!("  \u{2026} +{} more", remaining);
                 execute!(out, ResetColor).unwrap();
                 break;
             }
@@ -980,7 +1084,10 @@ fn render_event_details_column(
                 _ => "",
             };
             let name_width = content_width.saturating_sub(5 + status_str.len());
-            print!("{}{}", truncate_str(display_name, name_width), status_str);
+            print!("{}", truncate_str(display_name, name_width));
+            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+            print!("{}", status_str);
+            execute!(out, ResetColor).unwrap();
             current_row += 1;
         }
     }
@@ -1047,13 +1154,29 @@ pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: Naive
     (current_idx, next_idx)
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{}…", truncated)
+/// Truncate a string to a maximum *display* width (terminal columns), appending
+/// an ellipsis. Counts double-width characters (emoji, CJK) as 2 columns so
+/// truncated titles can't bleed into the neighboring panel.
+fn truncate_str(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let width: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
+    if width <= max_width {
+        return s.to_string();
     }
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// Format a smart "when" string combining date and time based on proximity
@@ -1438,6 +1561,115 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
     };
     print!("{}\u{2191}\u{2193}:navigate Enter:select Esc:close", count_str);
     execute!(out, ResetColor).unwrap();
+}
+
+/// Render the help overlay listing all keybindings and the availability legend
+fn render_help_modal(out: &mut impl Write, term_width: u16, term_height: u16) {
+    enum Line {
+        Section(&'static str),
+        Item(&'static str, &'static str),
+        Legend,
+        Note(&'static str),
+    }
+    use Line::*;
+
+    let lines = [
+        Section("Navigate"),
+        Item("h/l ← →", "previous / next day"),
+        Item("j/k ↑ ↓", "previous / next week (or event)"),
+        Item("H/L", "previous / next month"),
+        Item("Enter / Esc", "browse events / back"),
+        Item("t / n", "go to today / current event"),
+        Item("^d / ^u", "month (days) · jump 10 (events)"),
+        Section("Event actions"),
+        Item("J", "join meeting"),
+        Item("a / d", "accept / decline (Google)"),
+        Item("x", "delete event"),
+        Section("Search & misc"),
+        Item("f", "search titles & people"),
+        Item("r / D / S", "refresh / logs / setup"),
+        Item("1 / 2", "open Google / iCloud in browser"),
+        Item("q", "quit"),
+        Section("Week availability grid"),
+        Legend,
+        Item("▀ / ▄", "first / second half-hour busy"),
+        Item("▴ ▾", "events before 08:00 / after 20:00"),
+        Note("Bulgarian phonetic keys work too · any key closes"),
+    ];
+
+    let modal_width = 54u16.min(term_width.saturating_sub(2));
+    let modal_height = (lines.len() as u16 + 2).min(term_height.saturating_sub(1));
+    let start_x = (term_width.saturating_sub(modal_width)) / 2;
+    let start_y = (term_height.saturating_sub(modal_height)) / 2;
+
+    // Box with title, blank interior
+    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
+    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
+    print!("┌─ Help ");
+    for _ in 0..modal_width.saturating_sub(9) {
+        print!("─");
+    }
+    print!("┐");
+    for row in 1..modal_height - 1 {
+        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
+        print!("│");
+        for _ in 0..modal_width - 2 {
+            print!(" ");
+        }
+        print!("│");
+    }
+    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
+    print!("└");
+    for _ in 0..modal_width - 2 {
+        print!("─");
+    }
+    print!("┘");
+    execute!(out, ResetColor).unwrap();
+
+    let content_x = start_x + 2;
+    let max_row = start_y + modal_height - 1;
+    let mut row = start_y + 1;
+    for line in &lines {
+        if row >= max_row {
+            break;
+        }
+        execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+        match line {
+            Section(title) => {
+                execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
+                print!("{}", title);
+                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+            }
+            Item(keys, desc) => {
+                execute!(out, SetForegroundColor(Color::White)).unwrap();
+                print!("{:>12}", keys);
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!("  {}", desc);
+                execute!(out, ResetColor).unwrap();
+            }
+            Legend => {
+                execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
+                print!("{:>12}", "██");
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!(" busy  ");
+                execute!(out, SetForegroundColor(colors::HEATMAP_OVERLAP)).unwrap();
+                print!("██");
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!(" double-booked  ");
+                execute!(out, SetForegroundColor(free_block_color())).unwrap();
+                print!("██");
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!(" free");
+                execute!(out, ResetColor).unwrap();
+            }
+            Note(text) => {
+                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                print!("{}", text);
+                execute!(out, ResetColor).unwrap();
+            }
+        }
+        row += 1;
+    }
 }
 
 /// Render a centered confirmation modal

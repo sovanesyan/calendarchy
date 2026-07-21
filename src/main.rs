@@ -214,6 +214,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+    // Learn the terminal background (OSC 11) before entering raw mode so the
+    // heatmap can derive theme-adaptive shades; falls back to dark if unanswered
+    if let Ok(rgb) = termbg::rgb(StdDuration::from_millis(120)) {
+        ui::set_term_bg((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8);
+    }
+
     // Enable raw mode and enter alternate screen
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
@@ -242,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 google_auth: &app.google_auth,
                 icloud_auth: &app.icloud_auth,
                 status_message: app.status_message.as_deref(),
+                status_is_error: app.status_is_error,
                 google_loading: app.google_loading,
                 icloud_loading: app.icloud_loading,
                 navigation_mode: app.navigation_mode,
@@ -250,6 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 show_logs: app.show_logs,
                 pending_action: app.pending_action.as_ref(),
                 search: app.search.as_ref(),
+                show_help: app.show_help,
                 setup: app.setup.as_ref(),
             };
             ui::render(&render_state);
@@ -364,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AsyncMessage::GoogleAuthError(msg) => {
                     app.google_auth = GoogleAuthState::Error(msg.clone());
-                    app.set_status(format!("Google: {}", msg));
+                    app.set_error(format!("Google: {}", msg));
                     // Advance setup wizard past auth waiting on error too
                     if let Some(ref mut setup) = app.setup {
                         if setup.step == SetupStep::GoogleAuthWaiting {
@@ -383,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.google_loading = false;
                 }
                 AsyncMessage::GoogleFetchError(msg) => {
-                    app.set_status(format!("Google: {}", msg));
+                    app.set_error(format!("Google: {}", msg));
                     app.google_loading = false;
                 }
                 AsyncMessage::GoogleTokenRefreshed(tokens) => {
@@ -394,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AsyncMessage::GoogleRefreshFailed(msg) => {
                     app.google_auth = GoogleAuthState::NotAuthenticated;
-                    app.set_status(format!("Token refresh failed: {}", msg));
+                    app.set_error(format!("Token refresh failed: {}", msg));
                     app.google_loading = false;
                 }
 
@@ -410,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.set_status(format!("Connected to {} iCloud calendar(s)!", count));
                 }
                 AsyncMessage::ICloudDiscoveryError(msg) => {
+                    app.set_error(format!("iCloud: {}", msg));
                     app.icloud_auth = ICloudAuthState::Error(msg);
                 }
                 AsyncMessage::ICloudEvents(events, month_date) => {
@@ -422,7 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.icloud_loading = false;
                 }
                 AsyncMessage::ICloudFetchError(msg) => {
-                    app.set_status(format!("iCloud: {}", msg));
+                    app.set_error(format!("iCloud: {}", msg));
                     app.icloud_loading = false;
                 }
 
@@ -433,7 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.icloud_loading = false;
                 }
                 AsyncMessage::EventKitError(msg) => {
-                    app.set_status(format!("EventKit: {}", msg));
+                    app.set_error(format!("EventKit: {}", msg));
                     app.icloud_loading = false;
                 }
 
@@ -448,7 +457,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.exit_event_mode();
                 }
                 AsyncMessage::EventActionError(msg) => {
-                    app.set_status(msg);
+                    app.set_error(msg);
                 }
             }
         }
@@ -461,6 +470,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     app.dirty = true;
+                    // Sticky error messages are dismissed by any keypress
+                    app.clear_error();
                     // Handle interactive setup wizard
                     if app.setup.is_some() {
                         match handle_setup_input(&mut app, key_event.code, &tx) {
@@ -514,6 +525,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        continue;
+                    }
+
+                    // Help overlay: any key closes it
+                    if app.show_help {
+                        app.show_help = false;
                         continue;
                     }
 
@@ -657,18 +674,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.prev_event();
                             }
                             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                // Scroll down 10 events
+                                // Scroll down 10 events; flash where we landed since this can jump days
                                 for _ in 0..10 {
                                     app.next_event();
                                 }
+                                app.set_status(format!("Jumped to {}", app.selected_date.format("%a %b %d")));
                             }
                             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                                // Scroll up 10 events
+                                // Scroll up 10 events; flash where we landed since this can jump days
                                 for _ in 0..10 {
                                     app.prev_event();
                                 }
+                                app.set_status(format!("Jumped to {}", app.selected_date.format("%a %b %d")));
                             }
-                            (KeyCode::Char('J'), _) => {
+                            (KeyCode::Char('L') | KeyCode::Char('Л'), _) => {
+                                // Month jump invalidates the event selection, so drop to Day mode
+                                app.next_month();
+                                app.exit_event_mode();
+                            }
+                            (KeyCode::Char('H') | KeyCode::Char('Х'), _) => {
+                                app.prev_month();
+                                app.exit_event_mode();
+                            }
+                            (KeyCode::Char('J') | KeyCode::Char('Й'), _) => {
                                 // Join meeting; Zoom links deep-link into the app instead of the browser
                                 if let Some(event) = app.get_selected_event()
                                     && let Some(ref url) = event.meeting_url {
@@ -682,6 +710,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
                                         if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                             app.pending_action = Some(PendingAction::AcceptEvent { calendar_id, event_id });
+                                        } else {
+                                            app.set_status("Not signed in to Google — press S for setup");
                                         }
                                     } else {
                                         app.set_status("Accept not supported for iCloud");
@@ -694,6 +724,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let EventId::Google { calendar_id, event_id, .. } = event.id.clone() {
                                         if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                             app.pending_action = Some(PendingAction::DeclineEvent { calendar_id, event_id });
+                                        } else {
+                                            app.set_status("Not signed in to Google — press S for setup");
                                         }
                                     } else {
                                         app.set_status("Decline not supported for iCloud");
@@ -707,11 +739,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         EventId::Google { calendar_id, event_id, .. } => {
                                             if matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                                 app.pending_action = Some(PendingAction::DeleteGoogleEvent { calendar_id, event_id });
+                                            } else {
+                                                app.set_status("Not signed in to Google — press S for setup");
                                             }
                                         }
                                         EventId::ICloud { calendar_url, event_uid, etag, .. } => {
                                             if app.config.icloud.is_some() {
                                                 app.pending_action = Some(PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag });
+                                            } else {
+                                                app.set_status("iCloud not configured — press S for setup");
                                             }
                                         }
                                     }
@@ -732,11 +768,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (KeyCode::Esc, _) => {
                                 app.exit_event_mode();
                             }
-                            (KeyCode::Char('D'), _) => {
+                            (KeyCode::Char('D') | KeyCode::Char('Д'), _) => {
                                 app.show_logs = !app.show_logs;
                             }
                             (KeyCode::Char('f') | KeyCode::Char('ф'), _) => {
                                 app.open_search();
+                            }
+                            (KeyCode::Char('?'), _) => {
+                                app.show_help = true;
                             }
                             (KeyCode::Char('1'), _) => {
                                 open_url("https://calendar.google.com");
@@ -744,7 +783,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             (KeyCode::Char('2'), _) => {
                                 open_url("https://www.icloud.com/calendar");
                             }
-                            (KeyCode::Char('S'), _) => {
+                            (KeyCode::Char('S') | KeyCode::Char('С'), _) => {
                                 open_setup_wizard(&mut app);
                             }
                             (KeyCode::Char('q') | KeyCode::Char('я'), _) => {
@@ -758,12 +797,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Day navigation mode (default)
                     match (key_event.code, key_event.modifiers) {
-                        // Navigation keys (with Bulgarian Phonetic equivalents)
-                        (KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down, _) => {
+                        // Navigation matches the month grid (with Bulgarian Phonetic equivalents):
+                        // h/l move a day sideways, j/k move a week down/up
+                        (KeyCode::Char('l') | KeyCode::Char('л') | KeyCode::Right, _) => {
                             app.next_day();
                         }
-                        (KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up, _) => {
+                        (KeyCode::Char('h') | KeyCode::Char('х') | KeyCode::Left, _) => {
                             app.prev_day();
+                        }
+                        (KeyCode::Char('j') | KeyCode::Char('й') | KeyCode::Down, _) => {
+                            app.next_week();
+                        }
+                        (KeyCode::Char('k') | KeyCode::Char('к') | KeyCode::Up, _) => {
+                            app.prev_week();
                         }
                         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                             app.next_month();
@@ -771,8 +817,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                             app.prev_month();
                         }
+                        (KeyCode::Char('L') | KeyCode::Char('Л'), _) => {
+                            app.next_month();
+                        }
+                        (KeyCode::Char('H') | KeyCode::Char('Х'), _) => {
+                            app.prev_month();
+                        }
                         (KeyCode::Enter, _) => {
-                            app.enter_event_mode();
+                            if app.events.has_events(app.selected_date) {
+                                app.enter_event_mode();
+                            } else {
+                                app.set_status("No events on this day");
+                            }
                         }
                         (KeyCode::Char('t') | KeyCode::Char('т'), _) => {
                             app.goto_today();
@@ -786,12 +842,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('n') | KeyCode::Char('н'), _) => {
                             app.goto_now();
                         }
-                        (KeyCode::Char('D'), _) => {
+                        (KeyCode::Char('D') | KeyCode::Char('Д'), _) => {
                             // Toggle HTTP request logs display
                             app.show_logs = !app.show_logs;
                         }
                         (KeyCode::Char('f') | KeyCode::Char('ф'), _) => {
                             app.open_search();
+                        }
+                        (KeyCode::Char('?'), _) => {
+                            app.show_help = true;
                         }
                         (KeyCode::Char('1'), _) => {
                             open_url("https://calendar.google.com");
@@ -803,11 +862,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if !matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                 if let Some(gc) = app.config.google.clone() {
                                     start_google_auth(&mut app, gc, &tx);
+                                } else {
+                                    app.set_status("Google not configured — press S for setup");
                                 }
                             }
                         }
-                        (KeyCode::Char('S'), _) => {
+                        (KeyCode::Char('S') | KeyCode::Char('С'), _) => {
                             open_setup_wizard(&mut app);
+                        }
+                        (KeyCode::Char('i') | KeyCode::Char('и'), _) if app.config.icloud.is_none() => {
+                            app.set_status("iCloud not configured — press S for setup");
                         }
                         (KeyCode::Char('i') | KeyCode::Char('и'), _) => {
                             // Start iCloud discovery (re-run to refresh calendar names)
@@ -839,7 +903,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             }
                         }
-                        (KeyCode::Char('q') | KeyCode::Char('я') | KeyCode::Esc, _) => {
+                        // Esc deliberately does NOT quit: it means "back" everywhere else,
+                        // and double-Esc from Event mode would exit the app by accident
+                        (KeyCode::Char('q') | KeyCode::Char('я'), _) => {
                             break;
                         }
                         _ => {}

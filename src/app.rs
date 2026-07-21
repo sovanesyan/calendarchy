@@ -8,7 +8,6 @@ pub struct SearchState {
     pub query: String,
     pub results: Vec<SearchResult>,
     pub selected_index: usize,
-    pub scroll_offset: usize,
 }
 
 /// Whether a search result matched on title or participant
@@ -110,6 +109,8 @@ pub struct App {
     pub icloud_auth: ICloudAuthState,
     pub status_message: Option<String>,
     pub status_message_time: Option<std::time::Instant>,
+    /// Error messages stick until the next keypress instead of expiring
+    pub status_is_error: bool,
     pub config: Config,
     pub google_needs_fetch: bool,
     pub icloud_needs_fetch: bool,
@@ -120,6 +121,7 @@ pub struct App {
     pub selected_event_index: usize,
     pub pending_action: Option<PendingAction>,
     pub search: Option<SearchState>,
+    pub show_help: bool,
     pub dirty: bool,
     /// Tracks the last minute we rendered, so the countdown timer triggers a re-render each minute
     pub last_render_minute: u32,
@@ -142,6 +144,7 @@ impl App {
             icloud_auth: ICloudAuthState::NotConfigured,
             status_message: None,
             status_message_time: None,
+            status_is_error: false,
             config: Config::default(),
             google_needs_fetch: false,
             icloud_needs_fetch: false,
@@ -152,6 +155,7 @@ impl App {
             selected_event_index: 0,
             pending_action: None,
             search: None,
+            show_help: false,
             dirty: true,
             last_render_minute: Local::now().minute(),
             setup: None,
@@ -164,14 +168,34 @@ impl App {
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some(msg.into());
         self.status_message_time = Some(std::time::Instant::now());
+        self.status_is_error = false;
+    }
+
+    /// Errors stay on screen until the next keypress (see clear_error)
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_message_time = None;
+        self.status_is_error = true;
     }
 
     pub fn clear_expired_status(&mut self) -> bool {
-        if let Some(time) = self.status_message_time
+        if !self.status_is_error
+            && let Some(time) = self.status_message_time
             && time.elapsed() > std::time::Duration::from_secs(3)
         {
             self.status_message = None;
             self.status_message_time = None;
+            return true;
+        }
+        false
+    }
+
+    /// Dismiss a sticky error message; returns true if one was showing
+    pub fn clear_error(&mut self) -> bool {
+        if self.status_is_error {
+            self.status_message = None;
+            self.status_message_time = None;
+            self.status_is_error = false;
             return true;
         }
         false
@@ -184,6 +208,16 @@ impl App {
 
     pub fn prev_day(&mut self) {
         self.selected_date -= Duration::days(1);
+        self.sync_month_if_needed();
+    }
+
+    pub fn next_week(&mut self) {
+        self.selected_date += Duration::days(7);
+        self.sync_month_if_needed();
+    }
+
+    pub fn prev_week(&mut self) {
+        self.selected_date -= Duration::days(7);
         self.sync_month_if_needed();
     }
 
@@ -424,7 +458,6 @@ impl App {
             query: String::new(),
             results: Vec::new(),
             selected_index: 0,
-            scroll_offset: 0,
         });
     }
 
@@ -470,18 +503,14 @@ impl App {
             if search.selected_index >= search.results.len() {
                 search.selected_index = search.results.len().saturating_sub(1);
             }
-            // Clamp scroll offset
-            if search.selected_index < search.scroll_offset {
-                search.scroll_offset = search.selected_index;
-            }
         }
     }
 
     pub fn select_search_result(&mut self) {
-        let (date, source, event_title) = match self.search.as_ref() {
+        let (date, source, event_id) = match self.search.as_ref() {
             Some(s) => {
                 match s.results.get(s.selected_index) {
-                    Some(r) => (r.event.date, r.source, r.event.title.clone()),
+                    Some(r) => (r.event.date, r.source, r.event.id.clone()),
                     None => return,
                 }
             }
@@ -507,7 +536,7 @@ impl App {
             EventSource::ICloud => self.events.icloud.get(date),
         };
         self.selected_event_index = events.iter()
-            .position(|e| e.title == event_title)
+            .position(|e| e.id == event_id)
             .unwrap_or(0);
 
         self.close_search();
