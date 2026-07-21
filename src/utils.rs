@@ -96,6 +96,35 @@ pub fn extract_meeting_url(text: &str) -> Option<String> {
     None
 }
 
+/// Convert a Zoom join URL to its zoommtg:// deep link so the Zoom app
+/// (or the system's zoommtg handler) opens directly, skipping the browser
+/// landing page. Returns None for URLs that aren't Zoom /j/ links.
+/// e.g., "https://dext.zoom.us/j/123?pwd=abc" -> "zoommtg://dext.zoom.us/join?action=join&confno=123&pwd=abc"
+pub fn to_zoom_deeplink(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    if host != "zoom.us" && !host.ends_with(".zoom.us") {
+        return None;
+    }
+    let after_j = path.strip_prefix("j/")?;
+    let (confno, query) = match after_j.split_once('?') {
+        Some((c, q)) => (c, Some(q)),
+        None => (after_j, None),
+    };
+    if confno.is_empty() || !confno.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let mut deeplink = format!("zoommtg://{host}/join?action=join&confno={confno}");
+    if let Some(query) = query
+        && let Some(pwd) = query.split('&').find_map(|p| p.strip_prefix("pwd=")) {
+            deeplink.push_str("&pwd=");
+            deeplink.push_str(pwd);
+        }
+    Some(deeplink)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +167,44 @@ mod tests {
     fn test_extract_meeting_url_none() {
         assert_eq!(extract_meeting_url("No meeting link here"), None);
         assert_eq!(extract_meeting_url("https://example.com/not-a-meeting"), None);
+    }
+
+    #[test]
+    fn test_to_zoom_deeplink_with_pwd() {
+        assert_eq!(
+            to_zoom_deeplink("https://dext.zoom.us/j/98429926780?pwd=abc.123"),
+            Some("zoommtg://dext.zoom.us/join?action=join&confno=98429926780&pwd=abc.123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_zoom_deeplink_without_pwd() {
+        assert_eq!(
+            to_zoom_deeplink("https://us02web.zoom.us/j/123456789"),
+            Some("zoommtg://us02web.zoom.us/join?action=join&confno=123456789".to_string())
+        );
+        assert_eq!(
+            to_zoom_deeplink("https://zoom.us/j/123456789"),
+            Some("zoommtg://zoom.us/join?action=join&confno=123456789".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_zoom_deeplink_ignores_other_query_params() {
+        assert_eq!(
+            to_zoom_deeplink("https://zoom.us/j/123?uname=Serge&pwd=xyz&omn=1"),
+            Some("zoommtg://zoom.us/join?action=join&confno=123&pwd=xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_zoom_deeplink_non_join_urls() {
+        // Personal room links and non-Zoom URLs stay in the browser
+        assert_eq!(to_zoom_deeplink("https://dext.zoom.us/my/serge"), None);
+        assert_eq!(to_zoom_deeplink("https://meet.google.com/abc-def-ghi"), None);
+        assert_eq!(to_zoom_deeplink("https://notzoom.us/j/123"), None);
+        assert_eq!(to_zoom_deeplink("https://evil.com/zoom.us/j/123"), None);
+        assert_eq!(to_zoom_deeplink("https://zoom.us/j/not-digits"), None);
     }
 
     #[test]

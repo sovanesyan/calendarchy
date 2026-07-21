@@ -28,7 +28,7 @@ use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
 use std::io::stdout;
 use std::time::Duration as StdDuration;
-use utils::open_url;
+use utils::{open_url, to_zoom_deeplink};
 use tokio::sync::mpsc;
 
 /// Messages from async tasks to main loop
@@ -669,10 +669,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             (KeyCode::Char('J'), _) => {
-                                // Join meeting
+                                // Join meeting; Zoom links deep-link into the app instead of the browser
                                 if let Some(event) = app.get_selected_event()
                                     && let Some(ref url) = event.meeting_url {
-                                        open_url(url);
+                                        let url = to_zoom_deeplink(url).unwrap_or_else(|| url.clone());
+                                        open_url(&url);
                                     }
                             }
                             (KeyCode::Char('a') | KeyCode::Char('а'), _) => {
