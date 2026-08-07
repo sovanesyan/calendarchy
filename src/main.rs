@@ -6,6 +6,7 @@ mod conversion;
 mod error;
 mod eventkit;
 mod google;
+mod headless;
 mod icloud;
 mod logging;
 mod setup;
@@ -102,6 +103,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("calendarchy {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+
+    if std::env::args().any(|a| a == "--refresh") {
+        return headless::refresh().await;
     }
 
     #[cfg(target_os = "macos")]
