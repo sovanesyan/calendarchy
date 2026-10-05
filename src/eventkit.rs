@@ -101,8 +101,8 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
     let date = NaiveDate::parse_from_str(&e.date, "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().date_naive());
 
-    // The helper reports one day per event with "HH:MM" times; an end at or
-    // before the start means it runs past midnight
+    // The helper reports one day per event with "HH:MM" times; an end before
+    // the start means it runs past midnight (equal = zero-length)
     let minutes = |t: &str| {
         let (h, m) = t.split_once(':')?;
         Some(h.parse::<u16>().ok()? * 60 + m.parse::<u16>().ok()?)
@@ -110,7 +110,7 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
     let when = match (e.all_day, e.start_time.as_deref().and_then(minutes)) {
         (false, Some(start)) => When::Timed {
             start,
-            end: e.end_time.as_deref().and_then(minutes).map(|end| if end <= start { DAY_MINUTES } else { end }),
+            end: e.end_time.as_deref().and_then(minutes).map(|end| if end < start { DAY_MINUTES } else { end }),
         },
         _ => When::AllDay,
     };
@@ -145,6 +145,7 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
         title: e.title,
         when,
         date,
+        spans_days: false,
         accepted: e.accepted,
         is_organizer: e.is_organizer,
         is_free: e.is_free,
@@ -152,5 +153,29 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
         description: e.description,
         location: e.location,
         attendees,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ek(start: &str, end: &str) -> EKEvent {
+        EKEvent {
+            title: "t".into(), date: "2026-10-05".into(), all_day: false, calendar_name: "c".into(),
+            calendar_type: String::new(), accepted: true, is_organizer: false, is_free: false,
+            start_time: Some(start.into()), end_time: Some(end.into()),
+            location: None, description: None, meeting_url: None, attendees: vec![],
+        }
+    }
+
+    #[test]
+    fn test_zero_length_event_stays_zero_length() {
+        assert_eq!(ek_event_to_display(ek("10:00", "10:00")).when, When::Timed { start: 600, end: Some(600) });
+    }
+
+    #[test]
+    fn test_end_before_start_runs_to_midnight() {
+        assert_eq!(ek_event_to_display(ek("22:00", "01:00")).when, When::Timed { start: 1320, end: Some(DAY_MINUTES) });
     }
 }

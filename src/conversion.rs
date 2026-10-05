@@ -7,9 +7,10 @@ use crate::utils::{name_from_email, sort_attendees};
 
 /// Copy an event once per day it covers within `window`
 fn per_day(event: DisplayEvent, span: Span, window: (NaiveDate, NaiveDate)) -> Vec<DisplayEvent> {
+    let spans_days = span.spans_days();
     occurrences(span, window)
         .into_iter()
-        .map(|(date, when)| DisplayEvent { date, when, ..event.clone() })
+        .map(|(date, when)| DisplayEvent { date, when, spans_days, ..event.clone() })
         .collect()
 }
 
@@ -65,6 +66,7 @@ pub fn google_event_to_display(
         title: event.title().to_string(),
         when: When::AllDay,
         date: window.0,
+        spans_days: false,
         accepted: event.is_accepted(),
         is_organizer: event.is_organizer(),
         is_free: event.is_free(),
@@ -132,6 +134,7 @@ pub fn icloud_event_to_display(
         title: event.title().to_string(),
         when: When::AllDay,
         date: window.0,
+        spans_days: false,
         accepted: event.accepted,
         is_organizer,
         is_free: event.is_free(),

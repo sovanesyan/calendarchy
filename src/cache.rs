@@ -149,6 +149,11 @@ impl When {
     }
 }
 
+/// Minutes since midnight as a clock time; None for 1440 (end of day)
+pub fn clock(minutes: u16) -> Option<chrono::NaiveTime> {
+    chrono::NaiveTime::from_num_seconds_from_midnight_opt(minutes as u32 * 60, 0).filter(|_| minutes < DAY_MINUTES)
+}
+
 fn hm(minutes: u16) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
@@ -161,6 +166,8 @@ pub struct DisplayEvent {
     pub title: String,
     pub when: When,
     pub date: NaiveDate,
+    /// Part of an event covering several days (leave, a conference)
+    pub spans_days: bool,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
     pub is_organizer: bool, // true if the user created/organizes this event
     #[serde(default)] // backwards compat with old cache
@@ -198,6 +205,8 @@ struct DiskEvent {
     time_str: String,
     end_time_str: Option<String>,
     date: NaiveDate,
+    #[serde(default)]
+    spans_days: bool,
     accepted: bool,
     is_organizer: bool,
     #[serde(default)]
@@ -217,6 +226,7 @@ impl From<DisplayEvent> for DiskEvent {
             title: e.title,
             when: e.when,
             date: e.date,
+            spans_days: e.spans_days,
             accepted: e.accepted,
             is_organizer: e.is_organizer,
             is_free: e.is_free,
@@ -235,6 +245,7 @@ impl From<DiskEvent> for DisplayEvent {
             title: e.title,
             when: e.when,
             date: e.date,
+            spans_days: e.spans_days,
             accepted: e.accepted,
             is_organizer: e.is_organizer,
             is_free: e.is_free,
@@ -251,6 +262,28 @@ pub enum Span {
     /// Inclusive first and last day
     AllDay { first: NaiveDate, last: NaiveDate },
     Timed { start: chrono::DateTime<chrono::Local>, end: Option<chrono::DateTime<chrono::Local>> },
+}
+
+impl Span {
+    /// Whether the event covers more than one day (regardless of the window)
+    pub fn spans_days(&self) -> bool {
+        match self {
+            Span::AllDay { first, last } => last > first,
+            Span::Timed { start, end: Some(end) } if end > start => last_day(*end) > start.date_naive(),
+            Span::Timed { .. } => false,
+        }
+    }
+}
+
+/// The last day a timed event occupies: an end within the first minute of
+/// a day (e.g. exactly midnight) belongs to the day before
+fn last_day(end: chrono::DateTime<chrono::Local>) -> NaiveDate {
+    use chrono::Timelike;
+    if end.hour() == 0 && end.minute() == 0 {
+        end.date_naive().pred_opt().unwrap_or(end.date_naive())
+    } else {
+        end.date_naive()
+    }
 }
 
 pub fn occurrences(span: Span, window: (NaiveDate, NaiveDate)) -> Vec<(NaiveDate, When)> {
@@ -277,8 +310,7 @@ pub fn occurrences(span: Span, window: (NaiveDate, NaiveDate)) -> Vec<(NaiveDate
                     .map(|(d, _)| (d, When::Timed { start: start_min, end: Some(start_min) }))
                     .collect();
             }
-            // An end at exactly midnight belongs to the day before
-            let last = if end.time() == chrono::NaiveTime::MIN { end.date_naive().pred_opt().unwrap() } else { end.date_naive() };
+            let last = last_day(end);
             days(first, last.max(first))
                 .map(|d| {
                     let s = if d == first { start_min } else { 0 };
@@ -511,6 +543,7 @@ mod tests {
             title: title.to_string(),
             when: When::parse_label(time),
             date,
+            spans_days: false,
             accepted: true,
             is_organizer: false,
             is_free: false,
@@ -758,5 +791,22 @@ mod tests {
         let v1 = r#"{"google":{},"icloud":{}}"#;
         let parsed: DiskCache = serde_json::from_str(v1).unwrap();
         assert_ne!(parsed.version, CACHE_VERSION);
+    }
+
+    #[test]
+    fn test_end_seconds_after_midnight_stay_on_the_previous_day() {
+        use chrono::TimeZone;
+        let end = chrono::Local.with_ymd_and_hms(2026, 10, 10, 0, 0, 30).unwrap();
+        let span = Span::Timed { start: local(2026, 10, 9, 21, 0), end: Some(end) };
+        assert!(!span.spans_days());
+        assert_eq!(occurrences(span, OCTOBER), [(oct(9), When::Timed { start: 21 * 60, end: Some(DAY_MINUTES) })]);
+    }
+
+    #[test]
+    fn test_spans_days() {
+        assert!(Span::AllDay { first: oct(5), last: oct(6) }.spans_days());
+        assert!(!Span::AllDay { first: oct(5), last: oct(5) }.spans_days());
+        assert!(Span::Timed { start: local(2026, 10, 9, 22, 0), end: Some(local(2026, 10, 10, 2, 0)) }.spans_days());
+        assert!(!Span::Timed { start: local(2026, 10, 9, 9, 0), end: Some(local(2026, 10, 9, 10, 0)) }.spans_days());
     }
 }

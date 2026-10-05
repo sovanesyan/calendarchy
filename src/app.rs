@@ -1,5 +1,5 @@
 use crate::auth::{GoogleAuthState, ICloudAuthState};
-use crate::cache::{DisplayEvent, EventCache};
+use crate::cache::{clock, DisplayEvent, EventCache, EventId};
 #[cfg(test)]
 use crate::cache::When;
 use crate::config::Config;
@@ -511,6 +511,18 @@ impl App {
                         key(&a.event).cmp(&key(&b.event))
                     })
             });
+            // A multi-day event is one result (its next day), not one per day
+            let mut seen_multi_day: Vec<EventId> = Vec::new();
+            results.retain(|r| {
+                if !r.event.spans_days {
+                    return true;
+                }
+                if seen_multi_day.contains(&r.event.id) {
+                    return false;
+                }
+                seen_multi_day.push(r.event.id.clone());
+                true
+            });
         }
 
         if let Some(ref mut search) = self.search {
@@ -579,23 +591,23 @@ pub fn event_match_type(event: &DisplayEvent, query_lower: &str) -> Option<Match
 
 /// Find current or next event in a list, returns (index, is_current)
 fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) -> Option<(usize, bool)> {
-    let now = current_time.num_seconds_from_midnight();
-    let mut best_current: Option<(usize, u16)> = None;
+    let mut best_current: Option<(usize, NaiveTime)> = None;
     let mut first_next: Option<usize> = None;
 
     for (i, event) in events.iter().enumerate() {
-        let Some(start) = event.when.start() else { continue };
-        let start_s = start as u32 * 60;
+        let Some(start) = event.when.start().and_then(clock) else { continue };
 
+        // Compared as clock times (sub-second precision), as before; an end of
+        // midnight means "until the end of the day"
         if let Some(end) = event.when.end()
-            && start_s <= now
-            && now < end as u32 * 60
+            && start <= current_time
+            && clock(end).is_none_or(|end| current_time < end)
             && best_current.is_none_or(|(_, best)| start > best)
         {
             best_current = Some((i, start));
         }
 
-        if first_next.is_none() && start_s > now {
+        if first_next.is_none() && start > current_time {
             first_next = Some(i);
         }
     }
@@ -616,6 +628,7 @@ pub(crate) mod tests {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: title.to_string(),
             when: When::parse_label("10:00"),
+            spans_days: false,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
@@ -790,5 +803,31 @@ pub(crate) mod tests {
         app.next_event();
         assert_eq!(app.selected_date, target);
         assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+    }
+
+    #[test]
+    fn test_search_lists_a_multi_day_event_once() {
+        // Five upcoming days of leave, stored per month they fall in
+        let today = Local::now().date_naive();
+        let mut app = app_on(today);
+        for offset in 1..=5 {
+            let mut e = make_event_with_attendees("Leave", vec![]);
+            e.date = today + Duration::days(offset);
+            e.when = When::AllDay;
+            e.spans_days = true;
+            // store() replaces a whole month, so re-store it with the new day
+            let month: Vec<_> = app.events.google.all_events()
+                .filter(|x| x.date.month() == e.date.month())
+                .cloned()
+                .chain([e.clone()])
+                .collect();
+            app.events.google.store(month, e.date);
+        }
+        app.open_search();
+        app.search.as_mut().unwrap().query = "leave".into();
+        app.update_search_results();
+        let results = &app.search.as_ref().unwrap().results;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].event.date, today + Duration::days(1), "the next day of it");
     }
 }

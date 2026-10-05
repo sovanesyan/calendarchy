@@ -1,6 +1,6 @@
 use crate::app::{EventSource, MatchType, NavigationMode, PendingAction, SearchState, SetupState, SetupStep};
 use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
-use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId, When};
+use crate::cache::{clock, AttendeeStatus, DisplayEvent, EventCache, EventId, When};
 use crate::logging::get_recent_logs;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use ratatui::buffer::Buffer;
@@ -236,20 +236,24 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
         .filter(|e| e.accepted) // Only show accepted events
         .collect();
 
-    // Seconds, so the countdown truncates exactly like a clock difference would
-    let now = current_time.num_seconds_from_midnight() as i64;
-
-    // Find current or next event today
+    // Find current or next event today. Multi-day events (leave, a
+    // conference) are banners like all-day ones: they'd otherwise hold "Now:"
+    // all day and hide the countdown to actual meetings.
     for event in &all_today {
+        if event.spans_days {
+            continue;
+        }
         let Some((start, end)) = event.when.range() else { continue };
-        let (start, end) = (start as i64 * 60, end as i64 * 60);
+        let start_time = clock(start).unwrap_or(NaiveTime::MIN);
+        let not_ended = clock(end).is_none_or(|end_time| current_time < end_time);
 
-        if now < end {
-            // This event hasn't ended yet
+        if not_ended {
+            // Clock-time differences (with sub-second precision) truncate the
+            // countdown exactly as before
             return Some(NextEventInfo {
                 event,
-                is_current: now >= start,
-                minutes_until: (start - now) / 60,
+                is_current: current_time >= start_time,
+                minutes_until: (start_time - current_time).num_minutes(),
             });
         }
     }
@@ -259,13 +263,13 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
         let check_date = today + Duration::days(days_ahead);
         let first_timed = events.google.get(check_date).iter()
             .chain(events.icloud.get(check_date).iter())
-            .find(|e| e.accepted && !e.when.is_all_day());
+            .find(|e| e.accepted && !e.when.is_all_day() && !e.spans_days);
 
         if let Some(event) = first_timed
             && let Some(start) = event.when.start()
         {
             // Remaining today + full days + time into target day
-            let remaining_today = (86_399 - now) / 60;
+            let remaining_today = (NaiveTime::from_hms_opt(23, 59, 59).unwrap() - current_time).num_minutes();
             let full_days_minutes = (days_ahead - 1) * 24 * 60;
             let minutes_until = remaining_today + full_days_minutes + start as i64 + 1;
 
@@ -1132,25 +1136,21 @@ fn render_event_details_column(
 
 /// Check if an event is in the past (has started; all-day events never are)
 fn is_event_past(event: &DisplayEvent, current_time: NaiveTime) -> bool {
-    event
-        .when
-        .start()
-        .is_some_and(|start| (start as u32) * 60 < current_time.num_seconds_from_midnight())
+    event.when.start().and_then(clock).is_some_and(|start| start < current_time)
 }
 
 /// Find indices of current (happening now) and next upcoming event
 /// Returns (current_index, next_index)
 pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
-    let now = current_time.num_seconds_from_midnight();
     let mut current_idx: Option<usize> = None;
     let mut next_idx: Option<usize> = None;
 
     for (i, event) in events.iter().enumerate() {
-        let Some(start) = event.when.start() else { continue }; // Skip all-day events
+        let Some(start) = event.when.start().and_then(clock) else { continue }; // Skip all-day events
 
         // Check if event is currently happening (started but not ended)
-        if (start as u32) * 60 <= now {
-            let has_ended = event.when.end().is_some_and(|end| now >= (end as u32) * 60);
+        if start <= current_time {
+            let has_ended = event.when.end().and_then(clock).is_some_and(|end| current_time >= end);
             if !has_ended {
                 // Event is still ongoing - it's the current candidate
                 current_idx = Some(i);
@@ -1771,6 +1771,7 @@ mod tests {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: "Test".to_string(),
             when: When::parse_label(time),
+            spans_days: false,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
@@ -1935,6 +1936,7 @@ mod tests {
             id: EventId::ICloud { calendar_url: "test".to_string(), event_uid: "test-uid".to_string(), etag: None, calendar_name: None, href: None },
             title: "iCloud Test".to_string(),
             when: When::parse_label(time),
+            spans_days: false,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
@@ -2148,5 +2150,34 @@ mod tests {
         let mut p = Pen::new(&mut buf);
         p.print("abcdefgh"); // clipped at the edge, no panic
         assert_eq!(buf[(5, 0)].symbol(), "f");
+    }
+
+    #[test]
+    fn test_countdown_truncates_like_a_clock_difference() {
+        // At 10:00:00.05 an event at 10:05 is 4m59.95s away: shown as "4m"
+        let mut cache = EventCache::new();
+        let today = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut ev = make_event("10:05");
+        ev.date = today;
+        cache.google.store(vec![ev], today);
+        let now = NaiveTime::from_hms_nano_opt(10, 0, 0, 50_000_000).unwrap();
+        assert_eq!(find_next_event(&cache, today, now).unwrap().minutes_until, 4);
+    }
+
+    #[test]
+    fn test_multi_day_events_do_not_hide_the_next_meeting() {
+        let mut cache = EventCache::new();
+        let today = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut conference = make_event_with_end("00:00", "00:00");
+        conference.title = "Conference".into();
+        conference.spans_days = true;
+        conference.date = today;
+        let mut meeting = make_icloud_event_with_end("14:00", "15:00");
+        meeting.title = "Meeting".into();
+        meeting.date = today;
+        cache.google.store(vec![conference], today);
+        cache.icloud.store(vec![meeting], today);
+        let now = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        assert_eq!(find_next_event(&cache, today, now).unwrap().event.title, "Meeting");
     }
 }
