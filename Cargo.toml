@@ -19,3 +19,10 @@ unicode-width = "0.2"
 termbg = "0.6"
 chrono-tz = "0.10.4"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+[profile.release]
+# Whole-program optimisation for a small, fast binary. panic stays "unwind" on
+# purpose: a panic inside one background fetch fails that task, not the app.
+lto = "fat"
+codegen-units = 1
+strip = true
