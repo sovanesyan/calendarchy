@@ -716,11 +716,13 @@ fn run(
                                 app.exit_event_mode();
                             }
                             (KeyCode::Char('J') | KeyCode::Char('Й'), _) => {
-                                // Join meeting; Zoom links deep-link into the app instead of the browser
+                                // Join meeting, then quit: once you're in the call the app has done its job.
+                                // Zoom links deep-link into the app instead of the browser
                                 if let Some(event) = app.get_selected_event()
                                     && let Some(ref url) = event.meeting_url {
                                         let url = to_zoom_deeplink(url).unwrap_or_else(|| url.clone());
                                         open_url(&url);
+                                        break;
                                     }
                             }
                             (KeyCode::Char('a') | KeyCode::Char('а'), _) => {

@@ -1641,7 +1641,7 @@ fn render_help_modal(p: &mut Pen, term_width: u16, term_height: u16) {
         Item("t / n", "go to today / current event"),
         Item("^d / ^u", "month (days) · jump 10 (events)"),
         Section("Event actions"),
-        Item("J", "join meeting"),
+        Item("J", "join meeting & quit"),
         Item("a / d", "accept / decline (Google)"),
         Item("x", "delete event"),
         Section("Search & misc"),
@@ -2182,7 +2182,7 @@ mod tests {
         let cache = sample_cache();
         let screen = draw(120, 40, &cache, NavigationMode::Day, true);
         assert!(screen.contains("Help"));
-        assert!(screen.contains("join meeting"));
+        assert!(screen.contains("join meeting & quit"));
     }
 
     #[test]
