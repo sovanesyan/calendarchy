@@ -1,4 +1,6 @@
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+#[cfg(test)]
+use chrono::Timelike;
 
 /// Attendee from iCal ATTENDEE line
 #[derive(Debug, Clone)]
@@ -39,6 +41,7 @@ pub enum EventTime {
 }
 
 impl ICalEvent {
+    #[cfg(test)]
     /// Get the start date (works for both all-day and timed events)
     pub fn start_date(&self) -> NaiveDate {
         match &self.dtstart {
@@ -52,6 +55,7 @@ impl ICalEvent {
         self.summary.as_deref().unwrap_or("(No title)")
     }
 
+    #[cfg(test)]
     /// Get start time as HH:MM or "All day"
     pub fn time_str(&self) -> String {
         match &self.dtstart {
@@ -60,6 +64,7 @@ impl ICalEvent {
         }
     }
 
+    #[cfg(test)]
     /// Get end time as HH:MM or None for all-day events
     pub fn end_time_str(&self) -> Option<String> {
         match &self.dtend {
@@ -319,6 +324,7 @@ fn extract_tzid(key: &str) -> Option<&str> {
 }
 
 /// Format a UTC instant as local HH:MM
+#[cfg(test)]
 fn format_local_hm(dt: &DateTime<Utc>) -> String {
     let local = dt.with_timezone(&Local);
     format!("{:02}:{:02}", local.hour(), local.minute())

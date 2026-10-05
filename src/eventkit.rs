@@ -1,6 +1,6 @@
 //! EventKit integration via Swift helper binary (macOS only)
 
-use crate::cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventId};
+use crate::cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventId, When, DAY_MINUTES};
 use crate::utils;
 use chrono::NaiveDate;
 use serde::Deserialize;
@@ -101,10 +101,18 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
     let date = NaiveDate::parse_from_str(&e.date, "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().date_naive());
 
-    let time_str = if e.all_day {
-        "All day".to_string()
-    } else {
-        e.start_time.clone().unwrap_or_else(|| "All day".to_string())
+    // The helper reports one day per event with "HH:MM" times; an end at or
+    // before the start means it runs past midnight
+    let minutes = |t: &str| {
+        let (h, m) = t.split_once(':')?;
+        Some(h.parse::<u16>().ok()? * 60 + m.parse::<u16>().ok()?)
+    };
+    let when = match (e.all_day, e.start_time.as_deref().and_then(minutes)) {
+        (false, Some(start)) => When::Timed {
+            start,
+            end: e.end_time.as_deref().and_then(minutes).map(|end| if end <= start { DAY_MINUTES } else { end }),
+        },
+        _ => When::AllDay,
     };
 
     let meeting_url = e.meeting_url.or_else(|| {
@@ -135,8 +143,7 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
             href: None,
         },
         title: e.title,
-        time_str,
-        end_time_str: if e.all_day { None } else { e.end_time },
+        when,
         date,
         accepted: e.accepted,
         is_organizer: e.is_organizer,

@@ -73,13 +73,93 @@ impl EventId {
     }
 }
 
-/// Unified event representation for display
+/// Minutes in a day; a `When` end of 1440 means "until midnight"
+pub const DAY_MINUTES: u16 = 24 * 60;
+
+/// When an occurrence happens on its date, in local minutes since midnight.
+/// Events spanning several days become one occurrence per day: all-day
+/// events are `AllDay` on each, timed ones are split at midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum When {
+    AllDay,
+    /// `end` is exclusive, in (start, 1440]; None when the source gave no end
+    Timed { start: u16, end: Option<u16> },
+}
+
+impl When {
+    pub fn is_all_day(&self) -> bool {
+        matches!(self, When::AllDay)
+    }
+
+    pub fn start(&self) -> Option<u16> {
+        match self {
+            When::AllDay => None,
+            When::Timed { start, .. } => Some(*start),
+        }
+    }
+
+    pub fn end(&self) -> Option<u16> {
+        match self {
+            When::AllDay => None,
+            When::Timed { end, .. } => *end,
+        }
+    }
+
+    /// Ordering within a day: all-day first, then by start
+    pub fn sort_key(&self) -> (bool, u16) {
+        (!self.is_all_day(), self.start().unwrap_or(0))
+    }
+
+    /// "All day" or the start as "HH:MM"
+    pub fn label(&self) -> String {
+        match self {
+            When::AllDay => "All day".to_string(),
+            When::Timed { start, .. } => hm(*start),
+        }
+    }
+
+    /// The end as "HH:MM" ("24:00" for midnight), if known
+    pub fn end_label(&self) -> Option<String> {
+        self.end().map(hm)
+    }
+
+    /// Minutes this occurrence occupies (no end given = one hour)
+    pub fn range(&self) -> Option<(u16, u16)> {
+        let start = self.start()?;
+        Some((start, self.end().unwrap_or(start + 60).min(DAY_MINUTES)))
+    }
+}
+
+#[cfg(test)]
+impl When {
+    /// Test helper: "All day" or "HH:MM" (start only)
+    pub fn parse_label(label: &str) -> When {
+        if label == "All day" {
+            return When::AllDay;
+        }
+        let (h, m) = label.split_once(':').unwrap();
+        When::Timed { start: h.parse::<u16>().unwrap() * 60 + m.parse::<u16>().unwrap(), end: None }
+    }
+
+    /// Test helper: the same start with an "HH:MM" end
+    pub fn ending(self, label: &str) -> When {
+        let When::Timed { start, .. } = self else { return self };
+        let end = When::parse_label(label).start().unwrap();
+        When::Timed { start, end: Some(if end == 0 { DAY_MINUTES } else { end }) }
+    }
+}
+
+fn hm(minutes: u16) -> String {
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// Unified event representation for display: one occurrence on one day
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(into = "DiskEvent", from = "DiskEvent")]
 pub struct DisplayEvent {
     pub id: EventId,
     pub title: String,
-    pub time_str: String,
-    pub end_time_str: Option<String>,
+    pub when: When,
     pub date: NaiveDate,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
     pub is_organizer: bool, // true if the user created/organizes this event
@@ -91,10 +171,130 @@ pub struct DisplayEvent {
     pub attendees: Vec<DisplayAttendee>,
 }
 
+impl DisplayEvent {
+    /// Time column text: "All day" or "HH:MM"
+    pub fn time_label(&self) -> String {
+        self.when.label()
+    }
+
+    /// Minutes the event blocks on its day; None for all-day, free or
+    /// not-accepted events, which don't make you busy
+    pub fn busy_range(&self) -> Option<(u16, u16)> {
+        if self.is_free || !self.accepted {
+            return None;
+        }
+        self.when.range()
+    }
+}
+
+/// On-disk form of an event. Besides `when` it keeps the `time_str` /
+/// `end_time_str` display strings, which external readers of the cache
+/// (the TRMNL push job) rely on.
+#[derive(Serialize, Deserialize)]
+struct DiskEvent {
+    id: EventId,
+    title: String,
+    when: When,
+    time_str: String,
+    end_time_str: Option<String>,
+    date: NaiveDate,
+    accepted: bool,
+    is_organizer: bool,
+    #[serde(default)]
+    is_free: bool,
+    meeting_url: Option<String>,
+    description: Option<String>,
+    location: Option<String>,
+    attendees: Vec<DisplayAttendee>,
+}
+
+impl From<DisplayEvent> for DiskEvent {
+    fn from(e: DisplayEvent) -> Self {
+        DiskEvent {
+            time_str: e.when.label(),
+            end_time_str: e.when.end_label(),
+            id: e.id,
+            title: e.title,
+            when: e.when,
+            date: e.date,
+            accepted: e.accepted,
+            is_organizer: e.is_organizer,
+            is_free: e.is_free,
+            meeting_url: e.meeting_url,
+            description: e.description,
+            location: e.location,
+            attendees: e.attendees,
+        }
+    }
+}
+
+impl From<DiskEvent> for DisplayEvent {
+    fn from(e: DiskEvent) -> Self {
+        DisplayEvent {
+            id: e.id,
+            title: e.title,
+            when: e.when,
+            date: e.date,
+            accepted: e.accepted,
+            is_organizer: e.is_organizer,
+            is_free: e.is_free,
+            meeting_url: e.meeting_url,
+            description: e.description,
+            location: e.location,
+            attendees: e.attendees,
+        }
+    }
+}
+
+/// Split an event's span into per-day occurrences inside `window` (inclusive).
+pub enum Span {
+    /// Inclusive first and last day
+    AllDay { first: NaiveDate, last: NaiveDate },
+    Timed { start: chrono::DateTime<chrono::Local>, end: Option<chrono::DateTime<chrono::Local>> },
+}
+
+pub fn occurrences(span: Span, window: (NaiveDate, NaiveDate)) -> Vec<(NaiveDate, When)> {
+    use chrono::Timelike;
+    let minutes = |t: chrono::NaiveTime| (t.hour() * 60 + t.minute()) as u16;
+    let days = |first: NaiveDate, last: NaiveDate| {
+        let (from, to) = (first.max(window.0), last.min(window.1));
+        from.iter_days().take_while(move |d| *d <= to)
+    };
+    match span {
+        Span::AllDay { first, last } => days(first, last.max(first)).map(|d| (d, When::AllDay)).collect(),
+        Span::Timed { start, end: None } => {
+            let date = start.date_naive();
+            if date < window.0 || date > window.1 {
+                return vec![];
+            }
+            vec![(date, When::Timed { start: minutes(start.time()), end: None })]
+        }
+        Span::Timed { start, end: Some(end) } => {
+            let (first, start_min) = (start.date_naive(), minutes(start.time()));
+            if end <= start {
+                return occurrences(Span::Timed { start, end: None }, window)
+                    .into_iter()
+                    .map(|(d, _)| (d, When::Timed { start: start_min, end: Some(start_min) }))
+                    .collect();
+            }
+            // An end at exactly midnight belongs to the day before
+            let last = if end.time() == chrono::NaiveTime::MIN { end.date_naive().pred_opt().unwrap() } else { end.date_naive() };
+            days(first, last.max(first))
+                .map(|d| {
+                    let s = if d == first { start_min } else { 0 };
+                    let e = if d == end.date_naive() { minutes(end.time()) } else { DAY_MINUTES };
+                    (d, When::Timed { start: s, end: Some(e.max(s)) })
+                })
+                .collect()
+        }
+    }
+}
+
 /// Bump whenever the on-disk shape or meaning changes; mismatched caches are
 /// discarded (the cache is disposable, it's refetched on startup anyway).
 /// v2: dedupe fix + expanded recurrences — v1 files can hold thousands of duplicates.
-const CACHE_VERSION: u32 = 2;
+/// v3: typed `when` per day; multi-day events stored on every day they cover.
+const CACHE_VERSION: u32 = 3;
 
 /// Serializable cache format for disk persistence
 #[derive(Serialize, Deserialize)]
@@ -144,46 +344,33 @@ impl SourceCache {
         self.fetched_months.clear();
     }
 
-    /// Replace the cached data for a fetched month.
-    ///
-    /// A fetch can return events dated *outside* the month (a multi-day event
-    /// that started earlier), so besides clearing the month we also drop any
-    /// cached copy of an incoming event wherever it lives — otherwise those
-    /// copies pile up on every refresh.
+    /// Replace the cached data for a fetched month. Occurrences dated outside
+    /// it are dropped: they belong to (and are refreshed by) their own month's
+    /// fetch, so nothing can pile up across refreshes.
     pub fn store(&mut self, events: Vec<DisplayEvent>, month_date: NaiveDate) {
         let year = month_date.year();
         let month = month_date.month();
-        // Identity of one occurrence: event id + date + start time (EventKit ids
-        // are synthesized from the title, so two same-titled events need the time)
-        let incoming: HashSet<(&str, &str, NaiveDate, &str)> = events
-            .iter()
-            .map(|e| { let (a, b) = e.id.identity(); (a, b, e.date, e.time_str.as_str()) })
-            .collect();
-        self.by_date.retain(|date, day| {
-            if date.year() == year && date.month() == month {
-                return false;
-            }
-            day.retain(|e| {
-                let (a, b) = e.id.identity();
-                !incoming.contains(&(a, b, *date, e.time_str.as_str()))
-            });
-            !day.is_empty()
-        });
-        drop(incoming);
+        let in_month = |d: &NaiveDate| d.year() == year && d.month() == month;
+        self.by_date.retain(|date, _| !in_month(date));
 
-        let mut seen: HashSet<(String, String, NaiveDate, String)> = HashSet::new();
+        // Identity of one occurrence: event id + date + time (EventKit ids are
+        // synthesized from the title, so two same-titled events need the time)
+        let mut seen: HashSet<(String, String, NaiveDate, When)> = HashSet::new();
         for event in events {
+            if !in_month(&event.date) {
+                continue;
+            }
             let (a, b) = event.id.identity();
-            if !seen.insert((a.to_string(), b.to_string(), event.date, event.time_str.clone())) {
+            if !seen.insert((a.to_string(), b.to_string(), event.date, event.when)) {
                 continue; // the same instance listed twice in one response
             }
             self.by_date.entry(event.date).or_default().push(event);
         }
         // All-day first, then by start time; stable, so same-time order is kept
-        for day in self.by_date.values_mut() {
-            day.sort_by(|a, b| {
-                (a.time_str != "All day", &a.time_str).cmp(&(b.time_str != "All day", &b.time_str))
-            });
+        for (date, day) in self.by_date.iter_mut() {
+            if in_month(date) {
+                day.sort_by_key(|e| e.when.sort_key());
+            }
         }
         self.fetched_months.insert((year, month), Instant::now());
     }
@@ -322,8 +509,7 @@ mod tests {
         DisplayEvent {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: title.to_string(),
-            time_str: time.to_string(),
-            end_time_str: None,
+            when: When::parse_label(time),
             date,
             accepted: true,
             is_organizer: false,
@@ -455,32 +641,102 @@ mod tests {
         let parsed: DisplayEvent = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.title, "Test Meeting");
-        assert_eq!(parsed.time_str, "14:30");
+        assert_eq!(parsed.when, When::parse_label("14:30"));
+        // External readers (TRMNL push) still get the display strings
+        assert!(json.contains("\"time_str\":\"14:30\""), "{json}");
         assert!(parsed.accepted);
     }
 
     #[test]
-    fn test_store_does_not_duplicate_events_dated_outside_the_month() {
+    fn test_store_keeps_only_the_fetched_month() {
         // A multi-day event that started in August comes back on every
-        // September fetch; it must not pile up (the 4,250-copies bug)
+        // September fetch; only its September days belong to that fetch
         let mut cache = SourceCache::new();
-        let aug = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let aug = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
         let sep = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
         for _ in 0..5 {
-            cache.store(vec![make_event("Leave", aug, "All day")], sep);
+            cache.store(vec![make_event("Leave", aug, "All day"), make_event("Leave", sep, "All day")], sep);
         }
-        assert_eq!(cache.get(aug).len(), 1);
+        assert!(cache.get(aug).is_empty());
+        assert_eq!(cache.get(sep).len(), 1);
     }
 
     #[test]
-    fn test_store_keeps_other_events_outside_the_month() {
+    fn test_store_leaves_other_months_alone() {
         let mut cache = SourceCache::new();
         let aug = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
-        let mut other = make_event("Other", aug, "10:00");
-        other.id = EventId::Google { calendar_id: "test".into(), event_id: "other".into(), calendar_name: None };
-        cache.store(vec![other], NaiveDate::from_ymd_opt(2026, 8, 1).unwrap());
-        cache.store(vec![make_event("Leave", aug, "All day")], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
-        assert_eq!(cache.get(aug).len(), 2);
+        cache.store(vec![make_event("August", aug, "10:00")], aug);
+        cache.store(vec![], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
+        assert_eq!(cache.get(aug).len(), 1);
+    }
+
+    fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone;
+        chrono::Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    fn oct(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
+    }
+
+    const OCTOBER: (NaiveDate, NaiveDate) = (
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+        NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
+    );
+
+    #[test]
+    fn test_multi_day_all_day_event_covers_every_day() {
+        let span = Span::AllDay { first: oct(5), last: oct(9) };
+        let days: Vec<_> = occurrences(span, OCTOBER).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(days, [oct(5), oct(6), oct(7), oct(8), oct(9)]);
+    }
+
+    #[test]
+    fn test_occurrences_are_clipped_to_the_window() {
+        let span = Span::AllDay { first: NaiveDate::from_ymd_opt(2026, 9, 28).unwrap(), last: oct(2) };
+        let days: Vec<_> = occurrences(span, OCTOBER).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(days, [oct(1), oct(2)]);
+        // A year-long leave yields at most a month of occurrences
+        let long = Span::AllDay { first: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(), last: NaiveDate::from_ymd_opt(2026, 12, 31).unwrap() };
+        assert_eq!(occurrences(long, OCTOBER).len(), 31);
+    }
+
+    #[test]
+    fn test_timed_event_across_midnight_splits_into_two_days() {
+        let span = Span::Timed { start: local(2026, 10, 9, 22, 0), end: Some(local(2026, 10, 10, 2, 30)) };
+        assert_eq!(
+            occurrences(span, OCTOBER),
+            [(oct(9), When::Timed { start: 22 * 60, end: Some(DAY_MINUTES) }), (oct(10), When::Timed { start: 0, end: Some(150) })]
+        );
+    }
+
+    #[test]
+    fn test_timed_event_ending_at_midnight_stays_on_one_day() {
+        let span = Span::Timed { start: local(2026, 10, 9, 20, 0), end: Some(local(2026, 10, 10, 0, 0)) };
+        assert_eq!(occurrences(span, OCTOBER), [(oct(9), When::Timed { start: 20 * 60, end: Some(DAY_MINUTES) })]);
+    }
+
+    #[test]
+    fn test_multi_day_timed_event_fills_the_middle_days() {
+        let span = Span::Timed { start: local(2026, 10, 5, 9, 0), end: Some(local(2026, 10, 7, 12, 0)) };
+        assert_eq!(
+            occurrences(span, OCTOBER),
+            [
+                (oct(5), When::Timed { start: 540, end: Some(DAY_MINUTES) }),
+                (oct(6), When::Timed { start: 0, end: Some(DAY_MINUTES) }),
+                (oct(7), When::Timed { start: 0, end: Some(720) }),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_when_labels() {
+        assert_eq!(When::AllDay.label(), "All day");
+        let w = When::Timed { start: 22 * 60, end: Some(DAY_MINUTES) };
+        assert_eq!(w.label(), "22:00");
+        assert_eq!(w.end_label().as_deref(), Some("24:00"));
+        assert_eq!(When::Timed { start: 600, end: None }.range(), Some((600, 660)));
+        assert_eq!(When::Timed { start: 23 * 60 + 30, end: None }.range(), Some((1410, DAY_MINUTES)));
     }
 
     #[test]

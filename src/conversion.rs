@@ -1,14 +1,37 @@
-use crate::cache::{AttendeeStatus, DisplayAttendee, DisplayEvent, EventId};
+use chrono::{Duration, Local, NaiveDate};
+
+use crate::cache::{occurrences, AttendeeStatus, DisplayAttendee, DisplayEvent, EventId, Span, When};
 use crate::google;
-use crate::icloud::ICalEvent;
+use crate::icloud::{EventTime, ICalEvent};
 use crate::utils::{name_from_email, sort_attendees};
 
-/// Convert a Google CalendarEvent to a DisplayEvent
+/// Copy an event once per day it covers within `window`
+fn per_day(event: DisplayEvent, span: Span, window: (NaiveDate, NaiveDate)) -> Vec<DisplayEvent> {
+    occurrences(span, window)
+        .into_iter()
+        .map(|(date, when)| DisplayEvent { date, when, ..event.clone() })
+        .collect()
+}
+
+/// Convert a Google CalendarEvent to one DisplayEvent per day it covers in `window`
 pub fn google_event_to_display(
     event: google::types::CalendarEvent,
     calendar_id: String,
     calendar_name: Option<String>,
-) -> Option<DisplayEvent> {
+    window: (NaiveDate, NaiveDate),
+) -> Vec<DisplayEvent> {
+    let span = match (event.start.date, event.start.date_time) {
+        // All-day: end.date is exclusive
+        (Some(first), _) => Span::AllDay {
+            first,
+            last: event.end.date.map_or(first, |end| (end - Duration::days(1)).max(first)),
+        },
+        (None, Some(start)) => Span::Timed {
+            start: start.with_timezone(&Local),
+            end: event.end.date_time.map(|end| end.with_timezone(&Local)),
+        },
+        (None, None) => return vec![],
+    };
     let mut attendees: Vec<DisplayAttendee> = event.attendees.as_ref().map(|atts| {
         atts.iter()
             .filter_map(|a| {
@@ -33,16 +56,15 @@ pub fn google_event_to_display(
     }).unwrap_or_default();
     sort_attendees(&mut attendees);
 
-    Some(DisplayEvent {
+    let base = DisplayEvent {
         id: EventId::Google {
             calendar_id,
             event_id: event.id.clone(),
             calendar_name,
         },
         title: event.title().to_string(),
-        time_str: event.time_str(),
-        end_time_str: event.end_time_str(),
-        date: event.start_date()?,
+        when: When::AllDay,
+        date: window.0,
         accepted: event.is_accepted(),
         is_organizer: event.is_organizer(),
         is_free: event.is_free(),
@@ -50,11 +72,31 @@ pub fn google_event_to_display(
         description: event.description.clone(),
         location: event.location.clone(),
         attendees,
-    })
+    };
+    per_day(base, span, window)
 }
 
-/// Convert an iCloud ICalEvent to a DisplayEvent
-pub fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) -> DisplayEvent {
+/// Convert an iCloud ICalEvent to one DisplayEvent per day it covers in `window`
+pub fn icloud_event_to_display(
+    event: ICalEvent,
+    calendar_name: Option<String>,
+    window: (NaiveDate, NaiveDate),
+) -> Vec<DisplayEvent> {
+    let span = match (&event.dtstart, &event.dtend) {
+        // All-day: DTEND is exclusive
+        (EventTime::Date(first), Some(EventTime::Date(end))) => Span::AllDay {
+            first: *first,
+            last: (*end - Duration::days(1)).max(*first),
+        },
+        (EventTime::Date(first), _) => Span::AllDay { first: *first, last: *first },
+        (EventTime::DateTime(start), end) => Span::Timed {
+            start: start.with_timezone(&Local),
+            end: match end {
+                Some(EventTime::DateTime(end)) => Some(end.with_timezone(&Local)),
+                _ => None,
+            },
+        },
+    };
     let mut attendees: Vec<DisplayAttendee> = event.attendees.iter()
         .map(|a| {
             let status = if a.is_organizer {
@@ -79,7 +121,7 @@ pub fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) 
     // For iCloud, if there are no attendees, the user created the event
     let is_organizer = event.attendees.is_empty();
 
-    DisplayEvent {
+    let base = DisplayEvent {
         id: EventId::ICloud {
             calendar_url: event.calendar_url.clone(),
             event_uid: event.uid.clone(),
@@ -88,9 +130,8 @@ pub fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) 
             href: event.href.clone(),
         },
         title: event.title().to_string(),
-        time_str: event.time_str(),
-        end_time_str: event.end_time_str(),
-        date: event.start_date(),
+        when: When::AllDay,
+        date: window.0,
         accepted: event.accepted,
         is_organizer,
         is_free: event.is_free(),
@@ -98,14 +139,15 @@ pub fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) 
         description: event.description.clone(),
         location: event.location.clone(),
         attendees,
-    }
+    };
+    per_day(base, span, window)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::icloud;
-    use chrono::NaiveDate;
+    use chrono::{Datelike, NaiveDate};
 
     fn make_google_event(id: &str, summary: &str, date: NaiveDate) -> google::types::CalendarEvent {
         google::types::CalendarEvent {
@@ -131,13 +173,68 @@ mod tests {
         }
     }
 
+    fn year(y: i32) -> (NaiveDate, NaiveDate) {
+        (NaiveDate::from_ymd_opt(y, 1, 1).unwrap(), NaiveDate::from_ymd_opt(y, 12, 31).unwrap())
+    }
+
+    #[test]
+    fn test_google_multi_day_event_appears_on_every_day() {
+        // A week of leave: all-day, end date exclusive
+        let mut event = make_google_event("leave", "Leave", NaiveDate::from_ymd_opt(2026, 10, 5).unwrap());
+        event.end.date = Some(NaiveDate::from_ymd_opt(2026, 10, 10).unwrap());
+        let days: Vec<_> = google_event_to_display(event, "cal".into(), None, year(2026)).iter().map(|e| e.date.day()).collect();
+        assert_eq!(days, [5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_google_timed_event_across_midnight() {
+        use chrono::TimeZone;
+        let mut event = make_google_event("late", "Late shift", NaiveDate::from_ymd_opt(2026, 10, 9).unwrap());
+        let at = |d, h| chrono::Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap().with_timezone(&chrono::Utc);
+        event.start = google::types::EventDateTime { date: None, date_time: Some(at(9, 22)), time_zone: None };
+        event.end = google::types::EventDateTime { date: None, date_time: Some(at(10, 2)), time_zone: None };
+        let occ = google_event_to_display(event, "cal".into(), None, year(2026));
+        assert_eq!(occ.len(), 2);
+        assert_eq!((occ[0].date.day(), occ[0].time_label(), occ[0].when.end_label()), (9, "22:00".into(), Some("24:00".into())));
+        assert_eq!((occ[1].date.day(), occ[1].time_label(), occ[1].when.end_label()), (10, "00:00".into(), Some("02:00".into())));
+    }
+
+    #[test]
+    fn test_icloud_multi_day_all_day_event() {
+        let mut event = sample_ical();
+        event.dtstart = icloud::EventTime::Date(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
+        event.dtend = Some(icloud::EventTime::Date(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+        let october = (NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 10, 31).unwrap());
+        let days: Vec<_> = icloud_event_to_display(event, None, october).iter().map(|e| e.date.day()).collect();
+        assert_eq!(days, [30, 31], "clipped to the fetched month");
+    }
+
+    fn sample_ical() -> ICalEvent {
+        ICalEvent {
+            uid: "uid".to_string(),
+            summary: Some("Trip".to_string()),
+            dtstart: icloud::EventTime::Date(NaiveDate::from_ymd_opt(2026, 1, 20).unwrap()),
+            dtend: None,
+            location: None,
+            description: None,
+            url: None,
+            attendees: vec![],
+            accepted: true,
+            transp: None,
+            calendar_url: String::new(),
+            etag: None,
+            href: None,
+        }
+    }
+
     #[test]
     fn test_google_event_to_display_basic() {
         let event = make_google_event("event-123", "Team Meeting", NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
-        let result = google_event_to_display(event, "cal-id".to_string(), Some("Work".to_string()));
+        let result = google_event_to_display(event, "cal-id".to_string(), Some("Work".to_string()), year(2026));
 
-        assert!(result.is_some());
-        let display = result.unwrap();
+        assert_eq!(result.len(), 1, "a one-day all-day event is one occurrence");
+        let display = result.into_iter().next().unwrap();
+        assert_eq!(display.when, When::AllDay);
         assert_eq!(display.title, "Team Meeting");
         assert_eq!(display.date, NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
         assert!(matches!(display.id, EventId::Google { .. }));
@@ -163,9 +260,8 @@ mod tests {
             },
         ]);
 
-        let result = google_event_to_display(event, "cal-id".to_string(), None);
-        assert!(result.is_some());
-        let display = result.unwrap();
+        let result = google_event_to_display(event, "cal-id".to_string(), None, year(2026));
+        let display = result.into_iter().next().unwrap();
 
         assert_eq!(display.attendees.len(), 2);
         // Organizer should be sorted first
@@ -191,7 +287,9 @@ mod tests {
             href: None,
         };
 
-        let display = icloud_event_to_display(event, Some("Personal".to_string()));
+        let result = icloud_event_to_display(event, Some("Personal".to_string()), year(2026));
+        assert_eq!(result.len(), 1, "DTEND is exclusive");
+        let display = result.into_iter().next().unwrap();
 
         assert_eq!(display.title, "Personal Event");
         assert_eq!(display.date, NaiveDate::from_ymd_opt(2026, 1, 20).unwrap());
@@ -224,7 +322,7 @@ mod tests {
             href: None,
         };
 
-        let display = icloud_event_to_display(event, None);
+        let display = icloud_event_to_display(event, None, year(2026)).into_iter().next().unwrap();
 
         assert!(!display.is_organizer); // Has attendees, not organizer
         assert_eq!(display.attendees.len(), 1);

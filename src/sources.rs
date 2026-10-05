@@ -122,7 +122,7 @@ pub async fn fetch_google_month(
 
     let events = events
         .into_iter()
-        .filter_map(|e| google_event_to_display(e, calendar_id.to_string(), calendar_name.clone()))
+        .flat_map(|e| google_event_to_display(e, calendar_id.to_string(), calendar_name.clone(), (start, end)))
         .collect();
     Ok(GoogleMonth { events, calendar_name })
 }
@@ -155,7 +155,7 @@ pub async fn fetch_caldav_month(
 
     Ok(per_calendar
         .into_iter()
-        .flat_map(|(_, name, events)| events.into_iter().map(move |e| icloud_event_to_display(e, name.clone())))
+        .flat_map(|(_, name, events)| events.into_iter().flat_map(move |e| icloud_event_to_display(e, name.clone(), (start, end))))
         .collect())
 }
 

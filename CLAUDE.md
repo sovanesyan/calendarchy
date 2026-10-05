@@ -18,14 +18,18 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 
 ### Core Flow
 
-1. **Startup**: `main.rs` loads config, restores cached events from disk for instant display, then authenticates
-2. **Auth**: Google uses OAuth device flow; iCloud uses app-specific password with CalDAV discovery
-3. **Fetching**: Events are fetched per-month via async tasks, converted to `DisplayEvent`, cached to disk
+1. **Startup**: `main.rs` loads config, restores cached events from disk for instant display, starts fetches, draws the first frame
+2. **Auth**: Google uses OAuth with a loopback redirect (tokens auto-refresh, incl. on 401); iCloud uses app-specific password with CalDAV discovery (or EventKit on macOS)
+3. **Fetching**: `App::wanted_fetches` decides from state what to fetch — visible month first, then neighbours; visible month refreshes every 5 min. Results are split into per-day `DisplayEvent` occurrences and cached to disk
 4. **Rendering**: `ui.rs` renders a month calendar grid and two event panels into a ratatui buffer; ratatui diffs frames and writes only changed cells
 
 ### Module Structure
 
-- **`main.rs`** - App state machine, async message handling, keyboard input loop
+- **`main.rs`** - Runtime: event-driven loop (input thread, results channel, timer), executes `Effect`s, cache writer thread
+- **`app.rs`** - `App` state and navigation
+- **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
+- **`keymap.rs`** - Keys → `Action` per mode (Bulgarian phonetic keys normalised)
+- **`sources.rs`** - Fetch layer shared by TUI and `--refresh`: shared HTTP client, `GoogleSession` token refresh, concurrent CalDAV
 - **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence)
 - **`config.rs`** - Config loading from `~/.config/calendarchy/config.json`, token storage
@@ -34,9 +38,9 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 
 ### Key Types
 
-- `DisplayEvent` - Normalized event with title, time_str, date, accepted, meeting_url
-- `GoogleAuthState` / `ICloudAuthState` - Auth state machines (enums in main.rs)
-- `AsyncMessage` - Channel messages from background tasks to main loop
+- `DisplayEvent` - One occurrence of an event on one `date`, with a typed `When` (`AllDay` or start/end minutes). Multi-day events have one per day
+- `GoogleAuthState` / `ICloudAuthState` - Auth state machines (`auth.rs`)
+- `Msg` / `Effect` - Results from background tasks / I/O requested by the update logic (`update.rs`)
 
 ### Data Flow
 
@@ -51,6 +55,7 @@ UI ← EventCache.get(date) ←────────────────�
 - Events cached to `~/.cache/calendarchy/events.json`
 - Auth tokens stored in `~/.config/calendarchy/tokens.json`
 - Cache loads on startup for instant display; `fetched_months` not restored to force refresh
+- Format is versioned (`CACHE_VERSION`); mismatches are discarded. Each event still carries `time_str`/`end_time_str` on disk because the TRMNL push (`~/Work/my/trmnl/calendar-push.mjs`) reads them
 
 ## Release Process
 

@@ -1,6 +1,6 @@
 use crate::app::{EventSource, MatchType, NavigationMode, PendingAction, SearchState, SetupState, SetupStep};
 use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
-use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
+use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId, When};
 use crate::logging::get_recent_logs;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use ratatui::buffer::Buffer;
@@ -236,30 +236,20 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
         .filter(|e| e.accepted) // Only show accepted events
         .collect();
 
+    // Seconds, so the countdown truncates exactly like a clock difference would
+    let now = current_time.num_seconds_from_midnight() as i64;
+
     // Find current or next event today
     for event in &all_today {
-        if event.time_str == "All day" {
-            continue;
-        }
+        let Some((start, end)) = event.when.range() else { continue };
+        let (start, end) = (start as i64 * 60, end as i64 * 60);
 
-        let Some(start_time) = parse_event_time(&event.time_str) else {
-            continue;
-        };
-
-        // Calculate end time
-        let end_time = event.end_time_str.as_ref()
-            .and_then(|s| parse_event_time(s))
-            .unwrap_or_else(|| start_time + chrono::Duration::hours(1));
-
-        if current_time < end_time {
+        if now < end {
             // This event hasn't ended yet
-            let minutes_until = (start_time - current_time).num_minutes();
-            let is_current = current_time >= start_time;
-
             return Some(NextEventInfo {
                 event,
-                is_current,
-                minutes_until,
+                is_current: now >= start,
+                minutes_until: (start - now) / 60,
             });
         }
     }
@@ -267,20 +257,17 @@ fn find_next_event<'a>(events: &'a EventCache, today: NaiveDate, current_time: N
     // Check future days (up to 7 days ahead)
     for days_ahead in 1..=7 {
         let check_date = today + Duration::days(days_ahead);
-        let future_events: Vec<&DisplayEvent> = events.google.get(check_date).iter()
+        let first_timed = events.google.get(check_date).iter()
             .chain(events.icloud.get(check_date).iter())
-            .filter(|e| e.accepted && e.time_str != "All day")
-            .collect();
+            .find(|e| e.accepted && !e.when.is_all_day());
 
-        if let Some(event) = future_events.first()
-            && let Some(start_time) = parse_event_time(&event.time_str)
+        if let Some(event) = first_timed
+            && let Some(start) = event.when.start()
         {
-            // Calculate minutes from now until the event
             // Remaining today + full days + time into target day
-            let remaining_today = (NaiveTime::from_hms_opt(23, 59, 59).unwrap() - current_time).num_minutes();
+            let remaining_today = (86_399 - now) / 60;
             let full_days_minutes = (days_ahead - 1) * 24 * 60;
-            let target_day_minutes = (start_time - NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_minutes();
-            let minutes_until = remaining_today + full_days_minutes + target_day_minutes + 1;
+            let minutes_until = remaining_today + full_days_minutes + start as i64 + 1;
 
             return Some(NextEventInfo {
                 event,
@@ -637,31 +624,10 @@ fn render_calendar(
     render_week_availability(p, events, selected_date, now, term_height);
 }
 
-/// Parse an event's time range into (start_minutes, end_minutes) from midnight.
-/// Returns None for all-day, free, or unaccepted events (not time-blocking).
+/// An event's busy range in minutes from midnight; None for all-day, free
+/// or unaccepted events (not time-blocking)
 fn parse_event_range(event: &DisplayEvent) -> Option<(u32, u32)> {
-    if event.time_str == "All day" || event.is_free || !event.accepted {
-        return None;
-    }
-
-    let start_time = parse_event_time(&event.time_str)?;
-    let event_start = start_time.hour() * 60 + start_time.minute();
-
-    let event_end = if let Some(ref end_str) = event.end_time_str {
-        if end_str == "All day" {
-            return None;
-        }
-        parse_event_time(end_str)
-            .map(|t| {
-                let mins = t.hour() * 60 + t.minute();
-                if mins == 0 { 24 * 60 } else { mins }
-            })
-            .unwrap_or(event_start + 60)
-    } else {
-        event_start + 60
-    };
-
-    Some((event_start, event_end))
+    event.busy_range().map(|(start, end)| (start as u32, end as u32))
 }
 
 /// Detect overlapping events across two source panels.
@@ -996,7 +962,7 @@ fn render_event_panel(
         if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
             p.bold();
         }
-        p.print(&format!("{:>7}  ", event.time_str));
+        p.print(&format!("{:>7}  ", event.time_label()));
         p.reset();
 
         // Title stays uncolored unless the row is selected or receding —
@@ -1066,9 +1032,9 @@ fn render_event_details_column(
 
     // Time, with the calendar source as a dim suffix
     p.move_to(content_x, current_row);
-    let time_text = match event.end_time_str {
-        Some(ref end) => format!("{} \u{2013} {}", event.time_str, end),
-        None => event.time_str.clone(),
+    let time_text = match event.when.end_label() {
+        Some(end) => format!("{} \u{2013} {}", event.time_label(), end),
+        None => event.time_label(),
     };
     p.fg(colors::TIME);
     p.print(&truncate_str(&time_text, content_width).to_string());
@@ -1164,61 +1130,35 @@ fn render_event_details_column(
     }
 }
 
-/// Parse time string like "14:30" into NaiveTime
-fn parse_event_time(time_str: &str) -> Option<NaiveTime> {
-    if time_str == "All day" {
-        return NaiveTime::from_hms_opt(0, 0, 0);
-    }
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() == 2 {
-        let hour: u32 = parts[0].parse().ok()?;
-        let minute: u32 = parts[1].parse().ok()?;
-        NaiveTime::from_hms_opt(hour, minute, 0)
-    } else {
-        None
-    }
-}
-
-/// Check if an event is in the past
+/// Check if an event is in the past (has started; all-day events never are)
 fn is_event_past(event: &DisplayEvent, current_time: NaiveTime) -> bool {
-    if let Some(event_time) = parse_event_time(&event.time_str) {
-        if event.time_str == "All day" {
-            return false; // All-day events are never "past" during the day
-        }
-        event_time < current_time
-    } else {
-        false
-    }
+    event
+        .when
+        .start()
+        .is_some_and(|start| (start as u32) * 60 < current_time.num_seconds_from_midnight())
 }
 
 /// Find indices of current (happening now) and next upcoming event
 /// Returns (current_index, next_index)
 pub fn find_current_and_next_events(events: &[DisplayEvent], current_time: NaiveTime) -> (Option<usize>, Option<usize>) {
+    let now = current_time.num_seconds_from_midnight();
     let mut current_idx: Option<usize> = None;
     let mut next_idx: Option<usize> = None;
 
     for (i, event) in events.iter().enumerate() {
-        if let Some(event_time) = parse_event_time(&event.time_str) {
-            if event.time_str == "All day" {
-                continue; // Skip all-day events
-            }
+        let Some(start) = event.when.start() else { continue }; // Skip all-day events
 
-            // Check if event is currently happening (started but not ended)
-            if event_time <= current_time {
-                // Check if event has ended
-                let has_ended = event.end_time_str.as_ref().map_or(false, |end_str| {
-                    parse_event_time(end_str).map_or(false, |end_time| current_time >= end_time)
-                });
-
-                if !has_ended {
-                    // Event is still ongoing - it's the current candidate
-                    current_idx = Some(i);
-                }
-            } else if next_idx.is_none() {
-                // First event that hasn't started yet
-                next_idx = Some(i);
-                break; // No need to continue
+        // Check if event is currently happening (started but not ended)
+        if (start as u32) * 60 <= now {
+            let has_ended = event.when.end().is_some_and(|end| now >= (end as u32) * 60);
+            if !has_ended {
+                // Event is still ongoing - it's the current candidate
+                current_idx = Some(i);
             }
+        } else {
+            // First event that hasn't started yet
+            next_idx = Some(i);
+            break;
         }
     }
 
@@ -1251,9 +1191,10 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 }
 
 /// Format a smart "when" string combining date and time based on proximity
-fn format_smart_when(date: NaiveDate, time_str: &str, today: NaiveDate) -> String {
+fn format_smart_when(date: NaiveDate, when: &When, today: NaiveDate) -> String {
     let days = (date - today).num_days();
-    let is_all_day = time_str == "All day";
+    let is_all_day = when.is_all_day();
+    let time_str = when.label();
 
     if days == 0 {
         if is_all_day { "today".to_string() } else { format!("today {}", time_str) }
@@ -1590,7 +1531,7 @@ fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, 
                 }
 
                 // Smart when column
-                let when = format_smart_when(result.event.date, &result.event.time_str, today);
+                let when = format_smart_when(result.event.date, &result.event.when, today);
                 p.fg(if is_selected { colors::SELECTED } else { Color::DarkGray });
                 p.print(&format!("{:>11} ", when));
 
@@ -1824,14 +1765,12 @@ fn days_in_month(date: NaiveDate) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Timelike;
 
     fn make_event(time: &str) -> DisplayEvent {
         DisplayEvent {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: "Test".to_string(),
-            time_str: time.to_string(),
-            end_time_str: None,
+            when: When::parse_label(time),
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
@@ -1844,23 +1783,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_time_valid() {
-        let time = parse_event_time("14:30").unwrap();
-        assert_eq!(time.hour(), 14);
-        assert_eq!(time.minute(), 30);
-    }
-
-    #[test]
-    fn test_parse_event_time_all_day() {
-        let time = parse_event_time("All day").unwrap();
-        assert_eq!(time.hour(), 0);
-        assert_eq!(time.minute(), 0);
-    }
-
-    #[test]
-    fn test_parse_event_time_invalid() {
-        assert!(parse_event_time("invalid").is_none());
-        assert!(parse_event_time("25:00").is_none());
+    fn test_event_ending_at_midnight_is_current_in_the_evening() {
+        // Previously an end of "00:00" made an evening event look already over
+        let events = vec![make_event_with_end("21:00", "00:00")];
+        let current = NaiveTime::from_hms_opt(22, 30, 0).unwrap();
+        assert_eq!(find_current_and_next_events(&events, current), (Some(0), None));
     }
 
     #[test]
@@ -1999,7 +1926,7 @@ mod tests {
 
     fn make_event_with_end(time: &str, end: &str) -> DisplayEvent {
         let mut e = make_event(time);
-        e.end_time_str = Some(end.to_string());
+        e.when = e.when.ending(end);
         e
     }
 
@@ -2007,8 +1934,7 @@ mod tests {
         DisplayEvent {
             id: EventId::ICloud { calendar_url: "test".to_string(), event_uid: "test-uid".to_string(), etag: None, calendar_name: None, href: None },
             title: "iCloud Test".to_string(),
-            time_str: time.to_string(),
-            end_time_str: None,
+            when: When::parse_label(time),
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,
@@ -2022,7 +1948,7 @@ mod tests {
 
     fn make_icloud_event_with_end(time: &str, end: &str) -> DisplayEvent {
         let mut e = make_icloud_event(time);
-        e.end_time_str = Some(end.to_string());
+        e.when = e.when.ending(end);
         e
     }
 

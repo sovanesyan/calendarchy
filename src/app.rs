@@ -1,5 +1,7 @@
 use crate::auth::{GoogleAuthState, ICloudAuthState};
 use crate::cache::{DisplayEvent, EventCache};
+#[cfg(test)]
+use crate::cache::When;
 use crate::config::Config;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use std::collections::HashMap;
@@ -323,8 +325,8 @@ impl App {
 
             match (google_next, icloud_next) {
                 (Some((g_idx, _)), Some((i_idx, _))) => {
-                    let g_time = &google_events[g_idx].time_str;
-                    let i_time = &icloud_events[i_idx].time_str;
+                    let g_time = google_events[g_idx].when.sort_key();
+                    let i_time = icloud_events[i_idx].when.sort_key();
                     if g_time <= i_time {
                         self.selected_source = EventSource::Google;
                         self.selected_event_index = g_idx;
@@ -503,7 +505,11 @@ impl App {
                 let b_title = b.event.title.to_lowercase().contains(&query_lower);
                 b_title.cmp(&a_title)
                     .then_with(|| a.event.date.cmp(&b.event.date))
-                    .then_with(|| a.event.time_str.cmp(&b.event.time_str))
+                    // Timed before all-day within a date, then by start
+                    .then_with(|| {
+                        let key = |e: &DisplayEvent| (e.when.is_all_day(), e.when.start().unwrap_or(0));
+                        key(&a.event).cmp(&key(&b.event))
+                    })
             });
         }
 
@@ -573,58 +579,30 @@ pub fn event_match_type(event: &DisplayEvent, query_lower: &str) -> Option<Match
 
 /// Find current or next event in a list, returns (index, is_current)
 fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) -> Option<(usize, bool)> {
-    let mut best_current: Option<(usize, NaiveTime)> = None;
+    let now = current_time.num_seconds_from_midnight();
+    let mut best_current: Option<(usize, u16)> = None;
     let mut first_next: Option<usize> = None;
 
     for (i, event) in events.iter().enumerate() {
-        if event.time_str == "All day" {
-            continue;
+        let Some(start) = event.when.start() else { continue };
+        let start_s = start as u32 * 60;
+
+        if let Some(end) = event.when.end()
+            && start_s <= now
+            && now < end as u32 * 60
+            && best_current.is_none_or(|(_, best)| start > best)
+        {
+            best_current = Some((i, start));
         }
 
-        let parts: Vec<&str> = event.time_str.split(':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let hour: u32 = match parts[0].parse() {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
-        let minute: u32 = match parts[1].parse() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let event_time = match NaiveTime::from_hms_opt(hour, minute, 0) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        if let Some(ref end_str) = event.end_time_str {
-            let end_parts: Vec<&str> = end_str.split(':').collect();
-            if end_parts.len() == 2
-                && let (Ok(eh), Ok(em)) = (end_parts[0].parse::<u32>(), end_parts[1].parse::<u32>())
-                && let Some(end_time) = NaiveTime::from_hms_opt(eh, em, 0)
-                && event_time <= current_time
-                && current_time < end_time
-            {
-                match best_current {
-                    None => best_current = Some((i, event_time)),
-                    Some((_, best_time)) if event_time > best_time => {
-                        best_current = Some((i, event_time));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if first_next.is_none() && event_time > current_time {
+        if first_next.is_none() && start_s > now {
             first_next = Some(i);
         }
     }
 
-    if let Some((idx, _)) = best_current {
-        Some((idx, true))
-    } else {
-        first_next.map(|idx| (idx, false))
+    match best_current {
+        Some((idx, _)) => Some((idx, true)),
+        None => first_next.map(|idx| (idx, false)),
     }
 }
 
@@ -637,8 +615,7 @@ pub(crate) mod tests {
         DisplayEvent {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: title.to_string(),
-            time_str: "10:00".to_string(),
-            end_time_str: None,
+            when: When::parse_label("10:00"),
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
             is_organizer: false,

@@ -1,4 +1,6 @@
-use chrono::{DateTime, Local, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+#[cfg(test)]
+use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
 
 /// OAuth2 tokens from Google
@@ -81,6 +83,7 @@ pub struct EventDateTime {
 }
 
 impl CalendarEvent {
+    #[cfg(test)]
     /// Get the start date (works for both all-day and timed events, in local timezone)
     pub fn start_date(&self) -> Option<NaiveDate> {
         self.start.date.or_else(|| {
@@ -96,6 +99,7 @@ impl CalendarEvent {
         self.summary.as_deref().unwrap_or("(No title)")
     }
 
+    #[cfg(test)]
     /// Get start time as HH:MM or "All day" (converted to local timezone)
     pub fn time_str(&self) -> String {
         self.start
@@ -107,6 +111,7 @@ impl CalendarEvent {
             .unwrap_or_else(|| "All day".to_string())
     }
 
+    #[cfg(test)]
     /// Get end time as HH:MM or None for all-day events (converted to local timezone)
     pub fn end_time_str(&self) -> Option<String> {
         self.end.date_time.map(|dt| {
@@ -193,7 +198,6 @@ impl CalendarEvent {
 
 use crate::utils::extract_meeting_url;
 
-use chrono::Timelike;
 
 /// Response from events.list API
 #[derive(Debug, Deserialize)]
