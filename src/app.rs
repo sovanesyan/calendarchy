@@ -2,6 +2,13 @@ use crate::auth::{GoogleAuthState, ICloudAuthState};
 use crate::cache::{DisplayEvent, EventCache};
 use crate::config::Config;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+/// (year, month) of a date — the unit of fetching and caching
+pub fn month_key(date: NaiveDate) -> (i32, u32) {
+    (date.year(), date.month())
+}
 
 /// Search state for the interactive search modal
 pub struct SearchState {
@@ -84,7 +91,7 @@ pub enum NavigationMode {
 }
 
 /// Which event source/panel is currently selected
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventSource {
     Google,
     ICloud,
@@ -112,10 +119,14 @@ pub struct App {
     /// Error messages stick until the next keypress instead of expiring
     pub status_is_error: bool,
     pub config: Config,
-    pub google_needs_fetch: bool,
-    pub icloud_needs_fetch: bool,
-    pub google_loading: bool,
-    pub icloud_loading: bool,
+    /// Month fetches currently running, per source
+    pub in_flight: HashSet<(EventSource, (i32, u32))>,
+    /// When each (source, month) fetch was last started — throttles retries
+    pub attempts: HashMap<(EventSource, (i32, u32)), Instant>,
+    /// Google calendar display name, looked up once per session
+    pub google_calendar_name: Option<String>,
+    /// Set when the user asked to quit
+    pub quit: bool,
     pub navigation_mode: NavigationMode,
     pub selected_source: EventSource,
     pub selected_event_index: usize,
@@ -146,10 +157,10 @@ impl App {
             status_message_time: None,
             status_is_error: false,
             config: Config::default(),
-            google_needs_fetch: false,
-            icloud_needs_fetch: false,
-            google_loading: false,
-            icloud_loading: false,
+            in_flight: HashSet::new(),
+            attempts: HashMap::new(),
+            google_calendar_name: None,
+            quit: false,
             navigation_mode: NavigationMode::Day,
             selected_source: EventSource::Google,
             selected_event_index: 0,
@@ -163,6 +174,17 @@ impl App {
 
         app.enter_event_mode();
         app
+    }
+
+    /// Whether the visible month is being fetched for a source and has no
+    /// fresh data yet — background refreshes of a loaded month stay silent
+    pub fn is_loading(&self, source: EventSource) -> bool {
+        let cache = match source {
+            EventSource::Google => &self.events.google,
+            EventSource::ICloud => &self.events.icloud,
+        };
+        self.in_flight.contains(&(source, month_key(self.current_date)))
+            && cache.fetched_at(self.current_date).is_none()
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -225,45 +247,23 @@ impl App {
         self.show_month_of(self.selected_date);
     }
 
-    /// Display the month containing `date`, scheduling a fetch if it changed.
-    /// Every path that changes the visible month must go through here.
+    /// Display the month containing `date`. Fetching follows from state (see
+    /// `App::wanted_fetches`), so changing the month is all that's needed.
     fn show_month_of(&mut self, date: NaiveDate) {
         if date.month() != self.current_date.month() || date.year() != self.current_date.year() {
             self.current_date = date.with_day(1).unwrap();
-            self.google_needs_fetch = true;
-            self.icloud_needs_fetch = true;
         }
     }
 
     pub fn goto_today(&mut self) {
         let today = Local::now().date_naive();
-        let month_changed = today.month() != self.current_date.month()
-            || today.year() != self.current_date.year();
         self.current_date = today;
         self.selected_date = today;
-        if month_changed {
-            self.google_needs_fetch = true;
-            self.icloud_needs_fetch = true;
-        }
     }
 
     pub fn goto_now(&mut self) {
         self.goto_today();
         self.enter_event_mode();
-    }
-
-    pub fn month_range(&self) -> (NaiveDate, NaiveDate) {
-        let first = self.current_date.with_day(1).unwrap();
-        let last = if self.current_date.month() == 12 {
-            NaiveDate::from_ymd_opt(self.current_date.year() + 1, 1, 1)
-                .unwrap()
-                - Duration::days(1)
-        } else {
-            NaiveDate::from_ymd_opt(self.current_date.year(), self.current_date.month() + 1, 1)
-                .unwrap()
-                - Duration::days(1)
-        };
-        (first, last)
     }
 
     pub fn get_current_source_events(&self) -> &[DisplayEvent] {
@@ -518,14 +518,8 @@ impl App {
         };
 
         // Navigate to the date
-        let month_changed = date.month() != self.current_date.month()
-            || date.year() != self.current_date.year();
         self.selected_date = date;
-        if month_changed {
-            self.current_date = date.with_day(1).unwrap();
-            self.google_needs_fetch = true;
-            self.icloud_needs_fetch = true;
-        }
+        self.show_month_of(date);
 
         // Enter event mode on the correct source/index
         self.navigation_mode = NavigationMode::Event;
@@ -626,11 +620,11 @@ fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cache::{DisplayAttendee, AttendeeStatus, EventId};
 
-    fn make_event_with_attendees(title: &str, attendees: Vec<DisplayAttendee>) -> DisplayEvent {
+    pub(crate) fn make_event_with_attendees(title: &str, attendees: Vec<DisplayAttendee>) -> DisplayEvent {
         DisplayEvent {
             id: EventId::Google { calendar_id: "test".to_string(), event_id: "test-id".to_string(), calendar_name: None },
             title: title.to_string(),
@@ -757,7 +751,7 @@ mod tests {
         assert!(!event_matches_query(&event, "xyz"));
     }
 
-    fn app_on(date: NaiveDate) -> App {
+    pub(crate) fn app_on(date: NaiveDate) -> App {
         let mut app = App {
             current_date: date,
             selected_date: date,
@@ -769,10 +763,10 @@ mod tests {
             status_message_time: None,
             status_is_error: false,
             config: Config::default(),
-            google_needs_fetch: false,
-            icloud_needs_fetch: false,
-            google_loading: false,
-            icloud_loading: false,
+            in_flight: HashSet::new(),
+            attempts: HashMap::new(),
+            google_calendar_name: None,
+            quit: false,
             navigation_mode: NavigationMode::Day,
             selected_source: EventSource::Google,
             selected_event_index: 0,
@@ -783,25 +777,22 @@ mod tests {
             last_render_minute: 0,
             setup: None,
         };
-        app.google_needs_fetch = false;
         app
     }
 
     #[test]
-    fn test_month_jumps_schedule_a_fetch() {
+    fn test_month_jumps_move_to_the_first_of_the_month() {
         let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
         app.next_month();
         assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
-        assert!(app.google_needs_fetch && app.icloud_needs_fetch);
 
         let mut app = app_on(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
         app.prev_month();
         assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
-        assert!(app.google_needs_fetch && app.icloud_needs_fetch);
     }
 
     #[test]
-    fn test_event_jump_into_next_month_schedules_a_fetch() {
+    fn test_event_jump_into_next_month_switches_month() {
         let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
         let target = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
         let mut ev = make_event_with_attendees("Later", vec![]);
@@ -811,6 +802,5 @@ mod tests {
         app.next_event();
         assert_eq!(app.selected_date, target);
         assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
-        assert!(app.google_needs_fetch);
     }
 }

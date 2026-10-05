@@ -16,11 +16,14 @@ pub struct CalDavClient {
 }
 
 impl CalDavClient {
+    #[allow(dead_code)]
     pub fn new(auth: ICloudAuth) -> Self {
-        Self {
-            client: Client::new(),
-            auth,
-        }
+        Self::with_client(Client::new(), auth)
+    }
+
+    /// Use a shared client so connections (and TLS sessions) are reused
+    pub fn with_client(client: Client, auth: ICloudAuth) -> Self {
+        Self { client, auth }
     }
 
     /// Discover the user's principal URL and calendar home

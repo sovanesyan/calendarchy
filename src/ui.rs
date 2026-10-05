@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame;
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use unicode_width::UnicodeWidthStr;
 
 /// Cursor-style drawing onto a ratatui buffer: move, set style, print.
@@ -98,15 +98,27 @@ impl<'a> Pen<'a> {
 
 /// Terminal background color, queried once at startup via OSC 11.
 /// Used to derive theme-adaptive shades (free slots, past fading).
-static TERM_BG: OnceLock<(u8, u8, u8)> = OnceLock::new();
+/// Packed 0x00RRGGBB; u32::MAX = not known yet. Updatable, because the first
+/// frame is drawn with last run's color before the terminal is asked again.
+static TERM_BG: AtomicU32 = AtomicU32::new(u32::MAX);
 
 pub fn set_term_bg(r: u8, g: u8, b: u8) {
-    let _ = TERM_BG.set((r, g, b));
+    TERM_BG.store(u32::from_be_bytes([0, r, g, b]), Ordering::Relaxed);
+}
+
+pub fn get_term_bg() -> Option<(u8, u8, u8)> {
+    match TERM_BG.load(Ordering::Relaxed) {
+        u32::MAX => None,
+        packed => {
+            let [_, r, g, b] = packed.to_be_bytes();
+            Some((r, g, b))
+        }
+    }
 }
 
 /// Falls back to a dark background if the terminal never answered the query
 fn term_bg() -> (u8, u8, u8) {
-    *TERM_BG.get().unwrap_or(&(30, 32, 38))
+    get_term_bg().unwrap_or((30, 32, 38))
 }
 
 /// Blend a color toward the terminal background (0.0 = unchanged, 1.0 = background)

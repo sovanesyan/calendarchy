@@ -25,6 +25,7 @@ pub struct GoogleAuth {
 }
 
 impl GoogleAuth {
+    #[cfg(test)]
     pub fn new(config: GoogleConfig) -> Self {
         Self::with_client(Client::new(), config)
     }

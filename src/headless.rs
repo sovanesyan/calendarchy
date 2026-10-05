@@ -2,139 +2,74 @@
 //! both sources and update the disk cache, without entering the TUI. Used by
 //! unattended consumers of the cache (e.g. the TRMNL e-ink push job).
 //!
-//! Mirrors the TUI fetch path exactly: refresh expired Google tokens, fetch
-//! per-source, convert to DisplayEvent, `store()` the month, `save_to_disk()`.
+//! Uses the same fetch layer as the TUI (`sources`), with both sources
+//! fetched concurrently.
 
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use chrono::{Datelike, Local};
+use reqwest::Client;
 
-use crate::auth::CalendarEntry;
 use crate::cache::EventCache;
 use crate::config::{self, Config};
-use crate::conversion::{google_event_to_display, icloud_event_to_display};
-use crate::google::{CalendarClient, GoogleAuth, TokenInfo};
-use crate::icloud::{CalDavClient, ICalEvent, ICloudAuth};
-
-fn month_range(date: NaiveDate) -> (NaiveDate, NaiveDate) {
-    let first = date.with_day(1).unwrap();
-    let last = if date.month() == 12 {
-        NaiveDate::from_ymd_opt(date.year() + 1, 1, 1).unwrap() - Duration::days(1)
-    } else {
-        NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1).unwrap() - Duration::days(1)
-    };
-    (first, last)
-}
-
-async fn google_tokens(config: &Config) -> Option<TokenInfo> {
-    let gconfig = config.google.as_ref()?;
-    match config::load_google_tokens() {
-        Ok(Some(tokens)) if !tokens.is_expired() => Some(tokens),
-        Ok(Some(tokens)) => {
-            let refresh_token = tokens.refresh_token.as_ref()?.clone();
-            let auth = GoogleAuth::new(gconfig.clone());
-            match auth.refresh_token(&refresh_token).await {
-                Ok(new_tokens) => {
-                    let _ = config::save_google_tokens(&new_tokens);
-                    Some(new_tokens)
-                }
-                Err(e) => {
-                    eprintln!("google: token refresh failed: {e}");
-                    None
-                }
-            }
-        }
-        _ => {
-            eprintln!("google: no saved tokens (run the app once to authenticate)");
-            None
-        }
-    }
-}
-
-fn icloud_calendars() -> Vec<CalendarEntry> {
-    match config::load_icloud_tokens() {
-        Ok(Some(tokens)) => {
-            if !tokens.calendars.is_empty() {
-                tokens
-                    .calendars
-                    .into_iter()
-                    .map(|c| CalendarEntry { url: c.url, name: c.name })
-                    .collect()
-            } else {
-                tokens
-                    .calendar_urls
-                    .into_iter()
-                    .map(|url| CalendarEntry { url, name: None })
-                    .collect()
-            }
-        }
-        _ => Vec::new(),
-    }
-}
+use crate::sources::{self, GoogleSession};
 
 pub async fn refresh() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().unwrap_or_default();
     let today = Local::now().date_naive();
-    let (start, end) = month_range(today);
+    let month = today.with_day(1).unwrap();
+    let http = Client::new();
+
+    let google = async {
+        let gconfig = config.google.clone()?;
+        let tokens = match config::load_google_tokens() {
+            Ok(Some(tokens)) => tokens,
+            _ => {
+                eprintln!("google: no saved tokens (run the app once to authenticate)");
+                return None;
+            }
+        };
+        let mut session = GoogleSession::new(http.clone(), gconfig.clone(), tokens);
+        let result = sources::fetch_google_month(&http, &mut session, &gconfig.calendar_id, None, month).await;
+        if let Some(tokens) = session.into_refreshed() {
+            let _ = config::save_google_tokens(&tokens);
+        }
+        match result {
+            Ok(m) => Some(m.events),
+            Err(e) => {
+                eprintln!("google: fetch failed: {e}");
+                None
+            }
+        }
+    };
+
+    // EventKit is interactive/macOS-only, so only CalDAV refreshes here
+    let icloud = async {
+        let icloud = config.icloud.clone().filter(|c| !c.is_eventkit())?;
+        let calendars = sources::saved_icloud_calendars();
+        if calendars.is_empty() {
+            eprintln!("icloud: no discovered calendars (run the app once to authenticate)");
+            return None;
+        }
+        match sources::fetch_caldav_month(&http, &icloud, &calendars, month).await {
+            Ok(events) => Some(events),
+            Err(e) => {
+                eprintln!("icloud: fetch failed: {e}");
+                None
+            }
+        }
+    };
+
+    let (google, icloud) = tokio::join!(google, icloud);
 
     let mut cache = EventCache::new();
     cache.load_from_disk();
-
     let mut fetched = Vec::new();
-
-    // --- Google -------------------------------------------------------------
-    if config.google.is_some() {
-        if let Some(tokens) = google_tokens(&config).await {
-            let calendar_id = config
-                .google
-                .as_ref()
-                .map(|c| c.calendar_id.clone())
-                .unwrap_or_else(|| "primary".to_string());
-            let client = CalendarClient::new();
-            let calendar_name = client.get_calendar_name(&tokens, &calendar_id).await.ok().flatten();
-            match client.list_events(&tokens, &calendar_id, start, end).await {
-                Ok(events) => {
-                    let display_events: Vec<_> = events
-                        .into_iter()
-                        .filter_map(|e| google_event_to_display(e, calendar_id.clone(), calendar_name.clone()))
-                        .collect();
-                    fetched.push(format!("google: {} events", display_events.len()));
-                    cache.google.store(display_events, start);
-                }
-                Err(e) => eprintln!("google: fetch failed: {e}"),
-            }
-        }
+    if let Some(events) = google {
+        fetched.push(format!("google: {} events", events.len()));
+        cache.google.store(events, month);
     }
-
-    // --- iCloud (CalDAV; EventKit is interactive/macOS-only) -----------------
-    if let Some(ref icloud_config) = config.icloud {
-        if !icloud_config.is_eventkit() {
-            let calendars = icloud_calendars();
-            if calendars.is_empty() {
-                eprintln!("icloud: no discovered calendars (run the app once to authenticate)");
-            } else {
-                let auth = ICloudAuth::new(icloud_config.clone());
-                let client = CalDavClient::new(auth);
-                let mut all_events: Vec<(ICalEvent, Option<String>)> = Vec::new();
-                let mut failed = false;
-                for cal in &calendars {
-                    match client.fetch_events(&cal.url, start, end).await {
-                        Ok(events) => all_events.extend(events.into_iter().map(|e| (e, cal.name.clone()))),
-                        Err(e) => {
-                            eprintln!("icloud: fetch failed for {}: {e}", cal.url);
-                            failed = true;
-                            break;
-                        }
-                    }
-                }
-                if !failed {
-                    let display_events: Vec<_> = all_events
-                        .into_iter()
-                        .map(|(e, name)| icloud_event_to_display(e, name))
-                        .collect();
-                    fetched.push(format!("icloud: {} events", display_events.len()));
-                    cache.icloud.store(display_events, start);
-                }
-            }
-        }
+    if let Some(events) = icloud {
+        fetched.push(format!("icloud: {} events", events.len()));
+        cache.icloud.store(events, month);
     }
 
     if fetched.is_empty() {

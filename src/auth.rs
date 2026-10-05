@@ -22,7 +22,7 @@ impl AuthDisplay for GoogleAuthState {
 }
 
 /// Calendar with URL and display name
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CalendarEntry {
     pub url: String,
     pub name: Option<String>,
@@ -32,7 +32,6 @@ pub struct CalendarEntry {
 #[derive(Debug, Clone)]
 pub enum ICloudAuthState {
     NotConfigured,
-    NotAuthenticated,
     Discovering,
     Authenticated { calendars: Vec<CalendarEntry> },
     #[allow(dead_code)]

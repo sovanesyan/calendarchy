@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 /// OAuth2 tokens from Google
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenInfo {
     pub access_token: String,
     pub refresh_token: Option<String>,

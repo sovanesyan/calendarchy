@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Attendee information for display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,19 +116,32 @@ struct DiskCacheRef<'a> {
 /// Source-specific event cache
 pub struct SourceCache {
     by_date: HashMap<NaiveDate, Vec<DisplayEvent>>,
-    fetched_months: HashSet<(i32, u32)>,
+    /// When each month was last fetched successfully (not restored from disk,
+    /// so a cached month still gets refreshed on startup)
+    fetched_months: HashMap<(i32, u32), Instant>,
 }
 
 impl SourceCache {
     pub fn new() -> Self {
         Self {
             by_date: HashMap::new(),
-            fetched_months: HashSet::new(),
+            fetched_months: HashMap::new(),
         }
     }
 
+    #[cfg(test)]
     pub fn has_month(&self, date: NaiveDate) -> bool {
-        self.fetched_months.contains(&(date.year(), date.month()))
+        self.fetched_months.contains_key(&(date.year(), date.month()))
+    }
+
+    /// When the month containing `date` was last fetched, if ever
+    pub fn fetched_at(&self, date: NaiveDate) -> Option<Instant> {
+        self.fetched_months.get(&(date.year(), date.month())).copied()
+    }
+
+    /// Mark everything stale so it's refetched, but keep showing the data
+    pub fn invalidate(&mut self) {
+        self.fetched_months.clear();
     }
 
     /// Replace the cached data for a fetched month.
@@ -171,7 +185,7 @@ impl SourceCache {
                 (a.time_str != "All day", &a.time_str).cmp(&(b.time_str != "All day", &b.time_str))
             });
         }
-        self.fetched_months.insert((year, month));
+        self.fetched_months.insert((year, month), Instant::now());
     }
 
     pub fn get(&self, date: NaiveDate) -> &[DisplayEvent] {
@@ -192,6 +206,7 @@ impl SourceCache {
         self.by_date.values().flat_map(|v| v.iter())
     }
 
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.by_date.clear();
         self.fetched_months.clear();
@@ -235,6 +250,7 @@ impl EventCache {
     }
 
     /// Clear all caches
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.google.clear();
         self.icloud.clear();
@@ -245,28 +261,34 @@ impl EventCache {
         dirs::cache_dir().map(|p| p.join("calendarchy").join("events.json"))
     }
 
-    /// Save cache to disk
+    /// Save cache to disk (synchronously)
     pub fn save_to_disk(&self) {
-        let Some(path) = Self::cache_path() else { return };
-
-        // Create parent directory if needed
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+        if let Some(bytes) = self.to_disk_bytes() {
+            Self::write_disk_bytes(&bytes);
         }
+    }
 
+    /// Serialize for disk; cheap enough for the UI thread (the cache is small),
+    /// so only the file write needs to move off it
+    pub fn to_disk_bytes(&self) -> Option<Vec<u8>> {
         let cache = DiskCacheRef {
             version: CACHE_VERSION,
             google: self.google.raw_data(),
             icloud: self.icloud.raw_data(),
         };
+        serde_json::to_vec(&cache).ok()
+    }
 
-        // Write-then-rename so a concurrent reader (or the --refresh timer
-        // racing an open TUI) never sees a half-written file
-        if let Ok(json) = serde_json::to_vec(&cache) {
-            let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-            if fs::write(&tmp, json).is_ok() && fs::rename(&tmp, &path).is_err() {
-                let _ = fs::remove_file(&tmp);
-            }
+    /// Write serialized cache bytes. Write-then-rename so a concurrent reader
+    /// (or the --refresh timer racing an open TUI) never sees a half-written file
+    pub fn write_disk_bytes(bytes: &[u8]) {
+        let Some(path) = Self::cache_path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        if fs::write(&tmp, bytes).is_ok() && fs::rename(&tmp, &path).is_err() {
+            let _ = fs::remove_file(&tmp);
         }
     }
 

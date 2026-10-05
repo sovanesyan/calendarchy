@@ -12,9 +12,12 @@ pub struct CalendarClient {
 
 impl CalendarClient {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        Self::with_client(Client::new())
+    }
+
+    /// Use a shared client so connections (and TLS sessions) are reused
+    pub fn with_client(client: Client) -> Self {
+        Self { client }
     }
 
     /// Fetch events for a date range
