@@ -225,10 +225,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui::set_term_bg((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8);
     }
 
-    // Enable raw mode and enter alternate screen
+    // Enable raw mode and enter alternate screen. Restore the terminal on
+    // panic too, or a crash leaves the shell in raw mode on the alt screen.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default_hook(info);
+    }));
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
 
+    let result = run(&mut app, &tx, &mut rx);
+    restore_terminal();
+    result
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(stdout(), LeaveAlternateScreen, cursor::Show);
+}
+
+fn run(
+    app: &mut App,
+    tx: &mpsc::Sender<AsyncMessage>,
+    rx: &mut mpsc::Receiver<AsyncMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Main loop
     loop {
         // Clear expired status messages
@@ -479,7 +500,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.clear_error();
                     // Handle interactive setup wizard
                     if app.setup.is_some() {
-                        match handle_setup_input(&mut app, key_event.code, &tx) {
+                        match handle_setup_input(app, key_event.code, &tx) {
                             SetupAction::Continue => {}
                             SetupAction::Quit => break,
                             SetupAction::Finished => {
@@ -490,7 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Auto-start Google browser auth if newly configured
                                 if !matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                     if let Some(gc) = app.config.google.clone() {
-                                        start_google_auth(&mut app, gc, &tx);
+                                        start_google_auth(app, gc, &tx);
                                     }
                                 }
 
@@ -637,13 +658,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             app.set_status("Deleting event...");
                                         }
                                     }
-                                    PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag } => {
+                                    PendingAction::DeleteICloudEvent { calendar_url, event_uid, href, etag } => {
                                         if let Some(ref icloud_config) = app.config.icloud {
                                             let auth = ICloudAuth::new(icloud_config.clone());
                                             let client = CalDavClient::new(auth);
                                             let tx = tx.clone();
                                             tokio::spawn(async move {
-                                                match client.delete_event(&calendar_url, &event_uid, etag.as_deref()).await {
+                                                match client.delete_event(&calendar_url, &event_uid, href.as_deref(), etag.as_deref()).await {
                                                     Ok(()) => {
                                                         let _ = tx.send(AsyncMessage::EventActionSuccess("Event deleted".to_string())).await;
                                                     }
@@ -748,9 +769,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 app.set_status("Not signed in to Google — press S for setup");
                                             }
                                         }
-                                        EventId::ICloud { calendar_url, event_uid, etag, .. } => {
+                                        EventId::ICloud { calendar_url, .. } if calendar_url.is_empty() => {
+                                            // EventKit events have no CalDAV resource to delete
+                                            app.set_status("Delete not supported for system calendars");
+                                        }
+                                        EventId::ICloud { calendar_url, event_uid, href, etag, .. } => {
                                             if app.config.icloud.is_some() {
-                                                app.pending_action = Some(PendingAction::DeleteICloudEvent { calendar_url, event_uid, etag });
+                                                app.pending_action = Some(PendingAction::DeleteICloudEvent { calendar_url, event_uid, href, etag });
                                             } else {
                                                 app.set_status("iCloud not configured — press S for setup");
                                             }
@@ -789,7 +814,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 open_url("https://www.icloud.com/calendar");
                             }
                             (KeyCode::Char('S') | KeyCode::Char('С'), _) => {
-                                open_setup_wizard(&mut app);
+                                open_setup_wizard(app);
                             }
                             (KeyCode::Char('q') | KeyCode::Char('я'), _) => {
                                 break;
@@ -866,14 +891,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (KeyCode::Char('g') | KeyCode::Char('г'), _) => {
                             if !matches!(app.google_auth, GoogleAuthState::Authenticated(_)) {
                                 if let Some(gc) = app.config.google.clone() {
-                                    start_google_auth(&mut app, gc, &tx);
+                                    start_google_auth(app, gc, &tx);
                                 } else {
                                     app.set_status("Google not configured — press S for setup");
                                 }
                             }
                         }
                         (KeyCode::Char('S') | KeyCode::Char('С'), _) => {
-                            open_setup_wizard(&mut app);
+                            open_setup_wizard(app);
                         }
                         (KeyCode::Char('i') | KeyCode::Char('и'), _) if app.config.icloud.is_none() => {
                             app.set_status("iCloud not configured — press S for setup");
@@ -920,10 +945,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    // Cleanup
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen, cursor::Show)?;
 
     Ok(())
 }

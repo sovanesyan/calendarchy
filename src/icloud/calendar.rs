@@ -2,7 +2,7 @@ use crate::error::{check_caldav_response, check_caldav_response_no_body, Calenda
 use crate::icloud::auth::ICloudAuth;
 use crate::icloud::types::ICalEvent;
 use crate::logging::{log_request, log_response};
-use chrono::NaiveDate;
+use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest::Client;
@@ -44,25 +44,31 @@ impl CalDavClient {
         start: NaiveDate,
         end: NaiveDate,
     ) -> Result<Vec<ICalEvent>> {
-        let start_str = format!("{}T000000Z", start.format("%Y%m%d"));
-        let end_str = format!("{}T235959Z", end.format("%Y%m%d"));
+        // Local-midnight boundaries, so events in the first/last hours of the
+        // month aren't lost to the UTC offset
+        let (range_start, range_end) = local_day_bounds_utc(start, end);
+        let start_str = range_start.format("%Y%m%dT%H%M%SZ").to_string();
+        let end_str = range_end.format("%Y%m%dT%H%M%SZ").to_string();
 
         let body = format!(
             r#"<?xml version="1.0" encoding="utf-8" ?>
 <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
   <d:prop>
     <d:getetag/>
-    <c:calendar-data/>
+    <c:calendar-data>
+      <c:expand start="{start}" end="{end}"/>
+    </c:calendar-data>
   </d:prop>
   <c:filter>
     <c:comp-filter name="VCALENDAR">
       <c:comp-filter name="VEVENT">
-        <c:time-range start="{}" end="{}"/>
+        <c:time-range start="{start}" end="{end}"/>
       </c:comp-filter>
     </c:comp-filter>
   </c:filter>
 </c:calendar-query>"#,
-            start_str, end_str
+            start = start_str,
+            end = end_str
         );
 
         log_request("REPORT", calendar_url);
@@ -244,6 +250,7 @@ impl CalDavClient {
         let mut in_etag = false;
         let mut calendar_data = String::new();
         let mut current_etag: Option<String> = None;
+        let mut current_href: Option<String> = None;
         let mut current_tag = String::new();
 
         loop {
@@ -265,6 +272,7 @@ impl CalDavClient {
                             &calendar_data,
                             calendar_url.to_string(),
                             current_etag.clone(),
+                            current_href.clone(),
                         );
                         events.extend(parsed);
                         in_calendar_data = false;
@@ -272,7 +280,9 @@ impl CalDavClient {
                         in_etag = false;
                     } else if name == "response" {
                         current_etag = None;
+                        current_href = None;
                     }
+                    current_tag.clear();
                 }
                 Ok(Event::Text(e)) => {
                     let text = e.unescape().unwrap_or_default().to_string();
@@ -280,6 +290,8 @@ impl CalDavClient {
                         calendar_data.push_str(&text);
                     } else if in_etag || current_tag == "getetag" {
                         current_etag = Some(text.trim_matches('"').to_string());
+                    } else if current_tag == "href" && current_href.is_none() {
+                        current_href = Some(self.resolve_url(text.trim()));
                     }
                 }
                 Ok(Event::CData(e)) => {
@@ -353,14 +365,15 @@ impl CalDavClient {
         &self,
         calendar_url: &str,
         event_uid: &str,
+        href: Option<&str>,
         etag: Option<&str>,
     ) -> Result<()> {
-        // Construct event URL: calendar_url + uid + ".ics"
-        let event_url = format!(
-            "{}{}.ics",
-            calendar_url.trim_end_matches('/').to_string() + "/",
-            event_uid
-        );
+        // Prefer the resource URL the server gave us; resource names aren't
+        // guaranteed to be "<uid>.ics", so that's only a fallback
+        let event_url = match href {
+            Some(href) => href.to_string(),
+            None => format!("{}/{}.ics", calendar_url.trim_end_matches('/'), event_uid),
+        };
 
         log_request("DELETE", &event_url);
         let mut request = self
@@ -378,6 +391,18 @@ impl CalDavClient {
 
         check_caldav_response_no_body(response, "Failed to delete event").await
     }
+}
+
+/// UTC instants for local midnight at the start of `start` and the end of `end`
+fn local_day_bounds_utc(start: NaiveDate, end: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
+    let local_midnight = |d: NaiveDate| {
+        Local
+            .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| d.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    };
+    (local_midnight(start), local_midnight(end + Duration::days(1)))
 }
 
 /// Information about a calendar

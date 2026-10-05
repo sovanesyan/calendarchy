@@ -85,6 +85,7 @@ pub fn icloud_event_to_display(event: ICalEvent, calendar_name: Option<String>) 
             event_uid: event.uid.clone(),
             etag: event.etag.clone(),
             calendar_name,
+            href: event.href.clone(),
         },
         title: event.title().to_string(),
         time_str: event.time_str(),
@@ -187,6 +188,7 @@ mod tests {
             transp: None,
             calendar_url: "https://caldav.example.com/cal".to_string(),
             etag: Some("etag-abc".to_string()),
+            href: None,
         };
 
         let display = icloud_event_to_display(event, Some("Personal".to_string()));
@@ -219,6 +221,7 @@ mod tests {
             transp: None,
             calendar_url: "https://caldav.example.com/cal".to_string(),
             etag: None,
+            href: None,
         };
 
         let display = icloud_event_to_display(event, None);

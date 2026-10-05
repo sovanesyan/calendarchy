@@ -132,6 +132,7 @@ fn ek_event_to_display(e: EKEvent) -> DisplayEvent {
             event_uid: format!("eventkit-{}-{}-{}", e.calendar_name, date, e.title),
             etag: None,
             calendar_name: Some(e.calendar_name),
+            href: None,
         },
         title: e.title,
         time_str,

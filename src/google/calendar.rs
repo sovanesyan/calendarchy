@@ -1,7 +1,7 @@
 use crate::error::{check_google_response, check_google_response_no_body, CalendarchyError, Result};
 use crate::google::types::{CalendarEvent, EventsListResponse, TokenInfo};
 use crate::logging::{log_request, log_response};
-use chrono::NaiveDate;
+use chrono::{Duration, Local, NaiveDate, TimeZone};
 use reqwest::{Client, StatusCode};
 
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
@@ -31,9 +31,17 @@ impl CalendarClient {
             urlencoding::encode(calendar_id)
         );
 
-        // Convert dates to RFC3339 format
-        let time_min_str = format!("{}T00:00:00Z", time_min);
-        let time_max_str = format!("{}T23:59:59Z", time_max);
+        // Local-midnight boundaries in RFC3339, so events near the month edges
+        // aren't lost to the UTC offset
+        let local_midnight = |d: NaiveDate| {
+            Local
+                .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
+                .earliest()
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| format!("{}T00:00:00Z", d))
+        };
+        let time_min_str = local_midnight(time_min);
+        let time_max_str = local_midnight(time_max + Duration::days(1));
 
         let mut all_events = Vec::new();
         let mut page_token: Option<String> = None;

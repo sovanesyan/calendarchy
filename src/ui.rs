@@ -1934,7 +1934,7 @@ mod tests {
 
     fn make_icloud_event(time: &str) -> DisplayEvent {
         DisplayEvent {
-            id: EventId::ICloud { calendar_url: "test".to_string(), event_uid: "test-uid".to_string(), etag: None, calendar_name: None },
+            id: EventId::ICloud { calendar_url: "test".to_string(), event_uid: "test-uid".to_string(), etag: None, calendar_name: None, href: None },
             title: "iCloud Test".to_string(),
             time_str: time.to_string(),
             end_time_str: None,

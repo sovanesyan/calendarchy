@@ -96,7 +96,7 @@ pub enum PendingAction {
     AcceptEvent { calendar_id: String, event_id: String },
     DeclineEvent { calendar_id: String, event_id: String },
     DeleteGoogleEvent { calendar_id: String, event_id: String },
-    DeleteICloudEvent { calendar_url: String, event_uid: String, etag: Option<String> },
+    DeleteICloudEvent { calendar_url: String, event_uid: String, href: Option<String>, etag: Option<String> },
 }
 
 /// Application state
@@ -222,10 +222,14 @@ impl App {
     }
 
     fn sync_month_if_needed(&mut self) {
-        if self.selected_date.month() != self.current_date.month()
-            || self.selected_date.year() != self.current_date.year()
-        {
-            self.current_date = self.selected_date.with_day(1).unwrap();
+        self.show_month_of(self.selected_date);
+    }
+
+    /// Display the month containing `date`, scheduling a fetch if it changed.
+    /// Every path that changes the visible month must go through here.
+    fn show_month_of(&mut self, date: NaiveDate) {
+        if date.month() != self.current_date.month() || date.year() != self.current_date.year() {
+            self.current_date = date.with_day(1).unwrap();
             self.google_needs_fetch = true;
             self.icloud_needs_fetch = true;
         }
@@ -391,9 +395,7 @@ impl App {
         while check_date <= limit {
             if self.events.has_events(check_date) {
                 self.selected_date = check_date;
-                if check_date.month() != self.current_date.month() || check_date.year() != self.current_date.year() {
-                    self.current_date = check_date;
-                }
+                self.show_month_of(check_date);
                 let google_events = self.events.google.get(check_date);
                 if !google_events.is_empty() {
                     self.selected_source = EventSource::Google;
@@ -415,9 +417,7 @@ impl App {
         while check_date >= limit {
             if self.events.has_events(check_date) {
                 self.selected_date = check_date;
-                if check_date.month() != self.current_date.month() || check_date.year() != self.current_date.year() {
-                    self.current_date = check_date;
-                }
+                self.show_month_of(check_date);
                 let icloud_events = self.events.icloud.get(check_date);
                 let google_events = self.events.google.get(check_date);
                 if !icloud_events.is_empty() {
@@ -439,8 +439,8 @@ impl App {
         } else {
             (self.current_date.year(), self.current_date.month() + 1)
         };
-        self.current_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-        self.selected_date = self.current_date;
+        self.selected_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        self.show_month_of(self.selected_date);
     }
 
     pub fn prev_month(&mut self) {
@@ -449,8 +449,8 @@ impl App {
         } else {
             (self.current_date.year(), self.current_date.month() - 1)
         };
-        self.current_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-        self.selected_date = self.current_date;
+        self.selected_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        self.show_month_of(self.selected_date);
     }
 
     pub fn open_search(&mut self) {
@@ -755,5 +755,62 @@ mod tests {
         assert!(!event_matches_query(&event, "retro"));
         assert!(!event_matches_query(&event, "bob"));
         assert!(!event_matches_query(&event, "xyz"));
+    }
+
+    fn app_on(date: NaiveDate) -> App {
+        let mut app = App {
+            current_date: date,
+            selected_date: date,
+            show_logs: false,
+            events: EventCache::new(),
+            google_auth: GoogleAuthState::NotConfigured,
+            icloud_auth: ICloudAuthState::NotConfigured,
+            status_message: None,
+            status_message_time: None,
+            status_is_error: false,
+            config: Config::default(),
+            google_needs_fetch: false,
+            icloud_needs_fetch: false,
+            google_loading: false,
+            icloud_loading: false,
+            navigation_mode: NavigationMode::Day,
+            selected_source: EventSource::Google,
+            selected_event_index: 0,
+            pending_action: None,
+            search: None,
+            show_help: false,
+            dirty: true,
+            last_render_minute: 0,
+            setup: None,
+        };
+        app.google_needs_fetch = false;
+        app
+    }
+
+    #[test]
+    fn test_month_jumps_schedule_a_fetch() {
+        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+        app.next_month();
+        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        assert!(app.google_needs_fetch && app.icloud_needs_fetch);
+
+        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+        app.prev_month();
+        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
+        assert!(app.google_needs_fetch && app.icloud_needs_fetch);
+    }
+
+    #[test]
+    fn test_event_jump_into_next_month_schedules_a_fetch() {
+        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
+        let target = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let mut ev = make_event_with_attendees("Later", vec![]);
+        ev.date = target;
+        app.events.google.store(vec![ev], target);
+        app.navigation_mode = NavigationMode::Event;
+        app.next_event();
+        assert_eq!(app.selected_date, target);
+        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        assert!(app.google_needs_fetch);
     }
 }

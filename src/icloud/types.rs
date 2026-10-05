@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 
 /// Attendee from iCal ATTENDEE line
 #[derive(Debug, Clone)]
@@ -27,6 +27,8 @@ pub struct ICalEvent {
     pub calendar_url: String,
     /// The etag for conditional updates
     pub etag: Option<String>,
+    /// The CalDAV resource URL (from the REPORT response href), used for deletes
+    pub href: Option<String>,
 }
 
 /// Event time - can be all-day (date only) or specific time
@@ -41,7 +43,7 @@ impl ICalEvent {
     pub fn start_date(&self) -> NaiveDate {
         match &self.dtstart {
             EventTime::Date(d) => *d,
-            EventTime::DateTime(dt) => dt.date_naive(),
+            EventTime::DateTime(dt) => dt.with_timezone(&Local).date_naive(),
         }
     }
 
@@ -54,20 +56,14 @@ impl ICalEvent {
     pub fn time_str(&self) -> String {
         match &self.dtstart {
             EventTime::Date(_) => "All day".to_string(),
-            EventTime::DateTime(dt) => {
-                use chrono::Timelike;
-                format!("{:02}:{:02}", dt.time().hour(), dt.time().minute())
-            }
+            EventTime::DateTime(dt) => format_local_hm(dt),
         }
     }
 
     /// Get end time as HH:MM or None for all-day events
     pub fn end_time_str(&self) -> Option<String> {
         match &self.dtend {
-            Some(EventTime::DateTime(dt)) => {
-                use chrono::Timelike;
-                Some(format!("{:02}:{:02}", dt.time().hour(), dt.time().minute()))
-            }
+            Some(EventTime::DateTime(dt)) => Some(format_local_hm(dt)),
             _ => None,
         }
     }
@@ -103,21 +99,31 @@ impl ICalEvent {
     /// Parse an iCal VCALENDAR string into events (test-only)
     #[cfg(test)]
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
-        Self::parse_ical_with_source(ical_data, String::new(), None)
+        Self::parse_ical_with_source(ical_data, String::new(), None, None)
     }
 
     /// Parse an iCal VCALENDAR string into events with calendar source info
-    pub fn parse_ical_with_source(ical_data: &str, calendar_url: String, etag: Option<String>) -> Vec<ICalEvent> {
+    pub fn parse_ical_with_source(
+        ical_data: &str,
+        calendar_url: String,
+        etag: Option<String>,
+        href: Option<String>,
+    ) -> Vec<ICalEvent> {
         let mut events = Vec::new();
         let mut current_event: Option<ICalEventBuilder> = None;
+        // Depth of components nested inside the VEVENT (VALARM etc.), whose
+        // properties (UID, DESCRIPTION, ...) must not leak into the event
+        let mut nested = 0usize;
 
         for line in unfold_ical_lines(ical_data) {
             let line = line.trim();
 
             if line == "BEGIN:VEVENT" {
+                nested = 0;
                 current_event = Some(ICalEventBuilder {
                     calendar_url: calendar_url.clone(),
                     etag: etag.clone(),
+                    href: href.clone(),
                     ..Default::default()
                 });
             } else if line == "END:VEVENT" {
@@ -125,7 +131,12 @@ impl ICalEvent {
                     && let Some(event) = builder.build() {
                         events.push(event);
                     }
-            } else if let Some(ref mut builder) = current_event
+            } else if current_event.is_some() && line.starts_with("BEGIN:") {
+                nested += 1;
+            } else if current_event.is_some() && line.starts_with("END:") {
+                nested = nested.saturating_sub(1);
+            } else if nested == 0
+                && let Some(ref mut builder) = current_event
                 && let Some((key, value)) = parse_ical_line(line) {
                     let base_key = key.split(';').next().unwrap_or(key);
                     match base_key {
@@ -178,6 +189,7 @@ struct ICalEventBuilder {
     transp: Option<String>,
     calendar_url: String,
     etag: Option<String>,
+    href: Option<String>,
 }
 
 impl ICalEventBuilder {
@@ -203,6 +215,7 @@ impl ICalEventBuilder {
             transp: self.transp,
             calendar_url: self.calendar_url,
             etag: self.etag,
+            href: self.href,
         })
     }
 }
@@ -258,6 +271,7 @@ fn parse_ical_datetime(key: &str, value: &str) -> Option<EventTime> {
     // Parse datetime: YYYYMMDDTHHMMSS, YYYYMMDDTHHMMSSZ, or with TZID
     // Handles: DTSTART:20260108T200000Z
     //          DTSTART;TZID=Europe/Sofia:20260108T200000
+    let is_utc = value.ends_with('Z');
     let value = value.trim_end_matches('Z');
     if value.contains('T') {
         let t_pos = value.find('T')?;
@@ -275,11 +289,39 @@ fn parse_ical_datetime(key: &str, value: &str) -> Option<EventTime> {
 
             let naive = NaiveDate::from_ymd_opt(year, month, day)?
                 .and_hms_opt(hour, minute, second)?;
-            return Some(EventTime::DateTime(DateTime::from_naive_utc_and_offset(naive, Utc)));
+            return Some(EventTime::DateTime(resolve_datetime(naive, is_utc, extract_tzid(key))));
         }
     }
 
     None
+}
+
+/// Interpret a parsed wall-clock time: `Z` values are UTC, `TZID` values are in
+/// that zone, and floating values (or zones chrono-tz doesn't know, like
+/// Windows names from Outlook invites) are taken as local time
+fn resolve_datetime(naive: NaiveDateTime, is_utc: bool, tzid: Option<&str>) -> DateTime<Utc> {
+    if is_utc {
+        return DateTime::from_naive_utc_and_offset(naive, Utc);
+    }
+    let resolved = match tzid.and_then(|t| t.parse::<chrono_tz::Tz>().ok()) {
+        Some(tz) => tz.from_local_datetime(&naive).earliest().map(|dt| dt.with_timezone(&Utc)),
+        None => Local.from_local_datetime(&naive).earliest().map(|dt| dt.with_timezone(&Utc)),
+    };
+    // A wall time inside a DST gap doesn't exist; fall back to reading it as UTC
+    resolved.unwrap_or_else(|| DateTime::from_naive_utc_and_offset(naive, Utc))
+}
+
+/// Extract the TZID parameter from a property key like "DTSTART;TZID=Europe/Sofia"
+fn extract_tzid(key: &str) -> Option<&str> {
+    key.split(';')
+        .find_map(|part| part.strip_prefix("TZID="))
+        .map(|tz| tz.trim_matches('"'))
+}
+
+/// Format a UTC instant as local HH:MM
+fn format_local_hm(dt: &DateTime<Utc>) -> String {
+    let local = dt.with_timezone(&Local);
+    format!("{:02}:{:02}", local.hour(), local.minute())
 }
 
 /// Unescape iCal text values
@@ -401,7 +443,12 @@ END:VCALENDAR"#;
         let events = ICalEvent::parse_ical(ical);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].title(), "Sofia Meeting");
-        assert_eq!(events[0].time_str(), "20:00");
+        // 20:00 in Sofia, shown in whatever the local zone is
+        let expected = chrono_tz::Europe::Sofia
+            .with_ymd_and_hms(2026, 1, 8, 20, 0, 0).unwrap()
+            .with_timezone(&Local);
+        assert_eq!(events[0].time_str(), expected.format("%H:%M").to_string());
+        assert_eq!(events[0].start_date(), expected.date_naive());
     }
 
     #[test]
@@ -679,8 +726,8 @@ END:VCALENDAR"#;
 BEGIN:VEVENT
 UID:timed-event
 SUMMARY:Meeting
-DTSTART:20260115T143000Z
-DTEND:20260115T160000Z
+DTSTART:20260115T143000
+DTEND:20260115T160000
 END:VEVENT
 END:VCALENDAR"#;
 
@@ -703,5 +750,57 @@ END:VCALENDAR"#;
         let events = ICalEvent::parse_ical(ical);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].end_time_str(), None);
+    }
+
+    #[test]
+    fn test_utc_times_are_shown_in_local_time() {
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:utc\nSUMMARY:UTC\nDTSTART:20260115T143000Z\nDTEND:20260115T153000Z\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        let expected = Utc.with_ymd_and_hms(2026, 1, 15, 14, 30, 0).unwrap().with_timezone(&Local);
+        assert_eq!(events[0].time_str(), expected.format("%H:%M").to_string());
+    }
+
+    #[test]
+    fn test_floating_times_are_local_wall_time() {
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:float\nSUMMARY:Floating\nDTSTART:20260115T090000\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events[0].time_str(), "09:00");
+        assert_eq!(events[0].start_date(), NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn test_foreign_tzid_is_converted() {
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:ny\nSUMMARY:NY\nDTSTART;TZID=America/New_York:20260115T100000\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        let expected = chrono_tz::America::New_York
+            .with_ymd_and_hms(2026, 1, 15, 10, 0, 0).unwrap()
+            .with_timezone(&Local);
+        assert_eq!(events[0].time_str(), expected.format("%H:%M").to_string());
+    }
+
+    #[test]
+    fn test_unknown_tzid_falls_back_to_local() {
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:win\nSUMMARY:Outlook\nDTSTART;TZID=\"W. Europe Standard Time\":20260115T100000\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events[0].time_str(), "10:00");
+    }
+
+    #[test]
+    fn test_valarm_properties_do_not_leak_into_event() {
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:event-uid\nSUMMARY:Real\nDTSTART:20260115T100000\nBEGIN:VALARM\nUID:alarm-uid\nDESCRIPTION:Reminder\nACTION:DISPLAY\nEND:VALARM\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid, "event-uid");
+        assert_eq!(events[0].description, None);
+    }
+
+    #[test]
+    fn test_expanded_recurrence_instance() {
+        // Shape of an instance returned by iCloud for a REPORT with <c:expand>
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:bday\nSUMMARY:Birthday\nDTSTART;VALUE=DATE:20261023\nDTEND;VALUE=DATE:20261024\nRECURRENCE-ID:20261023T000000Z\nEND:VEVENT\nEND:VCALENDAR";
+        let events = ICalEvent::parse_ical(ical);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_date(), NaiveDate::from_ymd_opt(2026, 10, 23).unwrap());
+        assert_eq!(events[0].time_str(), "All day");
     }
 }

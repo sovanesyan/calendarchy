@@ -50,8 +50,26 @@ impl AttendeeStatus {
 pub enum EventId {
     /// Google Calendar event (calendar_id, event_id, calendar_name for display)
     Google { calendar_id: String, event_id: String, calendar_name: Option<String> },
-    /// iCloud CalDAV event (calendar_url, event_uid, etag for updates, calendar_name for display)
-    ICloud { calendar_url: String, event_uid: String, etag: Option<String>, calendar_name: Option<String> },
+    /// iCloud CalDAV event (calendar_url, event_uid, etag for updates, calendar_name for display,
+    /// href = the server's resource URL, used for deletes)
+    ICloud {
+        calendar_url: String,
+        event_uid: String,
+        etag: Option<String>,
+        calendar_name: Option<String>,
+        #[serde(default)]
+        href: Option<String>,
+    },
+}
+
+impl EventId {
+    /// Stable identity of the underlying event, ignoring display-only fields
+    fn identity(&self) -> (&str, &str) {
+        match self {
+            EventId::Google { calendar_id, event_id, .. } => (calendar_id, event_id),
+            EventId::ICloud { calendar_url, event_uid, .. } => (calendar_url, event_uid),
+        }
+    }
 }
 
 /// Unified event representation for display
@@ -72,11 +90,26 @@ pub struct DisplayEvent {
     pub attendees: Vec<DisplayAttendee>,
 }
 
+/// Bump whenever the on-disk shape or meaning changes; mismatched caches are
+/// discarded (the cache is disposable, it's refetched on startup anyway).
+/// v2: dedupe fix + expanded recurrences — v1 files can hold thousands of duplicates.
+const CACHE_VERSION: u32 = 2;
+
 /// Serializable cache format for disk persistence
 #[derive(Serialize, Deserialize)]
 struct DiskCache {
+    #[serde(default)]
+    version: u32,
     google: HashMap<NaiveDate, Vec<DisplayEvent>>,
     icloud: HashMap<NaiveDate, Vec<DisplayEvent>>,
+}
+
+/// Borrowing twin of DiskCache, so saving doesn't clone the whole map
+#[derive(Serialize)]
+struct DiskCacheRef<'a> {
+    version: u32,
+    google: &'a HashMap<NaiveDate, Vec<DisplayEvent>>,
+    icloud: &'a HashMap<NaiveDate, Vec<DisplayEvent>>,
 }
 
 /// Source-specific event cache
@@ -97,17 +130,46 @@ impl SourceCache {
         self.fetched_months.contains(&(date.year(), date.month()))
     }
 
+    /// Replace the cached data for a fetched month.
+    ///
+    /// A fetch can return events dated *outside* the month (a multi-day event
+    /// that started earlier), so besides clearing the month we also drop any
+    /// cached copy of an incoming event wherever it lives — otherwise those
+    /// copies pile up on every refresh.
     pub fn store(&mut self, events: Vec<DisplayEvent>, month_date: NaiveDate) {
-        // Clear existing events for this month before storing fresh data
         let year = month_date.year();
         let month = month_date.month();
-        self.by_date.retain(|date, _| date.year() != year || date.month() != month);
+        // Identity of one occurrence: event id + date + start time (EventKit ids
+        // are synthesized from the title, so two same-titled events need the time)
+        let incoming: HashSet<(&str, &str, NaiveDate, &str)> = events
+            .iter()
+            .map(|e| { let (a, b) = e.id.identity(); (a, b, e.date, e.time_str.as_str()) })
+            .collect();
+        self.by_date.retain(|date, day| {
+            if date.year() == year && date.month() == month {
+                return false;
+            }
+            day.retain(|e| {
+                let (a, b) = e.id.identity();
+                !incoming.contains(&(a, b, *date, e.time_str.as_str()))
+            });
+            !day.is_empty()
+        });
+        drop(incoming);
 
+        let mut seen: HashSet<(String, String, NaiveDate, String)> = HashSet::new();
         for event in events {
-            self.by_date
-                .entry(event.date)
-                .or_default()
-                .push(event);
+            let (a, b) = event.id.identity();
+            if !seen.insert((a.to_string(), b.to_string(), event.date, event.time_str.clone())) {
+                continue; // the same instance listed twice in one response
+            }
+            self.by_date.entry(event.date).or_default().push(event);
+        }
+        // All-day first, then by start time; stable, so same-time order is kept
+        for day in self.by_date.values_mut() {
+            day.sort_by(|a, b| {
+                (a.time_str != "All day", &a.time_str).cmp(&(b.time_str != "All day", &b.time_str))
+            });
         }
         self.fetched_months.insert((year, month));
     }
@@ -192,13 +254,19 @@ impl EventCache {
             let _ = fs::create_dir_all(parent);
         }
 
-        let cache = DiskCache {
-            google: self.google.raw_data().clone(),
-            icloud: self.icloud.raw_data().clone(),
+        let cache = DiskCacheRef {
+            version: CACHE_VERSION,
+            google: self.google.raw_data(),
+            icloud: self.icloud.raw_data(),
         };
 
-        if let Ok(json) = serde_json::to_string(&cache) {
-            let _ = fs::write(&path, json);
+        // Write-then-rename so a concurrent reader (or the --refresh timer
+        // racing an open TUI) never sees a half-written file
+        if let Ok(json) = serde_json::to_vec(&cache) {
+            let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            if fs::write(&tmp, json).is_ok() && fs::rename(&tmp, &path).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
         }
     }
 
@@ -208,6 +276,9 @@ impl EventCache {
 
         let Ok(json) = fs::read_to_string(&path) else { return false };
         let Ok(cache) = serde_json::from_str::<DiskCache>(&json) else { return false };
+        if cache.version != CACHE_VERSION {
+            return false;
+        }
 
         self.google.load_from(cache.google);
         self.icloud.load_from(cache.icloud);
@@ -364,5 +435,50 @@ mod tests {
         assert_eq!(parsed.title, "Test Meeting");
         assert_eq!(parsed.time_str, "14:30");
         assert!(parsed.accepted);
+    }
+
+    #[test]
+    fn test_store_does_not_duplicate_events_dated_outside_the_month() {
+        // A multi-day event that started in August comes back on every
+        // September fetch; it must not pile up (the 4,250-copies bug)
+        let mut cache = SourceCache::new();
+        let aug = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let sep = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        for _ in 0..5 {
+            cache.store(vec![make_event("Leave", aug, "All day")], sep);
+        }
+        assert_eq!(cache.get(aug).len(), 1);
+    }
+
+    #[test]
+    fn test_store_keeps_other_events_outside_the_month() {
+        let mut cache = SourceCache::new();
+        let aug = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        let mut other = make_event("Other", aug, "10:00");
+        other.id = EventId::Google { calendar_id: "test".into(), event_id: "other".into(), calendar_name: None };
+        cache.store(vec![other], NaiveDate::from_ymd_opt(2026, 8, 1).unwrap());
+        cache.store(vec![make_event("Leave", aug, "All day")], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
+        assert_eq!(cache.get(aug).len(), 2);
+    }
+
+    #[test]
+    fn test_store_dedupes_within_one_response_and_sorts() {
+        let mut cache = SourceCache::new();
+        let d = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
+        let mut late = make_event("Late", d, "15:00");
+        late.id = EventId::Google { calendar_id: "test".into(), event_id: "late".into(), calendar_name: None };
+        let early = make_event("Early", d, "09:00");
+        let mut allday = make_event("All", d, "All day");
+        allday.id = EventId::Google { calendar_id: "test".into(), event_id: "all".into(), calendar_name: None };
+        cache.store(vec![late, early.clone(), early, allday], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
+        let titles: Vec<_> = cache.get(d).iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["All", "Early", "Late"]);
+    }
+
+    #[test]
+    fn test_old_cache_versions_are_discarded() {
+        let v1 = r#"{"google":{},"icloud":{}}"#;
+        let parsed: DiskCache = serde_json::from_str(v1).unwrap();
+        assert_ne!(parsed.version, CACHE_VERSION);
     }
 }
