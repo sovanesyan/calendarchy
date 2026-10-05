@@ -76,7 +76,7 @@ checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
 name = "calendarchy"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64",
  "chrono",
