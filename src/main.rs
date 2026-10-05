@@ -55,6 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new();
     app.config = Config::load().unwrap_or_default();
+    let (keymap, key_problems) = keymap::Keymap::with_overrides(&app.config.keys);
+    keymap::install(keymap);
+    if !key_problems.is_empty() {
+        app.set_error(format!("config keys: {}", key_problems.join("; ")));
+    }
 
     // Start the network before touching the terminal, so requests are in
     // flight while the first frame is drawn
@@ -65,9 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fetches = app.wanted_fetches(Instant::now());
     runtime.run_all(&mut app, fetches);
 
-    // Terminal background: what the terminal said last time. A terminal that
+    // Terminal background: what this terminal said last time. A terminal that
     // never answered is not asked again (that costs ~200ms and its late reply
     // could arrive as keystrokes); with no memory at all, ask before drawing.
+    // Answers are remembered per terminal, so one that can't answer (tmux, an
+    // ssh session) doesn't stop the others from being asked.
+    ui::load_palette();
     let remembered = load_term_bg();
     match remembered {
         Some(TermBg::Color(r, g, b)) => ui::set_term_bg(r, g, b),
@@ -186,6 +194,7 @@ fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Resu
         search: app.search.as_ref(),
         show_help: app.show_help,
         setup: app.setup.as_ref(),
+        display: &app.config.display,
         now: chrono::Local::now(),
     };
     // ratatui diffs against the previous frame and flushes once; the
@@ -219,14 +228,57 @@ enum TermBg {
     Unanswered,
 }
 
-fn load_term_bg() -> Option<TermBg> {
-    let text = std::fs::read_to_string(term_bg_path()?).ok()?;
-    let text = text.trim();
-    if text == "none" {
+/// Which terminal we're in, as far as the environment tells: multiplexers and
+/// ssh first (they decide whether OSC 11 gets answered), then the emulator
+fn terminal_identity() -> String {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let mut parts = Vec::new();
+    if var("TMUX").is_some() {
+        parts.push("tmux".to_string());
+    }
+    if var("ZELLIJ").is_some() {
+        parts.push("zellij".to_string());
+    }
+    if var("SSH_TTY").is_some() || var("SSH_CONNECTION").is_some() {
+        parts.push("ssh".to_string());
+    }
+    parts.push(var("TERM_PROGRAM").or_else(|| var("TERM")).unwrap_or_else(|| "unknown".into()));
+    // One token, so it can't be confused with the value on its line
+    parts.join("+").replace(char::is_whitespace, "_")
+}
+
+/// The remembered answer for `terminal` in the term-bg file: one
+/// "<terminal> <rrggbb|none>" line per terminal
+fn parse_term_bg(text: &str, terminal: &str) -> Option<TermBg> {
+    let value = text.lines().find_map(|line| {
+        let (who, value) = line.trim().split_once(' ')?;
+        (who == terminal).then_some(value.trim())
+    })?;
+    if value == "none" {
         return Some(TermBg::Unanswered);
     }
-    let [_, r, g, b] = u32::from_str_radix(text, 16).ok()?.to_be_bytes();
+    if value.len() != 6 {
+        return None;
+    }
+    let [_, r, g, b] = u32::from_str_radix(value, 16).ok()?.to_be_bytes();
     Some(TermBg::Color(r, g, b))
+}
+
+/// The term-bg file with `terminal`'s line set to `value`, others kept.
+/// Lines from the old single-value format (no terminal name) are dropped.
+fn update_term_bg(text: &str, terminal: &str, value: &str) -> String {
+    let mut out: String = text
+        .lines()
+        .filter(|line| line.trim().split_once(' ').is_some_and(|(who, _)| who != terminal))
+        .map(|line| format!("{}\n", line.trim()))
+        .collect();
+    out.push_str(&format!("{} {}\n", terminal, value));
+    out
+}
+
+fn load_term_bg() -> Option<TermBg> {
+    let text = std::fs::read_to_string(term_bg_path()?).ok()?;
+    parse_term_bg(&text, &terminal_identity())
 }
 
 /// Ask the terminal for its background via OSC 11, remembering the outcome
@@ -236,11 +288,12 @@ fn probe_term_bg() -> Option<(u8, u8, u8)> {
         .map(|rgb| ((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8));
     if let Some(path) = term_bg_path() {
         let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let text = match answer {
-            Some((r, g, b)) => format!("{:02x}{:02x}{:02x}\n", r, g, b),
-            None => "none\n".to_string(),
+        let value = match answer {
+            Some((r, g, b)) => format!("{:02x}{:02x}{:02x}", r, g, b),
+            None => "none".to_string(),
         };
-        let _ = std::fs::write(path, text);
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::write(path, update_term_bg(&old, &terminal_identity(), &value));
     }
     answer
 }
@@ -508,6 +561,29 @@ impl CacheWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_term_bg_is_remembered_per_terminal() {
+        // tmux couldn't answer; foot could. Each keeps its own answer.
+        let text = update_term_bg("", "tmux+foot", "none");
+        let text = update_term_bg(&text, "foot", "fafafa");
+        assert!(matches!(parse_term_bg(&text, "tmux+foot"), Some(TermBg::Unanswered)));
+        assert!(matches!(parse_term_bg(&text, "foot"), Some(TermBg::Color(0xfa, 0xfa, 0xfa))));
+        assert!(parse_term_bg(&text, "alacritty").is_none(), "unknown terminals get asked");
+
+        // A new answer replaces that terminal's line only
+        let text = update_term_bg(&text, "foot", "1e2026");
+        assert!(matches!(parse_term_bg(&text, "foot"), Some(TermBg::Color(0x1e, 0x20, 0x26))));
+        assert!(matches!(parse_term_bg(&text, "tmux+foot"), Some(TermBg::Unanswered)));
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_old_single_value_term_bg_file_is_ignored() {
+        // The previous format held one value for every terminal
+        assert!(parse_term_bg("none\n", "foot").is_none());
+        assert_eq!(update_term_bg("none\n", "foot", "fafafa"), "foot fafafa\n");
+    }
 
     #[tokio::test]
     async fn test_a_panicking_task_still_reports_back() {

@@ -1,6 +1,7 @@
 use crate::app::{EventSource, MatchType, NavigationMode, PendingAction, SearchState, SetupState, SetupStep};
 use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
-use crate::cache::{clock, AttendeeStatus, DisplayEvent, EventCache, EventId, When};
+use crate::cache::{clock, AttendeeStatus, DisplayEvent, EventCache, EventId, When, DAY_MINUTES};
+use crate::config::DisplayConfig;
 use crate::logging::get_recent_logs;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
 use ratatui::buffer::Buffer;
@@ -116,9 +117,10 @@ pub fn get_term_bg() -> Option<(u8, u8, u8)> {
     }
 }
 
-/// Falls back to a dark background if the terminal never answered the query
+/// The terminal's background; if it never answered the query, the desktop
+/// theme's, and failing that a dark one
 fn term_bg() -> (u8, u8, u8) {
-    get_term_bg().unwrap_or((30, 32, 38))
+    get_term_bg().or(palette().background).unwrap_or((30, 32, 38))
 }
 
 /// Blend a color toward the terminal background (0.0 = unchanged, 1.0 = background)
@@ -138,6 +140,182 @@ fn free_block_color() -> Color {
     Color::Rgb(adj(r), adj(g), adj(b))
 }
 
+/// Free time outside working hours: halfway between the free shade and the
+/// background, so it still reads as a grid cell but clearly not bookable
+fn off_hours_color() -> Color {
+    let (r, g, b) = term_bg();
+    let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+    let shift: i16 = if luma > 128.0 { -9 } else { 10 };
+    let adj = |c: u8| -> u8 { (c as i16 + shift).clamp(0, 255) as u8 };
+    Color::Rgb(adj(r), adj(g), adj(b))
+}
+
+/// Source accents, and the background to assume when the terminal doesn't
+/// say. Defaults are mid-tones that read on light and dark terminals; on
+/// Omarchy they come from the active theme. (The week grid keeps its own
+/// tuned shades: themes remap "red" freely, and vivid theme blues made busy
+/// slots shout.)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Palette {
+    google: (u8, u8, u8),
+    icloud: (u8, u8, u8),
+    /// The theme's background, used when the terminal doesn't answer OSC 11
+    background: Option<(u8, u8, u8)>,
+    /// Theme colors are vivid; blend them toward the background so panel
+    /// labels stay calm. Defaults are already muted.
+    mute: f32,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            google: (96, 125, 168),
+            icloud: (152, 115, 168),
+            background: None,
+            mute: 0.0,
+        }
+    }
+}
+
+impl Palette {
+    /// Read an Omarchy `colors.toml` (`key = "#rrggbb"` lines). Any color it
+    /// doesn't define keeps its default.
+    fn from_omarchy_colors(text: &str) -> Self {
+        let hex = |key: &str| -> Option<(u8, u8, u8)> {
+            let line = text.lines().find(|l| l.split('=').next().is_some_and(|k| k.trim() == key))?;
+            let value = line.split_once('=')?.1.trim().trim_matches('"').strip_prefix('#')?;
+            let n = u32::from_str_radix(value.get(..6)?, 16).ok()?;
+            Some(((n >> 16) as u8, (n >> 8) as u8, n as u8))
+        };
+        let d = Self::default();
+        Self {
+            google: hex("blue").unwrap_or(d.google),
+            icloud: hex("magenta").unwrap_or(d.icloud),
+            background: hex("background"),
+            mute: 0.3,
+        }
+    }
+
+    /// The active Omarchy theme's palette, if there is one
+    fn from_omarchy() -> Option<Self> {
+        let home = dirs::home_dir()?;
+        [".local/state/omarchy/current/theme/colors.toml", ".config/omarchy/current/theme/colors.toml"]
+            .iter()
+            .find_map(|rel| std::fs::read_to_string(home.join(rel)).ok())
+            .map(|text| Self::from_omarchy_colors(&text))
+    }
+
+    fn color(&self, rgb: (u8, u8, u8)) -> Color {
+        blend_toward_bg(rgb, self.mute)
+    }
+}
+
+static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+
+/// Pick up the desktop theme's colors; call once at startup
+pub fn load_palette() {
+    let _ = PALETTE.set(Palette::from_omarchy().unwrap_or_default());
+}
+
+fn palette() -> Palette {
+    PALETTE.get().copied().unwrap_or_default()
+}
+
+fn google_accent() -> Color {
+    let p = palette();
+    p.color(p.google)
+}
+
+fn icloud_accent() -> Color {
+    let p = palette();
+    p.color(p.icloud)
+}
+
+/// Heatmap busy / double-booked shades, before any fading for past slots
+fn busy_rgb() -> (u8, u8, u8) {
+    colors::BUSY_RGB
+}
+
+fn overlap_rgb() -> (u8, u8, u8) {
+    colors::HEATMAP_OVERLAP_RGB
+}
+
+/// Formatting preferences for the frame being drawn. render() sets them from
+/// the config at the start of each frame, so the many small formatting
+/// helpers don't each need the config passed down.
+#[derive(Debug, Clone, Copy, Default)]
+struct Prefs {
+    twelve_hour: bool,
+    sunday_first: bool,
+    week_numbers: bool,
+}
+
+thread_local! {
+    static PREFS: std::cell::Cell<Prefs> = std::cell::Cell::new(Prefs::default());
+}
+
+fn prefs() -> Prefs {
+    PREFS.with(|p| p.get())
+}
+
+fn set_prefs(display: &DisplayConfig) {
+    let prefs = Prefs {
+        twelve_hour: display.twelve_hour(),
+        sunday_first: display.sunday_first(),
+        week_numbers: display.week_numbers,
+    };
+    PREFS.with(|p| p.set(prefs));
+}
+
+/// A clock time from minutes after midnight: "14:30", or "2:30pm" in 12-hour
+/// mode (midnight as the end of a day reads "24:00" / "12:00am")
+fn time_text(minutes: u16) -> String {
+    let (h, m) = (minutes / 60, minutes % 60);
+    if prefs().twelve_hour {
+        let (h12, half) = match h % 24 {
+            0 => (12, "am"),
+            h @ 1..=11 => (h, "am"),
+            12 => (12, "pm"),
+            h => (h - 12, "pm"),
+        };
+        format!("{}:{:02}{}", h12, m, half)
+    } else {
+        format!("{:02}:{:02}", h, m)
+    }
+}
+
+/// The time column for an event: "All day" or its start
+fn when_text(when: &When) -> String {
+    match when.start() {
+        None => "All day".to_string(),
+        Some(start) => time_text(start),
+    }
+}
+
+/// strftime pattern for a wall-clock time in another zone
+fn zone_time_pattern(with_day: bool) -> &'static str {
+    match (prefs().twelve_hour, with_day) {
+        (false, false) => "%H:%M",
+        (false, true) => "%a %H:%M",
+        (true, false) => "%-I:%M%P",
+        (true, true) => "%a %-I:%M%P",
+    }
+}
+
+/// Day of the week as a column, 0-based from the configured week start
+fn weekday_column(date: NaiveDate) -> u32 {
+    if prefs().sunday_first {
+        date.weekday().num_days_from_sunday()
+    } else {
+        date.weekday().num_days_from_monday()
+    }
+}
+
+/// Width of the month grid column, including week numbers when shown
+fn calendar_width() -> u16 {
+    if prefs().week_numbers { CALENDAR_WIDTH + 3 } else { CALENDAR_WIDTH }
+}
+
 const CALENDAR_WIDTH: u16 = 23;
 const MIN_PANEL_WIDTH: u16 = 25;
 
@@ -145,10 +323,6 @@ const MIN_PANEL_WIDTH: u16 = 25;
 // Semantic color constants
 mod colors {
     use ratatui::style::Color;
-
-    // Calendar sources (muted so panel labels read as chrome, not content)
-    pub const GOOGLE_ACCENT: Color = Color::Rgb(96, 125, 168);
-    pub const ICLOUD_ACCENT: Color = Color::Rgb(152, 115, 168);
 
     // Event states
     pub const CURRENT_EVENT: Color = Color::LightGreen;
@@ -162,8 +336,8 @@ mod colors {
     pub const SEPARATOR: Color = Color::DarkGray;
 
     // Details panel
-    pub const TITLE: Color = Color::White;
-    pub const TIME: Color = Color::White;
+    pub const TITLE: Color = Color::Reset;
+    pub const TIME: Color = Color::Reset;
     pub const ACTION: Color = Color::LightGreen;
 
     // Overlap indicator
@@ -174,8 +348,6 @@ mod colors {
     // background at runtime (see free_block_color / blend_toward_bg).
     pub const BUSY_RGB: (u8, u8, u8) = (84, 113, 156);
     pub const HEATMAP_OVERLAP_RGB: (u8, u8, u8) = (156, 85, 85);
-    pub const BUSY_BLOCK: Color = Color::Rgb(BUSY_RGB.0, BUSY_RGB.1, BUSY_RGB.2);
-    pub const HEATMAP_OVERLAP: Color = Color::Rgb(HEATMAP_OVERLAP_RGB.0, HEATMAP_OVERLAP_RGB.1, HEATMAP_OVERLAP_RGB.2);
 
     // Status bar
     pub const LOG_TEXT: Color = Color::Cyan;
@@ -217,6 +389,8 @@ pub struct RenderState<'a> {
     pub show_help: bool,
     // Setup wizard
     pub setup: Option<&'a SetupState>,
+    /// Optional display preferences (second time zone, working hours)
+    pub display: &'a DisplayConfig,
     /// The clock for this frame (injected so rendering is deterministic in tests)
     pub now: DateTime<Local>,
 }
@@ -312,6 +486,7 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
     let (term_width, term_height) = (area.width, area.height);
     let p = &mut Pen::new(frame.buffer_mut());
     let today = state.now.date_naive();
+    set_prefs(state.display);
 
     // Setup wizard takes over the whole screen
     if let Some(setup) = state.setup {
@@ -398,14 +573,29 @@ pub fn render(frame: &mut Frame, state: &RenderState) {
         // Confirmation mode controls
         " y/Enter:confirm n/Esc:cancel".to_string()
     } else {
-        // Calm footer: the full keymap lives in the ? overlay
+        // Calm footer: the keys that apply right now; the full keymap lives
+        // in the ? overlay
         let mut c = String::from(" ? help \u{00B7} q quit");
-        if state.navigation_mode == NavigationMode::Day {
+        if state.navigation_mode == NavigationMode::Event {
+            let selected = match state.selected_source {
+                EventSource::Google => state.events.google.get(state.selected_date),
+                EventSource::ICloud => state.events.icloud.get(state.selected_date),
+            }
+            .get(state.selected_event_index);
+            if let Some(event) = selected {
+                for action in event_actions(event) {
+                    c.push_str(" \u{00B7} ");
+                    c.push_str(action);
+                }
+            }
+            c.push_str(" \u{00B7} Tab other panel \u{00B7} Esc back");
+        } else if state.navigation_mode == NavigationMode::Day {
+            c.push_str(" \u{00B7} Enter events");
             if !state.google_auth.is_authenticated() {
-                c.push_str(" \u{00B7} g connect work");
+                c.push_str(&format!(" \u{00B7} g connect {}", state.display.google_label().to_lowercase()));
             }
             if !state.icloud_auth.is_authenticated() {
-                c.push_str(" \u{00B7} i connect personal");
+                c.push_str(&format!(" \u{00B7} i connect {}", state.display.icloud_label().to_lowercase()));
             }
         }
         c
@@ -425,12 +615,12 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
     let events_panel_width: u16;
     let details_panel_width: u16;
 
-    let cal_width = CALENDAR_WIDTH;
+    let cal_width = calendar_width();
 
     if in_event_mode {
         let available = term_width.saturating_sub(cal_width + 2);
-        // Details panel: fixed width or 1/3 of available
-        details_panel_width = (available / 3).clamp(MIN_PANEL_WIDTH, 40);
+        // Details panel: two fifths of the space, wider on wide terminals
+        details_panel_width = (available * 2 / 5).clamp(MIN_PANEL_WIDTH, 60);
         events_panel_width = available.saturating_sub(details_panel_width + 1);
     } else {
         events_panel_width = term_width.saturating_sub(cal_width + 1);
@@ -441,22 +631,40 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
     let header_rows = 2u16;
 
     // Render calendar on left
-    render_calendar(p, state.current_date, state.selected_date, state.now, state.events, state.google_loading || state.icloud_loading, term_height);
+    render_calendar(p, state.current_date, state.selected_date, state.now, state.events, state.google_loading || state.icloud_loading, state.display.working_minutes(), term_height);
 
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
         let events_x = cal_width + 1;
 
-        // Events column header: selected date
+        // Events column header: selected date, and the time in the second zone
         p.move_to(events_x, 0);
         p.bold();
         p.print(&format!("{}", state.selected_date.format("%a %b %d")));
         p.reset();
+        let second_tz = state.display.second_tz();
+        if let Some((tz, label)) = second_tz {
+            let there = state.now.with_timezone(&tz);
+            let when = there.format(zone_time_pattern(there.date_naive() != today)).to_string();
+            p.fg(Color::DarkGray);
+            p.print(&format!("   {} {}", label, when));
+            p.reset();
+        }
 
         let google_events = state.events.google.get(state.selected_date);
         let icloud_events = state.events.icloud.get(state.selected_date);
         let is_past_day = state.selected_date < today;
         let (google_overlaps, icloud_overlaps) = compute_overlapping_events(google_events, icloud_events);
+
+        // Free stretches between events; on today only what's still ahead
+        let gaps = if is_past_day {
+            Vec::new()
+        } else {
+            let from = if is_today { (current_time.hour() * 60 + current_time.minute()) as u16 } else { 0 };
+            free_gaps(google_events, icloud_events, from, state.display.working_minutes())
+        };
+        let google_list = panel_rows(google_events, EventSource::Google, &gaps);
+        let icloud_list = panel_rows(icloud_events, EventSource::ICloud, &gaps);
 
         // Selection info for highlighting
         let google_selected = if in_event_mode && state.selected_source == EventSource::Google {
@@ -477,8 +685,8 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
         let available = term_height.saturating_sub(header_rows + reserved_bottom) as usize;
         // two panel headers + one blank row between panels
         let content_budget = available.saturating_sub(3).max(2);
-        let google_needed = google_events.len().max(1);
-        let icloud_needed = icloud_events.len().max(1);
+        let google_needed = google_list.len().max(1);
+        let icloud_needed = icloud_list.len().max(1);
         let (google_rows, icloud_rows) = if google_needed + icloud_needed <= content_budget {
             (google_needed, icloud_needed)
         } else {
@@ -498,15 +706,19 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
             events_x,
             header_rows,
             events_panel_width,
-            "Work",
+            state.display.google_label(),
             google_events,
+            &google_list,
+            state.selected_date,
             state.google_loading,
-            colors::GOOGLE_ACCENT,
+            google_accent(),
             is_today,
             is_past_day,
             current_time,
             google_selected,
             &google_overlaps,
+            second_tz,
+            next_up(&state.events.google, state.selected_date, today).as_deref(),
             google_rows,
         );
 
@@ -520,17 +732,30 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
             events_x,
             personal_y,
             events_panel_width,
-            "Personal",
+            state.display.icloud_label(),
             icloud_events,
+            &icloud_list,
+            state.selected_date,
             state.icloud_loading,
-            colors::ICLOUD_ACCENT,
+            icloud_accent(),
             is_today,
             is_past_day,
             current_time,
             icloud_selected,
             &icloud_overlaps,
+            second_tz,
+            next_up(&state.events.icloud, state.selected_date, today).as_deref(),
             icloud_rows,
         );
+
+        // Whatever height is left goes to a glance at the next few days
+        let upcoming_y = personal_y + 1 + icloud_needed.min(icloud_rows) as u16 + 1;
+        let upcoming_end = term_height.saturating_sub(reserved_bottom);
+        if upcoming_end >= upcoming_y + 3 {
+            let days = (upcoming_end - upcoming_y - 1).min(5) as i64;
+            let width = events_panel_width.min(MAX_ROW_WIDTH + tz_width_for(second_tz));
+            render_upcoming(p, events_x, upcoming_y, width, state.events, state.selected_date, days);
+        }
     } else if events_panel_width >= 4 {
         // Terminal too narrow for the event panels — say so instead of showing nothing
         p.move_to(cal_width + 1, 0);
@@ -556,6 +781,90 @@ fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_wi
 
 }
 
+/// For an empty panel: the next thing in that calendar within two weeks,
+/// e.g. "Wed 14:00 Interview" (all-day entries like working location don't count)
+fn next_up(source: &crate::cache::SourceCache, after: NaiveDate, today: NaiveDate) -> Option<String> {
+    (1..=14).find_map(|offset| {
+        let date = after + Duration::days(offset);
+        source.get(date).iter()
+            .find(|e| e.accepted && !e.when.is_all_day())
+            .map(|e| format!("{} {}", format_smart_when(date, &e.when, today), e.title))
+    })
+}
+
+/// Compact agenda for the days after the selected one, one line per day:
+/// "Tue 06  09:00 Standup · 11:00 1:1 Ana · +2"
+fn render_upcoming(p: &mut Pen, x: u16, y: u16, width: u16, events: &EventCache, after: NaiveDate, days: i64) {
+    p.move_to(x, y);
+    p.fg(Color::DarkGray);
+    p.print("Coming up");
+    p.reset();
+
+    let width = width as usize;
+    for offset in 1..=days {
+        let date = after + Duration::days(offset);
+        let row = y + offset as u16;
+        let weekend = date.weekday().num_days_from_monday() >= 5;
+
+        p.move_to(x, row);
+        if weekend {
+            p.fg(Color::DarkGray);
+        } else {
+            p.bold();
+        }
+        p.print(&date.format("%a %d").to_string());
+        p.reset();
+
+        // Timed events you're going to, both calendars, in order. All-day
+        // entries (working location, holidays) would crowd out the meetings.
+        let mut day: Vec<&DisplayEvent> = events.google.get(date).iter()
+            .chain(events.icloud.get(date))
+            .filter(|e| e.accepted && !e.when.is_all_day() && !e.spans_days)
+            .collect();
+        day.sort_by_key(|e| e.when.sort_key());
+
+        p.move_to(x + 8, row);
+        if day.is_empty() {
+            p.fg(Color::DarkGray);
+            p.print("free");
+            p.reset();
+            continue;
+        }
+
+        // Fit as many as the line allows, leaving room for "+N"
+        let budget = width.saturating_sub(8);
+        let mut used = 0usize;
+        for (n, event) in day.iter().enumerate() {
+            let time = when_text(&event.when);
+            let item = format!("{} {}", time, event.title);
+            let sep = if n == 0 { 0 } else { 3 };
+            let left = day.len() - n - 1;
+            let reserve = if left > 0 { 5 } else { 0 };
+            let room = budget.saturating_sub(used + sep + reserve);
+            // Truncate the last item that fits rather than dropping it, but
+            // don't bother with a stub shorter than the time itself
+            if room < 12 {
+                p.fg(Color::DarkGray);
+                p.print(&format!(" +{}", day.len() - n));
+                p.reset();
+                break;
+            }
+            if sep > 0 {
+                p.fg(Color::DarkGray);
+                p.print(" \u{00B7} ");
+                p.reset();
+            }
+            let item = truncate_str(&item, room);
+            p.fg(Color::DarkGray);
+            p.print(&time);
+            p.reset();
+            p.print(&item[time.len()..]);
+            used += sep + item.width();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_calendar(
     p: &mut Pen,
     current_date: NaiveDate,
@@ -563,6 +872,7 @@ fn render_calendar(
     now: DateTime<Local>,
     events: &EventCache,
     is_loading: bool,
+    hours: Option<(u16, u16)>,
     term_height: u16,
 ) {
     let today = now.date_naive();
@@ -571,7 +881,8 @@ fn render_calendar(
     // Month header
     p.bold();
 
-    let cal_width = CALENDAR_WIDTH;
+    let cal_width = calendar_width();
+    let grid_x = cal_width - CALENDAR_WIDTH; // room for week numbers
     let loading_indicator = if is_loading { " *" } else { "" };
     let header = format!(
         "{} {}{}",
@@ -583,19 +894,29 @@ fn render_calendar(
     p.reset();
 
     // Weekday header
-    p.move_to(0, 2);
+    p.move_to(grid_x, 2);
     p.fg(Color::DarkGray);
-    p.print("Mo Tu We Th Fr Sa Su");
+    p.print(if prefs().sunday_first { "Su Mo Tu We Th Fr Sa" } else { "Mo Tu We Th Fr Sa Su" });
     p.reset();
 
     // Calendar grid
     let first_day = current_date.with_day(1).unwrap();
-    let start_weekday = first_day.weekday().num_days_from_monday();
+    let start_weekday = weekday_column(first_day);
     let days_in_month = days_in_month(current_date);
     let cols = 7;
 
     for row in 0..6 {
+        // ISO week number of the row (its Monday), dim, when enabled
+        let row_start = first_day - Duration::days(start_weekday as i64) + Duration::days(row as i64 * 7);
+        let in_month = row * 7 < start_weekday + days_in_month;
         p.move_to(0, 3 + row as u16);
+        if prefs().week_numbers && in_month {
+            let monday = row_start + Duration::days(if prefs().sunday_first { 1 } else { 0 });
+            p.fg(Color::DarkGray);
+            p.print(&format!("{:2} ", monday.iso_week().week()));
+            p.reset();
+        }
+        p.move_to(grid_x, 3 + row as u16);
 
         for col in 0..cols {
             let cell = row * 7 + col; // Always use 7-day weeks for calculation
@@ -606,15 +927,19 @@ fn render_calendar(
                 let date = first_day.with_day(day).unwrap();
                 let is_today = date == today;
                 let is_selected = date == selected_date;
-                let is_weekend = col >= 5;
+                // How booked the day is sets the number's weight: nothing
+                // booked recedes, a heavy day stands out
+                let booked = busy_minutes(events.google.get(date), events.icloud.get(date));
 
                 if is_selected {
                     // Explicit colors: Reverse over a dark theme made the cursor nearly invisible
                     p.bg(Color::LightCyan); p.fg(Color::Black);
                 } else if is_today {
                     p.fg(Color::LightGreen); p.bold();
-                } else if is_weekend {
+                } else if booked == 0 {
                     p.fg(Color::DarkGray);
+                } else if booked >= HEAVY_DAY_MINUTES {
+                    p.fg(Color::Reset); p.bold();
                 }
 
                 p.print(&format!("{:2} ", day));
@@ -625,7 +950,7 @@ fn render_calendar(
     }
 
     // Render week availability below the calendar grid
-    render_week_availability(p, events, selected_date, now, term_height);
+    render_week_availability(p, events, selected_date, now, hours, term_height);
 }
 
 /// An event's busy range in minutes from midnight; None for all-day, free
@@ -686,6 +1011,258 @@ fn compute_overlapping_events(
     (google_overlaps, icloud_overlaps)
 }
 
+/// Booked time from which a day reads as heavy on the month grid
+const HEAVY_DAY_MINUTES: u16 = 5 * 60;
+
+/// Shortest stretch of free time worth calling out between events
+const MIN_GAP_MINUTES: u16 = 30;
+/// ...and for free time that's already under way, which marks "now"
+const MIN_NOW_GAP_MINUTES: u16 = 5;
+
+/// One line of an event panel: an event (index into the day's list), or the
+/// free time that follows one
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PanelRow {
+    Event(usize),
+    /// Free minutes; `now` when the free time has already begun (today)
+    Gap { minutes: u16, now: bool },
+}
+
+/// A stretch of free time: the panel and event it follows, its length, and
+/// whether it's under way
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FreeGap {
+    source: EventSource,
+    after: usize,
+    minutes: u16,
+    now: bool,
+}
+
+/// Free time between busy blocks, across both calendars.
+///
+/// Each gap is attributed to the event that ends right before it, so it's
+/// listed once, under that event's panel. Only
+/// free time at or after `from` counts (pass the current time for today), and
+/// only within `hours` when working hours are set.
+fn free_gaps(
+    google: &[DisplayEvent],
+    icloud: &[DisplayEvent],
+    from: u16,
+    hours: Option<(u16, u16)>,
+) -> Vec<FreeGap> {
+    let mut busy: Vec<(u16, u16, EventSource, usize)> = google.iter().enumerate()
+        .filter_map(|(i, e)| e.busy_range().map(|(s, end)| (s, end, EventSource::Google, i)))
+        .chain(icloud.iter().enumerate()
+            .filter_map(|(i, e)| e.busy_range().map(|(s, end)| (s, end, EventSource::ICloud, i))))
+        .collect();
+    busy.sort_by_key(|b| (b.0, b.1));
+
+    let (lo, hi) = hours.unwrap_or((0, DAY_MINUTES));
+    let mut gaps = Vec::new();
+    let mut iter = busy.into_iter();
+    let Some((_, mut block_end, mut src, mut idx)) = iter.next() else { return gaps };
+    for (start, end, s, i) in iter {
+        if start > block_end {
+            let free_from = block_end.max(from).max(lo);
+            let free_to = start.min(hi);
+            // Free time already under way marks "now", so even a short one shows
+            let now = from > block_end && from > lo;
+            let min = if now { MIN_NOW_GAP_MINUTES } else { MIN_GAP_MINUTES };
+            if free_to >= free_from + min {
+                gaps.push(FreeGap { source: src, after: idx, minutes: free_to - free_from, now });
+            }
+        }
+        if end > block_end {
+            (block_end, src, idx) = (end, s, i);
+        }
+    }
+    gaps
+}
+
+/// Interleave a panel's events with the gaps anchored in it. A gap goes after
+/// its anchor event and after anything else that starts before the free time
+/// does (a declined or "free" event inside the busy block).
+fn panel_rows(events: &[DisplayEvent], source: EventSource, gaps: &[FreeGap]) -> Vec<PanelRow> {
+    let mut rows: Vec<PanelRow> = (0..events.len()).map(PanelRow::Event).collect();
+    let mut anchored: Vec<(usize, PanelRow)> = gaps.iter()
+        .filter(|g| g.source == source && g.after < events.len())
+        .map(|g| {
+            let gap_start = events[g.after].busy_range().map_or(0, |(_, end)| end);
+            let mut pos = g.after + 1;
+            while pos < events.len() && events[pos].when.start().is_some_and(|s| s < gap_start) {
+                pos += 1;
+            }
+            (pos, PanelRow::Gap { minutes: g.minutes, now: g.now })
+        })
+        .collect();
+    // Insert from the back so earlier positions stay valid
+    anchored.sort_by_key(|&(pos, _)| std::cmp::Reverse(pos));
+    for (pos, row) in anchored {
+        rows.insert(pos, row);
+    }
+    rows
+}
+
+/// Widest an event row gets (without the second-zone column)
+const MAX_ROW_WIDTH: u16 = 64;
+
+/// Columns the second-zone time takes in an event row
+fn tz_width_for(second_tz: Option<(chrono_tz::Tz, &str)>) -> u16 {
+    match (second_tz.is_some(), prefs().twelve_hour) {
+        (false, _) => 0,
+        (true, false) => 10, // "Tue 01:00 "
+        (true, true) => 12,  // "Tue 12:30pm "
+    }
+}
+
+/// Compact length for the duration column: "30m", "1h", "1h30"
+fn format_length(minutes: u16) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{}m", m),
+        (h, 0) => format!("{}h", h),
+        (h, m) => format!("{}h{:02}", h, m),
+    }
+}
+
+/// Short name of the meeting service behind a link
+fn meeting_kind(url: &str) -> &'static str {
+    if url.contains("zoom.us") || url.starts_with("zoommtg:") {
+        "zoom"
+    } else if url.contains("meet.google.com") {
+        "meet"
+    } else if url.contains("teams.microsoft.com") || url.contains("teams.live.com") {
+        "teams"
+    } else {
+        "link"
+    }
+}
+
+/// A location worth showing in a list row: not empty and not just a URL
+/// (meeting links already show as the meeting kind)
+fn display_location(event: &DisplayEvent) -> Option<&str> {
+    let loc = event.location.as_deref()?.trim();
+    (!loc.is_empty() && !loc.contains("://")).then_some(loc)
+}
+
+/// Total minutes the day is booked, across both calendars (overlaps counted once)
+fn busy_minutes(google: &[DisplayEvent], icloud: &[DisplayEvent]) -> u16 {
+    let mut ranges: Vec<(u16, u16)> = google.iter().chain(icloud).filter_map(|e| e.busy_range()).collect();
+    ranges.sort();
+    let mut total = 0;
+    let mut covered_to = 0;
+    for (start, end) in ranges {
+        let start = start.max(covered_to);
+        if end > start {
+            total += end - start;
+            covered_to = end;
+        }
+    }
+    total
+}
+
+/// Event descriptions as plain text: Google sends HTML, iCloud plain text.
+/// Line-breaking tags become newlines, other tags are dropped, common
+/// entities decoded, and runs of blank lines collapsed.
+fn description_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let Some(gt) = rest[lt..].find('>') else {
+            out.push_str(&rest[lt..]);
+            rest = "";
+            break;
+        };
+        let tag = rest[lt + 1..lt + gt].trim_start_matches('/').to_ascii_lowercase();
+        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        match name {
+            "br" | "p" | "div" | "tr" | "h1" | "h2" | "h3" => out.push('\n'),
+            "li" if !rest[lt + 1..].starts_with('/') => out.push_str("\n\u{2022} "),
+            _ => {}
+        }
+        rest = &rest[lt + gt + 1..];
+    }
+    out.push_str(rest);
+
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+
+    let mut lines: Vec<&str> = Vec::new();
+    for line in decoded.lines().map(str::trim_end) {
+        if line.trim().is_empty() && lines.last().is_none_or(|l| l.trim().is_empty()) {
+            continue;
+        }
+        lines.push(line);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Word-wrap text to a display width; words longer than a line are split
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut used = 0usize;
+        for word in paragraph.split_whitespace() {
+            let w = word.width();
+            if used > 0 && used + 1 + w > width {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            if used > 0 {
+                line.push(' ');
+                used += 1;
+            }
+            for c in word.chars() {
+                let cw = c.width().unwrap_or(0);
+                if used + cw > width {
+                    out.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                line.push(c);
+                used += cw;
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// "6 going · 1 declined · 2 no reply"
+fn attendee_summary(attendees: &[crate::cache::DisplayAttendee]) -> String {
+    let count = |f: fn(&AttendeeStatus) -> bool| attendees.iter().filter(|a| f(&a.status)).count();
+    let parts = [
+        (count(|s| matches!(s, AttendeeStatus::Accepted | AttendeeStatus::Organizer)), "going"),
+        (count(|s| matches!(s, AttendeeStatus::Tentative)), "maybe"),
+        (count(|s| matches!(s, AttendeeStatus::Declined)), "declined"),
+        (count(|s| matches!(s, AttendeeStatus::NeedsAction)), "no reply"),
+    ];
+    parts.iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{} {}", n, label))
+        .collect::<Vec<_>>()
+        .join(" \u{00B7} ")
+}
+
+/// A local wall-clock time on `date` shown in another zone: "22:00", or
+/// "Tue 01:00" when it falls on a different day there
+fn time_in_zone(date: NaiveDate, minutes: u16, tz: chrono_tz::Tz) -> Option<String> {
+    use chrono::TimeZone;
+    let local = Local.from_local_datetime(&date.and_time(clock(minutes)?)).earliest()?;
+    let there = local.with_timezone(&tz);
+    Some(there.format(zone_time_pattern(there.date_naive() != date)).to_string())
+}
+
 /// Count how many time-blocking events cover a given slot (across both sources).
 fn count_slot_events(google_events: &[DisplayEvent], icloud_events: &[DisplayEvent], slot_start: u32, slot_end: u32) -> usize {
     google_events.iter().chain(icloud_events.iter())
@@ -695,9 +1272,8 @@ fn count_slot_events(google_events: &[DisplayEvent], icloud_events: &[DisplayEve
 }
 
 /// Get the Monday of the week containing the given date
-fn get_week_monday(date: NaiveDate) -> NaiveDate {
-    let weekday = date.weekday().num_days_from_monday();
-    date - Duration::days(weekday as i64)
+fn get_week_start(date: NaiveDate) -> NaiveDate {
+    date - Duration::days(weekday_column(date) as i64)
 }
 
 /// Render week availability grid below the calendar
@@ -706,10 +1282,11 @@ fn render_week_availability(
     events: &EventCache,
     selected_date: NaiveDate,
     now: DateTime<Local>,
+    hours: Option<(u16, u16)>,
     term_height: u16,
 ) {
     let start_row = 10u16; // Below the calendar grid
-    let monday = get_week_monday(selected_date);
+    let monday = get_week_start(selected_date);
     let today = now.date_naive();
     let current_minutes = now.hour() * 60 + now.minute();
     let num_days = 7;
@@ -720,7 +1297,7 @@ fn render_week_availability(
     p.print("   ");
     for day_offset in 0..7i64 {
         let date = monday + Duration::days(day_offset);
-        let letter = ["M", "T", "W", "T", "F", "S", "S"][day_offset as usize];
+        let letter = date.format("%a").to_string().chars().next().unwrap_or(' ');
         if date == selected_date {
             p.fg(colors::SELECTED); p.bold();
         } else if date == today {
@@ -774,41 +1351,32 @@ fn render_week_availability(
 
             // Past slots fade toward the real terminal background
             let color_for = |count: usize, past: bool| -> Color {
-                let rgb = if count >= 2 { colors::HEATMAP_OVERLAP_RGB } else { colors::BUSY_RGB };
+                let rgb = if count >= 2 { overlap_rgb() } else { busy_rgb() };
                 if past {
                     blend_toward_bg(rgb, 0.55)
                 } else {
                     Color::Rgb(rgb.0, rgb.1, rgb.2)
                 }
             };
-            let free = free_block_color();
+            // Free time outside working hours fades further, so the hours
+            // you'd actually book stand out
+            let free_for = |slot_start: u32, slot_end: u32| -> Color {
+                match hours {
+                    Some((lo, hi)) if slot_start < lo as u32 || slot_end > hi as u32 => off_hours_color(),
+                    _ => free_block_color(),
+                }
+            };
+            let top = if first_half_busy { color_for(first_half_count, first_half_past) } else { free_for(slot1_start, slot1_end) };
+            let bot = if second_half_busy { color_for(second_half_count, second_half_past) } else { free_for(slot2_start, slot2_end) };
 
-            // Vertical half-blocks: ▀ = first half-hour busy, ▄ = second.
-            // The free half is painted with the derived free shade via bg color.
-            match (first_half_busy, second_half_busy) {
-                (true, true) => {
-                    let top = color_for(first_half_count, first_half_past);
-                    let bot = color_for(second_half_count, second_half_past);
-                    if top == bot {
-                        p.fg(top);
-                        p.print("██");
-                    } else {
-                        p.fg(top); p.bg(bot);
-                        p.print("▀▀");
-                    }
-                }
-                (true, false) => {
-                    p.fg(color_for(first_half_count, first_half_past)); p.bg(free);
-                    p.print("▀▀");
-                }
-                (false, true) => {
-                    p.fg(color_for(second_half_count, second_half_past)); p.bg(free);
-                    p.print("▄▄");
-                }
-                (false, false) => {
-                    p.fg(free);
-                    p.print("██");
-                }
+            // Vertical half-blocks: ▀ in the first half-hour's color over the
+            // second's as background; a solid block when both match
+            if top == bot {
+                p.fg(top);
+                p.print("██");
+            } else {
+                p.fg(top); p.bg(bot);
+                p.print("▀▀");
             }
             p.reset();
             p.print(" ");
@@ -854,6 +1422,7 @@ fn render_week_availability(
 }
 
 /// Render event panel with title and events
+#[allow(clippy::too_many_arguments)]
 fn render_event_panel(
     p: &mut Pen,
     x: u16,
@@ -861,6 +1430,8 @@ fn render_event_panel(
     width: u16,
     title: &str,
     events: &[DisplayEvent],
+    rows: &[PanelRow],
+    date: NaiveDate,
     is_loading: bool,
     accent_color: Color,
     is_today: bool,
@@ -868,6 +1439,8 @@ fn render_event_panel(
     current_time: NaiveTime,
     selected_index: Option<usize>,
     overlapping_indices: &HashSet<usize>,
+    second_tz: Option<(chrono_tz::Tz, &str)>,
+    next_up: Option<&str>,
     max_rows: usize,
 ) {
     // Panel header: just the label in a muted accent — no rules
@@ -878,6 +1451,9 @@ fn render_event_panel(
     p.reset();
 
     let content_start = y + 1;
+    // Rows stop at a readable length on wide terminals, keeping the duration
+    // column within eye reach of the titles
+    let width = width.min(MAX_ROW_WIDTH + tz_width_for(second_tz));
 
     if events.is_empty() {
         p.move_to(x, content_start);
@@ -885,7 +1461,11 @@ fn render_event_panel(
         if is_loading {
             p.print("Loading...");
         } else {
-            p.print("No events");
+            let text = match next_up {
+                Some(next) => format!("Nothing scheduled \u{00B7} next {}", next),
+                None => "Nothing scheduled".to_string(),
+            };
+            p.print(&truncate_str(&text, width as usize));
         }
         p.reset();
         return;
@@ -898,14 +1478,26 @@ fn render_event_panel(
         (None, None)
     };
 
+    // Columns: marker + time + gutter, an optional second-zone time, the title,
+    // then (when there's room) a duration and the meeting service on the right
+    let tz_width = tz_width_for(second_tz);
+    let title_x = x + 10 + tz_width;
+    let show_length = width >= 40 + tz_width;
+    // Reserved even when this panel has no links, so both panels' columns line up
+    let show_kind = width >= 52 + tz_width;
+    let trail_width: u16 = if show_length { 6 } else { 0 } + if show_kind { 6 } else { 0 };
+    let title_width = width.saturating_sub(10 + tz_width + trail_width + 1) as usize;
+
     // Scroll window: keep the selected event visible, reserve the last row
     // for a "+N more" indicator when the panel can't fit everything
-    let total = events.len();
+    let total = rows.len();
     let (start, visible) = if total <= max_rows {
         (0usize, total)
     } else {
         let visible = max_rows.saturating_sub(1).max(1);
-        let sel = selected_index.unwrap_or(0);
+        let sel = selected_index
+            .and_then(|s| rows.iter().position(|r| *r == PanelRow::Event(s)))
+            .unwrap_or(0);
         let mut start = if sel >= visible { sel + 1 - visible } else { 0 };
         if start + visible > total {
             start = total - visible;
@@ -913,9 +1505,27 @@ fn render_event_panel(
         (start, visible)
     };
 
-    for (row, i) in (start..start + visible).enumerate() {
+    for (row, panel_row) in rows[start..start + visible].iter().enumerate() {
+        let row_y = content_start + row as u16;
+        let i = match *panel_row {
+            PanelRow::Gap { minutes, now } => {
+                p.move_to(title_x, row_y);
+                // Free time under way doubles as the "now" marker in today's list
+                let text = if now {
+                    p.fg(colors::CURRENT_EVENT);
+                    format!("\u{2500}\u{2500} free now \u{00B7} {} \u{2500}\u{2500}", format_duration(minutes as i64))
+                } else {
+                    p.fg(Color::DarkGray);
+                    format!("\u{2500}\u{2500} {} free \u{2500}\u{2500}", format_duration(minutes as i64))
+                };
+                p.print(&truncate_str(&text, title_width + trail_width as usize));
+                p.reset();
+                continue;
+            }
+            PanelRow::Event(i) => i,
+        };
         let event = &events[i];
-        p.move_to(x, content_start + row as u16);
+        p.move_to(x, row_y);
 
         let is_selected = selected_index == Some(i);
         let is_current = current_event_idx == Some(i);
@@ -924,13 +1534,14 @@ fn render_event_panel(
         let is_unaccepted = !event.accepted;
         let is_free_event = event.is_free;
         let is_overlapping = overlapping_indices.contains(&i);
+        let is_receding = is_past_day || is_unaccepted || is_past_event;
 
         // Choose color based on event status
         // Priority: Selected > Past/Unaccepted > Free > Current (Green) > Overlap (Red) > Next (Yellow) > Default
         // "Happening now" beats the overlap warning — the red still shows on the other event
         let event_color = if is_selected {
             colors::SELECTED
-        } else if is_past_day || is_unaccepted || is_past_event {
+        } else if is_receding {
             colors::PAST_EVENT
         } else if is_free_event {
             colors::FREE_EVENT
@@ -966,42 +1577,104 @@ fn render_event_panel(
         if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
             p.bold();
         }
-        p.print(&format!("{:>7}  ", event.time_label()));
+        p.print(&format!("{:>7}  ", when_text(&event.when)));
         p.reset();
+
+        // The same start in the second zone, dim
+        if let Some((tz, _)) = second_tz
+            && let Some(there) = event.when.start().and_then(|m| time_in_zone(date, m, tz))
+        {
+            p.fg(Color::DarkGray);
+            p.print(&format!("{:>w$} ", there, w = tz_width as usize - 1));
+            p.reset();
+        }
 
         // Title stays uncolored unless the row is selected or receding —
         // status colors live on the marker and time only
         let title_color = if is_selected {
             colors::SELECTED
-        } else if is_past_day || is_unaccepted || is_past_event {
+        } else if is_receding {
             colors::PAST_EVENT
         } else if is_free_event {
             colors::FREE_EVENT
         } else {
             Color::Reset
         };
+        p.move_to(title_x, row_y);
         p.fg(title_color);
         if is_selected {
             p.bold();
         }
-        let title_width = width.saturating_sub(11) as usize;
-        p.print(&truncate_str(&event.title, title_width).to_string());
+        let title = truncate_str(&event.title, title_width);
+        p.print(&title);
+        p.reset();
+
+        // Location right-aligned in whatever the title leaves free
+        let spare = title_width.saturating_sub(title.width() + 2);
+        if let Some(loc) = display_location(event)
+            && spare >= 8
+        {
+            let loc = truncate_str(loc, spare.min(30));
+            p.move_to(title_x + (title_width - loc.width()) as u16, row_y);
+            p.fg(Color::DarkGray);
+            p.print(&loc);
+            p.reset();
+        }
+
+        // Duration and meeting service, dim, in fixed right-hand columns
+        let mut trail_x = x + width - trail_width;
+        p.fg(Color::DarkGray);
+        if show_length {
+            let length = match event.when {
+                When::Timed { start, end: Some(end) } if !event.spans_days => format_length(end - start),
+                _ => String::new(),
+            };
+            p.move_to(trail_x, row_y);
+            p.print(&format!("{:>5} ", length));
+            trail_x += 6;
+        }
+        if show_kind && let Some(ref url) = event.meeting_url {
+            p.move_to(trail_x, row_y);
+            p.print(meeting_kind(url));
+        }
         p.reset();
     }
 
-    // Clipped-events indicator on the reserved last row
+    // Clipped-rows indicator on the reserved last row, counting events only
     if total > visible {
-        let below = total - (start + visible);
+        let count = |r: &[PanelRow]| r.iter().filter(|r| matches!(r, PanelRow::Event(_))).count();
+        let above = count(&rows[..start]);
+        let below = count(&rows[start + visible..]);
         p.move_to(x, content_start + visible as u16);
         p.fg(Color::DarkGray);
-        let indicator = match (start > 0, below > 0) {
-            (true, true) => format!(" \u{2026} {} above \u{00B7} {} more", start, below),
-            (true, false) => format!(" \u{2026} {} above", start),
-            _ => format!(" \u{2026} +{} more", below),
+        let indicator = match (above > 0, below > 0) {
+            (true, true) => format!(" \u{2026} {} above \u{00B7} {} more", above, below),
+            (true, false) => format!(" \u{2026} {} above", above),
+            (false, true) => format!(" \u{2026} +{} more", below),
+            (false, false) => " \u{2026}".to_string(),
         };
         p.print(&truncate_str(&indicator, width as usize).to_string());
         p.reset();
     }
+}
+
+/// Keys that act on an event, for the footer: join if it has a link, RSVP
+/// for Google invites, delete where the source supports it
+fn event_actions(event: &DisplayEvent) -> Vec<&'static str> {
+    let mut actions = Vec::new();
+    if event.meeting_url.is_some() {
+        actions.push("J join");
+    }
+    match &event.id {
+        EventId::Google { .. } => {
+            actions.push(if event.accepted { "d decline" } else { "a accept" });
+            actions.push("x delete");
+        }
+        // EventKit events have no CalDAV resource to delete
+        EventId::ICloud { calendar_url, .. } if calendar_url.is_empty() => {}
+        EventId::ICloud { .. } => actions.push("x delete"),
+    }
+    actions
 }
 
 /// Render event details in a column
@@ -1027,18 +1700,26 @@ fn render_event_details_column(
 
     let mut current_row = y;
 
-    // Title doubles as the panel header
-    p.move_to(content_x, current_row);
+    // Title doubles as the panel header; long ones wrap onto a second line
+    let mut title_lines = wrap_text(&event.title, content_width);
+    if title_lines.len() > 2 {
+        let rest = title_lines[1..].join(" ");
+        title_lines.truncate(1);
+        title_lines.push(truncate_str(&rest, content_width));
+    }
     p.fg(colors::TITLE); p.bold();
-    p.print(&truncate_str(&event.title, content_width).to_string());
+    for line in &title_lines {
+        p.move_to(content_x, current_row);
+        p.print(line);
+        current_row += 1;
+    }
     p.reset();
-    current_row += 1;
 
     // Time, with the calendar source as a dim suffix
     p.move_to(content_x, current_row);
-    let time_text = match event.when.end_label() {
-        Some(end) => format!("{} \u{2013} {}", event.time_label(), end),
-        None => event.time_label(),
+    let time_text = match event.when.end() {
+        Some(end) => format!("{} \u{2013} {}", when_text(&event.when), time_text(end)),
+        None => when_text(&event.when),
     };
     p.fg(colors::TIME);
     p.print(&truncate_str(&time_text, content_width).to_string());
@@ -1068,31 +1749,37 @@ fn render_event_details_column(
             current_row += 1;
         }
 
-    // Actions on one dim line
-    current_row += 1; // blank line before actions
-    if current_row < max_row {
-        let mut actions: Vec<&str> = Vec::new();
-        if event.meeting_url.is_some() {
-            actions.push("J join");
-        }
-        if matches!(event.id, EventId::Google { .. }) {
-            actions.push(if event.accepted { "d decline" } else { "a accept" });
-        }
-        actions.push("x delete");
+    // (The keys for this event live in the footer)
 
-        p.move_to(content_x, current_row);
-        p.fg(Color::DarkGray);
-        p.print(&truncate_str(&actions.join("  "), content_width).to_string());
+    // Description: agendas, dial-ins and doc links live here. It shares the
+    // remaining height with the participant list.
+    let description = event.description.as_deref().map(description_text).unwrap_or_default();
+    if !description.is_empty() && current_row + 1 < max_row {
+        current_row += 1; // blank line before the description
+        let room = (max_row - current_row) as usize;
+        let max_lines = if event.attendees.is_empty() { room } else { (room / 2).max(3).min(room) };
+        let lines = wrap_text(&description, content_width);
+        let shown = lines.len().min(max_lines);
+        p.fg(Color::Reset);
+        for (n, line) in lines.iter().take(shown).enumerate() {
+            p.move_to(content_x, current_row);
+            // Last visible line of a longer description ends in an ellipsis
+            if n + 1 == shown && lines.len() > shown {
+                p.print(&truncate_str(&format!("{} \u{2026}", line), content_width));
+            } else {
+                p.print(line);
+            }
+            current_row += 1;
+        }
         p.reset();
-        current_row += 1;
     }
 
-    // Participants
+    // Participants, headed by a one-line tally of responses
     current_row += 1; // blank line before participants
     if !event.attendees.is_empty() && current_row < max_row {
         p.move_to(content_x, current_row);
         p.fg(Color::DarkGray);
-        p.print("Participants");
+        p.print(&truncate_str(&attendee_summary(&event.attendees), content_width));
         p.reset();
         current_row += 1;
 
@@ -1194,7 +1881,7 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 fn format_smart_when(date: NaiveDate, when: &When, today: NaiveDate) -> String {
     let days = (date - today).num_days();
     let is_all_day = when.is_all_day();
-    let time_str = when.label();
+    let time_str = when_text(when);
 
     if days == 0 {
         if is_all_day { "today".to_string() } else { format!("today {}", time_str) }
@@ -1346,7 +2033,7 @@ fn render_setup_wizard(p: &mut Pen, setup: &SetupState, term_width: u16, term_he
                 if text.is_empty() && matches!(style, Style::Normal) && i > 0 {
                     let prev = &lines[i - 1];
                     if matches!(prev.1, Style::Normal) && (prev.0.contains("Paste") || prev.0.contains("Enter")) {
-                        p.fg(Color::White);
+                        p.fg(Color::Reset);
                         let display = truncate_str(il, max_content_width as usize);
                         p.print(&display.to_string());
                         p.reset();
@@ -1436,7 +2123,7 @@ fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, 
     let content_x = start_x + 2;
     let content_width = (modal_width.saturating_sub(4)) as usize;
     p.move_to(content_x, start_y + 1);
-    p.fg(Color::White); p.bold();
+    p.fg(Color::Reset); p.bold();
     let query_display = truncate_str(&search.query, content_width.saturating_sub(3));
     p.print(&format!("> {}_ ", query_display));
     p.reset();
@@ -1537,8 +2224,8 @@ fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, 
 
                 // Source color indicator
                 let source_color = match result.source {
-                    EventSource::Google => colors::GOOGLE_ACCENT,
-                    EventSource::ICloud => colors::ICLOUD_ACCENT,
+                    EventSource::Google => google_accent(),
+                    EventSource::ICloud => icloud_accent(),
                 };
                 p.fg(source_color);
                 let source_char = match result.event.id {
@@ -1549,7 +2236,7 @@ fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, 
 
                 // Title
                 let title_space = content_width.saturating_sub(2 + 12 + 2);
-                p.fg(if is_selected { colors::SELECTED } else { Color::White });
+                p.fg(if is_selected { colors::SELECTED } else { Color::Reset });
                 if is_selected {
                     p.bold();
                 }
@@ -1577,39 +2264,44 @@ fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, 
 
 /// Render the help overlay listing all keybindings and the availability legend
 fn render_help_modal(p: &mut Pen, term_width: u16, term_height: u16) {
+    use crate::keymap::Action::*;
     enum Line {
         Section(&'static str),
-        Item(&'static str, &'static str),
+        Item(String, &'static str),
         Legend,
         Note(&'static str),
     }
     use Line::*;
 
+    // Key labels come from the keymap in use, so rebound keys show as bound
+    let keys = crate::keymap::active();
+    let item = |actions: &[crate::keymap::Action], desc: &'static str| Item(keys.label_for(actions), desc);
     let lines = [
         Section("Navigate"),
-        Item("h/l ← →", "previous / next day"),
-        Item("j/k ↑ ↓", "previous / next week (or event)"),
-        Item("H/L", "previous / next month"),
-        Item("Enter / Esc", "browse events / back"),
-        Item("t / n", "go to today / current event"),
-        Item("^d / ^u", "month (days) · jump 10 (events)"),
-        Section("Event actions"),
-        Item("J", "join meeting & quit"),
-        Item("a / d", "accept / decline (Google)"),
-        Item("x", "delete event"),
+        item(&[PrevDay, NextDay], "previous / next day"),
+        item(&[PrevWeek, NextWeek], "previous / next week"),
+        item(&[PrevMonth, NextMonth], "previous / next month"),
+        item(&[EnterEvents, ExitEvents], "browse events / back"),
+        item(&[Today, Now], "go to today / current event"),
+        Section("Events"),
+        item(&[PrevEvent, NextEvent], "previous / next event"),
+        item(&[JumpEventsBack, JumpEventsForward], "jump 10 events"),
+        item(&[SwitchPanel], "other panel"),
+        item(&[Join], "join meeting & quit"),
+        item(&[Accept, Decline, Delete], "accept / decline / delete"),
         Section("Search & misc"),
-        Item("f", "search titles & people"),
-        Item("r / D / S", "refresh / logs / setup"),
-        Item("1 / 2", "open Google / iCloud in browser"),
-        Item("q", "quit"),
+        item(&[Search], "search titles & people"),
+        item(&[Refresh, ToggleLogs, Setup], "refresh / logs / setup"),
+        item(&[OpenGoogleWeb, OpenICloudWeb], "open Google / iCloud in browser"),
+        item(&[Quit], "quit"),
         Section("Week availability grid"),
         Legend,
-        Item("▀ / ▄", "first / second half-hour busy"),
-        Item("▴ ▾", "events before 08:00 / after 20:00"),
+        Item("▀ / ▄".to_string(), "first / second half-hour busy"),
+        Item("▴ ▾".to_string(), "events before 08:00 / after 20:00"),
         Note("Bulgarian phonetic keys work too · any key closes"),
     ];
 
-    let modal_width = 54u16.min(term_width.saturating_sub(2));
+    let modal_width = 56u16.min(term_width.saturating_sub(2));
     let modal_height = (lines.len() as u16 + 2).min(term_height.saturating_sub(1));
     let start_x = (term_width.saturating_sub(modal_width)) / 2;
     let start_y = (term_height.saturating_sub(modal_height)) / 2;
@@ -1653,18 +2345,18 @@ fn render_help_modal(p: &mut Pen, term_width: u16, term_height: u16) {
                 p.reset();
             }
             Item(keys, desc) => {
-                p.fg(Color::White);
-                p.print(&format!("{:>12}", keys));
+                p.fg(Color::Reset);
+                p.print(&format!("{:>14}", truncate_str(keys, 14)));
                 p.fg(Color::DarkGray);
                 p.print(&format!("  {}", desc));
                 p.reset();
             }
             Legend => {
-                p.fg(colors::BUSY_BLOCK);
-                p.print(&format!("{:>12}", "██"));
+                p.fg(Color::Rgb(busy_rgb().0, busy_rgb().1, busy_rgb().2));
+                p.print(&format!("{:>14}", "██"));
                 p.fg(Color::DarkGray);
                 p.print(" busy  ");
-                p.fg(colors::HEATMAP_OVERLAP);
+                p.fg(Color::Rgb(overlap_rgb().0, overlap_rgb().1, overlap_rgb().2));
                 p.print("██");
                 p.fg(Color::DarkGray);
                 p.print(" double-booked  ");
@@ -1737,11 +2429,11 @@ fn render_confirmation_modal(p: &mut Pen, action: &PendingAction, term_width: u1
     p.move_to(start_x + 2, start_y + 3);
     p.fg(colors::ACTION);
     p.print("[y/Enter]");
-    p.fg(Color::White);
+    p.fg(Color::Reset);
     p.print(" Yes  ");
     p.fg(Color::DarkGray);
     p.print("[n/Esc]");
-    p.fg(Color::White);
+    p.fg(Color::Reset);
     p.print(" No");
     p.reset();
 }
@@ -2064,6 +2756,17 @@ mod tests {
     }
 
     fn draw(width: u16, height: u16, events: &EventCache, mode: NavigationMode, show_help: bool) -> String {
+        draw_with(width, height, events, mode, show_help, &DisplayConfig::default())
+    }
+
+    fn draw_with(
+        width: u16,
+        height: u16,
+        events: &EventCache,
+        mode: NavigationMode,
+        show_help: bool,
+        display: &DisplayConfig,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let state = RenderState {
             current_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
@@ -2083,6 +2786,7 @@ mod tests {
             search: None,
             show_help,
             setup: None,
+            display,
             now: fixed_now(),
         };
         terminal.draw(|f| render(f, &state)).unwrap();
@@ -2128,14 +2832,267 @@ mod tests {
     #[test]
     fn test_render_never_panics_at_tiny_sizes() {
         let cache = sample_cache();
+        let display = sydney_nine_to_six();
         for w in 0..=30 {
             for h in 0..=12 {
                 for mode in [NavigationMode::Day, NavigationMode::Event] {
                     draw(w, h, &cache, mode, false);
                     draw(w, h, &cache, mode, true);
+                    draw_with(w, h, &cache, mode, false, &display);
                 }
             }
         }
+        // Widths around the column thresholds (duration, meeting kind, row cap)
+        for w in 30..=120 {
+            draw_with(w, 30, &cache, NavigationMode::Day, false, &display);
+            draw_with(w, 30, &cache, NavigationMode::Event, false, &display);
+        }
+    }
+
+    fn sydney_nine_to_six() -> DisplayConfig {
+        DisplayConfig {
+            second_timezone: Some("Australia/Sydney".to_string()),
+            working_hours: Some("09:00-18:00".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_render_rows_show_length_meeting_kind_and_free_time() {
+        let mut cache = sample_cache();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut events = cache.google.get(day).to_vec();
+        events[0].meeting_url = Some("https://dext.zoom.us/j/123".into());
+        cache.google.store(events, day);
+
+        let screen = draw(120, 40, &cache, NavigationMode::Day, false);
+        let standup = screen.lines().find(|l| l.contains("10:00  Standup")).unwrap();
+        assert!(standup.trim_end().ends_with("30m zoom"), "{standup}");
+        let lunch = screen.lines().find(|l| l.contains("12:00  Lunch")).unwrap();
+        assert!(lunch.trim_end().ends_with("1h"), "{lunch}");
+        // 10:30 → 12:00 is free across both calendars, listed under the standup
+        assert!(screen.contains("── 1h 30m free ──"), "{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+        assert_eq!(at("1h 30m free"), at("10:00  Standup") + 1);
+    }
+
+    #[test]
+    fn test_render_coming_up_lists_the_following_days() {
+        let mut cache = sample_cache();
+        let friday = NaiveDate::from_ymd_opt(2026, 1, 16).unwrap();
+        let mut review = make_event_with_end("15:00", "16:00");
+        review.date = friday;
+        review.title = "Design review".into();
+        cache.google.store(vec![review], friday);
+
+        let screen = draw(120, 40, &cache, NavigationMode::Day, false);
+        assert!(screen.contains("Coming up"), "{screen}");
+        assert!(screen.contains("Fri 16  15:00 Design review"), "{screen}");
+        assert!(screen.contains("Sat 17  free"), "{screen}");
+    }
+
+    #[test]
+    fn test_render_second_zone_in_rows_and_header() {
+        let cache = sample_cache();
+        let screen = draw_with(120, 40, &cache, NavigationMode::Day, false, &sydney_nine_to_six());
+        // 15 Jan is summer in Sydney (UTC+11); the expected time depends on the
+        // machine's zone, so compute it the same way the UI does
+        let there = time_in_zone(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(), 600, chrono_tz::Australia::Sydney).unwrap();
+        let standup = screen.lines().find(|l| l.contains("Standup")).unwrap();
+        assert!(standup.contains(&format!("10:00  {:>9} Standup", there)), "{standup}");
+        assert!(screen.lines().next().unwrap().contains("Sydney"), "{screen}");
+    }
+
+    #[test]
+    fn test_render_details_show_description_and_tally() {
+        let mut cache = EventCache::new();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut e = make_event_with_end("10:00", "11:00");
+        e.title = "Planning".into();
+        e.description = Some("<p>Agenda:</p><ul><li>Roadmap</li><li>Hiring</li></ul>".into());
+        e.attendees = vec![
+            crate::cache::DisplayAttendee { name: Some("Ana".into()), email: "a@x".into(), status: AttendeeStatus::Organizer },
+            crate::cache::DisplayAttendee { name: Some("Bo".into()), email: "b@x".into(), status: AttendeeStatus::Accepted },
+            crate::cache::DisplayAttendee { name: Some("Cy".into()), email: "c@x".into(), status: AttendeeStatus::NeedsAction },
+        ];
+        cache.google.store(vec![e], day);
+
+        let screen = draw(140, 40, &cache, NavigationMode::Event, false);
+        assert!(screen.contains("Agenda:"), "{screen}");
+        assert!(screen.contains("\u{2022} Roadmap"), "{screen}");
+        assert!(screen.contains("2 going \u{00B7} 1 no reply"), "{screen}");
+    }
+
+    #[test]
+    fn test_render_twelve_hour_sunday_first_week_numbers() {
+        let cache = sample_cache();
+        let display = DisplayConfig {
+            time_format: Some("12h".into()),
+            week_start: Some("sunday".into()),
+            week_numbers: true,
+            ..Default::default()
+        };
+        let screen = draw_with(120, 40, &cache, NavigationMode::Day, false, &display);
+        assert!(screen.contains("10:00am  Standup"), "{screen}");
+        assert!(screen.contains("12:00pm  Lunch"), "{screen}");
+        assert!(screen.contains("   Su Mo Tu We Th Fr Sa"), "{screen}");
+        // Jan 2026 starts on a Thursday: first row is ISO week 1, laid out from Sunday
+        let first_row = screen.lines().nth(3).unwrap();
+        // week number (3) + Su..We blank (4 × 3) + " 1"
+        assert!(first_row.starts_with(&format!(" 1 {} 1  2  3", " ".repeat(12))), "{first_row:?}");
+        // Heatmap columns follow the week start too
+        assert!(screen.contains(" S  M  T  W  T  F  S"), "{screen}");
+        // Prefs are per frame: the next default draw is back to 24h
+        assert!(draw(120, 40, &cache, NavigationMode::Day, false).contains("10:00  Standup"));
+    }
+
+    #[test]
+    fn test_time_text_twelve_hour() {
+        set_prefs(&DisplayConfig { time_format: Some("12h".into()), ..Default::default() });
+        assert_eq!(time_text(0), "12:00am");
+        assert_eq!(time_text(9 * 60 + 5), "9:05am");
+        assert_eq!(time_text(12 * 60), "12:00pm");
+        assert_eq!(time_text(23 * 60 + 59), "11:59pm");
+        assert_eq!(time_text(DAY_MINUTES), "12:00am");
+        set_prefs(&DisplayConfig::default());
+        assert_eq!(time_text(9 * 60 + 5), "09:05");
+    }
+
+    #[test]
+    fn test_palette_reads_omarchy_colors() {
+        let palette = Palette::from_omarchy_colors(
+            "mode = \"light\"\naccent = \"#3264eb\"\nblue = \"#3264eb\"\nred=\"#c900c4\"\n# magenta missing\n",
+        );
+        assert_eq!(palette.google, (0x32, 0x64, 0xeb));
+        assert_eq!(palette.icloud, Palette::default().icloud, "missing keys keep the default");
+        assert_eq!(palette.background, None);
+        let light = Palette::from_omarchy_colors("lighter_background = \"#ffffff\"\nbackground = \"#fafafa\"\n");
+        assert_eq!(light.background, Some((0xfa, 0xfa, 0xfa)), "exact key, not a prefix match");
+    }
+
+    #[test]
+    fn test_footer_lists_keys_for_the_selected_event() {
+        let mut cache = sample_cache();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut events = cache.google.get(day).to_vec();
+        events[0].meeting_url = Some("https://meet.google.com/abc".into());
+        cache.google.store(events, day);
+        let screen = draw(140, 40, &cache, NavigationMode::Event, false);
+        let footer = screen.lines().last().unwrap();
+        assert!(footer.contains("J join \u{00B7} d decline \u{00B7} x delete"), "{footer}");
+        assert!(footer.contains("Tab other panel"), "{footer}");
+    }
+
+    #[test]
+    fn test_empty_panel_points_to_the_next_event() {
+        let cache = sample_cache();
+        let screen = draw(120, 40, &cache, NavigationMode::Day, false);
+        // Nothing after the 15th in the sample, so just the plain note... until there is
+        assert!(!screen.contains("No events"), "{screen}");
+        let mut cache = EventCache::new();
+        let next = NaiveDate::from_ymd_opt(2026, 1, 19).unwrap();
+        let mut interview = make_icloud_event_with_end("14:00", "15:00");
+        interview.date = next;
+        interview.title = "Interview".into();
+        cache.icloud.store(vec![interview], next);
+        let screen = draw(120, 40, &cache, NavigationMode::Day, false);
+        assert!(screen.contains("Nothing scheduled \u{00B7} next Mon 14:00 Interview"), "{screen}");
+    }
+
+    #[test]
+    fn test_free_gaps_merge_both_calendars() {
+        // Work 09–10 and 14–15; Personal 11–12. Free: 10–11 and 12–14.
+        let google = [make_event_with_end("09:00", "10:00"), make_event_with_end("14:00", "15:00")];
+        let icloud = [make_icloud_event_with_end("11:00", "12:00")];
+        let gap = |source, after, minutes, now| FreeGap { source, after, minutes, now };
+        assert_eq!(
+            free_gaps(&google, &icloud, 0, None),
+            vec![gap(EventSource::Google, 0, 60, false), gap(EventSource::ICloud, 0, 120, false)]
+        );
+        // At 13:00 (today) the second gap is under way with an hour left
+        assert_eq!(free_gaps(&google, &icloud, 13 * 60, None), vec![gap(EventSource::ICloud, 0, 60, true)]);
+        // At 10:45 the first gap is under way: short, but shown as "now"
+        assert_eq!(
+            free_gaps(&google, &icloud, 10 * 60 + 45, None),
+            vec![gap(EventSource::Google, 0, 15, true), gap(EventSource::ICloud, 0, 120, false)]
+        );
+        // Working hours 09–13 cut the second gap down to 12–13
+        assert_eq!(
+            free_gaps(&google, &icloud, 0, Some((9 * 60, 13 * 60))),
+            vec![gap(EventSource::Google, 0, 60, false), gap(EventSource::ICloud, 0, 60, false)]
+        );
+    }
+
+    #[test]
+    fn test_free_gaps_ignore_short_and_nonblocking_time() {
+        let mut declined = make_event_with_end("10:30", "11:30");
+        declined.accepted = false;
+        // 10:00–10:20 is a 20m gap (too short); the declined event doesn't block
+        let google = [make_event_with_end("09:00", "10:00"), declined, make_event_with_end("10:20", "11:00")];
+        assert!(free_gaps(&google, &[], 0, None).is_empty());
+
+        // An event inside a longer one: the gap anchors on the one ending last
+        let google = [make_event_with_end("09:00", "12:00"), make_event_with_end("10:00", "11:00"), make_event_with_end("13:00", "14:00")];
+        assert_eq!(
+            free_gaps(&google, &[], 0, None),
+            vec![FreeGap { source: EventSource::Google, after: 0, minutes: 60, now: false }]
+        );
+    }
+
+    #[test]
+    fn test_panel_rows_place_gap_after_overlapping_events() {
+        // A declined event starting inside the busy block is listed before the
+        // free time; one starting later is listed after it, in time order
+        let mut declined_early = make_event_with_end("09:30", "10:30");
+        declined_early.accepted = false;
+        let mut declined_late = make_event_with_end("10:15", "10:45");
+        declined_late.accepted = false;
+        let events = [make_event_with_end("09:00", "10:00"), declined_early, declined_late, make_event_with_end("12:00", "13:00")];
+        let gaps = free_gaps(&events, &[], 0, None);
+        assert_eq!(
+            panel_rows(&events, EventSource::Google, &gaps),
+            vec![PanelRow::Event(0), PanelRow::Event(1), PanelRow::Gap { minutes: 120, now: false }, PanelRow::Event(2), PanelRow::Event(3)]
+        );
+        // Gaps anchored in the other panel don't show here
+        assert_eq!(panel_rows(&events, EventSource::ICloud, &gaps).len(), 4);
+    }
+
+    #[test]
+    fn test_busy_minutes_counts_overlaps_once() {
+        let google = [make_event_with_end("09:00", "11:00"), make_event_with_end("10:00", "12:00")];
+        let icloud = [make_icloud_event_with_end("11:30", "12:30"), make_icloud_event("All day")];
+        assert_eq!(busy_minutes(&google, &icloud), 210);
+    }
+
+    #[test]
+    fn test_format_length() {
+        assert_eq!(format_length(30), "30m");
+        assert_eq!(format_length(60), "1h");
+        assert_eq!(format_length(90), "1h30");
+        assert_eq!(format_length(125), "2h05");
+    }
+
+    #[test]
+    fn test_meeting_kind() {
+        assert_eq!(meeting_kind("https://dext.zoom.us/j/1"), "zoom");
+        assert_eq!(meeting_kind("https://meet.google.com/abc"), "meet");
+        assert_eq!(meeting_kind("https://teams.microsoft.com/l/x"), "teams");
+        assert_eq!(meeting_kind("https://example.com"), "link");
+    }
+
+    #[test]
+    fn test_description_text_strips_html() {
+        let html = "Hi&nbsp;all<br>Notes: <a href=\"https://x.y\">doc</a><br><br><br>Q&amp;A<ul><li>One</li><li>Two</li></ul>";
+        assert_eq!(description_text(html), "Hi all\nNotes: doc\n\nQ&A\n\u{2022} One\n\u{2022} Two");
+        assert_eq!(description_text("plain\n\n\n\ntext\n"), "plain\n\ntext");
+    }
+
+    #[test]
+    fn test_wrap_text() {
+        assert_eq!(wrap_text("the quick brown fox", 9), vec!["the quick", "brown fox"]);
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_text("a\n\nb", 10), vec!["a", "", "b"]);
     }
 
     #[test]

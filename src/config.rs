@@ -12,6 +12,78 @@ pub struct Config {
     pub google: Option<GoogleConfig>,
     #[serde(default)]
     pub icloud: Option<ICloudConfig>,
+    #[serde(default, skip_serializing_if = "DisplayConfig::is_default")]
+    pub display: DisplayConfig,
+    /// Rebound keys: action name → key or keys, e.g. `{ "join": "o" }`
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub keys: std::collections::HashMap<String, crate::keymap::KeySpec>,
+}
+
+/// Optional display preferences: `"display": { ... }` in config.json
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct DisplayConfig {
+    /// IANA zone shown next to local times, e.g. "Australia/Sydney"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_timezone: Option<String>,
+    /// Your working day as "HH:MM-HH:MM", e.g. "09:00-18:00"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_hours: Option<String>,
+    /// Panel names, for when Google isn't work or iCloud isn't personal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icloud_label: Option<String>,
+    /// "12h" for 9:15am-style times (default 24-hour)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_format: Option<String>,
+    /// "sunday" to start weeks on Sunday (default Monday)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_start: Option<String>,
+    /// ISO week numbers beside the month grid
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub week_numbers: bool,
+}
+
+impl DisplayConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn twelve_hour(&self) -> bool {
+        self.time_format.as_deref().is_some_and(|f| f.trim().eq_ignore_ascii_case("12h"))
+    }
+
+    pub fn sunday_first(&self) -> bool {
+        self.week_start.as_deref().is_some_and(|w| w.trim().eq_ignore_ascii_case("sunday"))
+    }
+
+    pub fn google_label(&self) -> &str {
+        self.google_label.as_deref().filter(|l| !l.trim().is_empty()).unwrap_or("Work")
+    }
+
+    pub fn icloud_label(&self) -> &str {
+        self.icloud_label.as_deref().filter(|l| !l.trim().is_empty()).unwrap_or("Personal")
+    }
+
+    /// The second zone, if set and known, with a short label ("Sydney")
+    pub fn second_tz(&self) -> Option<(chrono_tz::Tz, &str)> {
+        let name = self.second_timezone.as_deref()?;
+        let tz: chrono_tz::Tz = name.parse().ok()?;
+        let label = name.rsplit('/').next().unwrap_or(name);
+        Some((tz, label))
+    }
+
+    /// Working hours as (start, end) minutes from midnight; None if unset or malformed
+    pub fn working_minutes(&self) -> Option<(u16, u16)> {
+        let (start, end) = self.working_hours.as_deref()?.split_once('-')?;
+        let parse = |s: &str| -> Option<u16> {
+            let (h, m) = s.trim().split_once(':')?;
+            let (h, m): (u16, u16) = (h.parse().ok()?, m.parse().ok()?);
+            (h <= 24 && m < 60).then_some(h * 60 + m)
+        };
+        let (start, end) = (parse(start)?, parse(end)?);
+        (start < end && end <= 24 * 60).then_some((start, end))
+    }
 }
 
 /// Built-in Google OAuth credentials (public, identifies the app)
@@ -273,4 +345,38 @@ pub fn load_google_tokens() -> Result<Option<TokenInfo>> {
 pub fn load_icloud_tokens() -> Result<Option<ICloudTokens>> {
     let stored = load_all_tokens()?;
     Ok(stored.icloud)
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn test_display_config_parsing() {
+        let d = DisplayConfig {
+            second_timezone: Some("Australia/Sydney".to_string()),
+            working_hours: Some("09:00-18:30".to_string()),
+            google_label: Some("Dext".to_string()),
+            ..Default::default()
+        };
+        assert_eq!((d.google_label(), d.icloud_label()), ("Dext", "Personal"));
+        assert_eq!(d.second_tz().map(|(_, l)| l), Some("Sydney"));
+        assert_eq!(d.working_minutes(), Some((540, 1110)));
+
+        let bad = DisplayConfig {
+            second_timezone: Some("Mars/Olympus".to_string()),
+            working_hours: Some("18:00-09:00".to_string()),
+            ..Default::default()
+        };
+        assert!(bad.second_tz().is_none());
+        assert!(bad.working_minutes().is_none());
+    }
+
+    #[test]
+    fn test_display_config_left_out_of_saved_config_when_unset() {
+        let json = serde_json::to_string(&Config::default()).unwrap();
+        assert!(!json.contains("display"));
+        let parsed: Config = serde_json::from_str(r#"{"display":{"working_hours":"09:00-17:00"}}"#).unwrap();
+        assert_eq!(parsed.display.working_minutes(), Some((540, 1020)));
+    }
 }

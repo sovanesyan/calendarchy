@@ -565,6 +565,7 @@ impl App {
                 self.set_status(format!("Jumped to {}", self.selected_date.format("%a %b %d")));
             }
             ExitEvents => self.exit_event_mode(),
+            SwitchPanel => self.switch_panel(),
             Join => {
                 // Join, then quit: once you're in the call the app has done its job.
                 // Zoom links deep-link into the app instead of the browser

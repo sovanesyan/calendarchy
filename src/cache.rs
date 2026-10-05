@@ -179,7 +179,9 @@ pub struct DisplayEvent {
 }
 
 impl DisplayEvent {
-    /// Time column text: "All day" or "HH:MM"
+    /// Time column text: "All day" or "HH:MM" (the UI formats its own,
+    /// honouring the 12-hour setting)
+    #[cfg(test)]
     pub fn time_label(&self) -> String {
         self.when.label()
     }

@@ -28,11 +28,11 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 - **`main.rs`** - Runtime: event-driven loop (input thread, results channel, timer), executes `Effect`s, cache writer thread
 - **`app.rs`** - `App` state and navigation
 - **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
-- **`keymap.rs`** - Keys → `Action` per mode (Bulgarian phonetic keys normalised)
+- **`keymap.rs`** - Bindings table: keys → `Action` per mode (Bulgarian phonetic keys normalised); also generates the help overlay and applies `"keys"` overrides from config
 - **`sources.rs`** - Fetch layer shared by TUI and `--refresh`: shared HTTP client, `GoogleSession` token refresh, concurrent CalDAV
 - **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence)
-- **`config.rs`** - Config loading from `~/.config/calendarchy/config.json`, token storage
+- **`config.rs`** - Config loading from `~/.config/calendarchy/config.json` (incl. optional `display` prefs and `keys`), token storage
 - **`google/`** - OAuth device flow (`auth.rs`), Calendar API client (`calendar.rs`), types (`types.rs`)
 - **`icloud/`** - Basic auth (`auth.rs`), CalDAV client with REPORT queries (`calendar.rs`), iCal parser (`types.rs`)
 

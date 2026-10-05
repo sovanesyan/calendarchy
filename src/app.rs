@@ -359,6 +359,35 @@ impl App {
         }
     }
 
+    /// Jump to the other panel, landing on the event closest in time to the
+    /// selected one (the first starting at or after it, else the last)
+    pub fn switch_panel(&mut self) {
+        let other = match self.selected_source {
+            EventSource::Google => EventSource::ICloud,
+            EventSource::ICloud => EventSource::Google,
+        };
+        let other_events = match other {
+            EventSource::Google => self.events.google.get(self.selected_date),
+            EventSource::ICloud => self.events.icloud.get(self.selected_date),
+        };
+        if other_events.is_empty() {
+            let label = match other {
+                EventSource::Google => self.config.display.google_label(),
+                EventSource::ICloud => self.config.display.icloud_label(),
+            };
+            let msg = format!("Nothing in {} on this day", label);
+            self.set_status(msg);
+            return;
+        }
+        let from = self.get_selected_event().map_or((false, 0), |e| e.when.sort_key());
+        let index = other_events
+            .iter()
+            .position(|e| e.when.sort_key() >= from)
+            .unwrap_or(other_events.len() - 1);
+        self.selected_source = other;
+        self.selected_event_index = index;
+    }
+
     pub fn exit_event_mode(&mut self) {
         self.navigation_mode = NavigationMode::Day;
         self.selected_source = EventSource::Google;
@@ -779,6 +808,40 @@ pub(crate) mod tests {
             setup: None,
         };
         app
+    }
+
+    #[test]
+    fn test_switch_panel_lands_on_the_nearest_event() {
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut app = app_on(day);
+        let at = |label: &str, id: &str, icloud: bool| {
+            let mut e = make_event_with_attendees(label, vec![]);
+            e.when = When::parse_label(label);
+            if icloud {
+                e.id = EventId::ICloud { calendar_url: "c".into(), event_uid: id.into(), etag: None, calendar_name: None, href: None };
+            } else {
+                e.id = EventId::Google { calendar_id: "c".into(), event_id: id.into(), calendar_name: None };
+            }
+            e
+        };
+        app.events.google.store(vec![at("09:00", "g1", false), at("14:00", "g2", false)], day);
+        app.events.icloud.store(vec![at("All day", "i0", true), at("12:00", "i1", true), at("15:00", "i2", true)], day);
+        app.navigation_mode = NavigationMode::Event;
+        app.selected_event_index = 1; // Google 14:00
+
+        app.switch_panel();
+        assert_eq!((app.selected_source, app.selected_event_index), (EventSource::ICloud, 2)); // 15:00
+        app.selected_event_index = 0; // the all-day one
+        app.switch_panel();
+        assert_eq!((app.selected_source, app.selected_event_index), (EventSource::Google, 0));
+
+        // Nothing over there: stay put and say so
+        let mut app = app_on(day);
+        app.events.google.store(vec![at("09:00", "g1", false)], day);
+        app.navigation_mode = NavigationMode::Event;
+        app.switch_panel();
+        assert_eq!(app.selected_source, EventSource::Google);
+        assert!(app.status_message.as_deref().unwrap().contains("Personal"));
     }
 
     #[test]
