@@ -29,6 +29,7 @@ pub enum Msg {
     Fetched {
         source: EventSource,
         month: NaiveDate,
+        generation: u64,
         events: Vec<DisplayEvent>,
         calendar_name: Option<String>,
         tokens: Option<TokenInfo>,
@@ -36,6 +37,7 @@ pub enum Msg {
     FetchFailed {
         source: EventSource,
         month: NaiveDate,
+        generation: u64,
         error: String,
         /// The user has to sign in again
         auth: bool,
@@ -52,9 +54,9 @@ pub enum Msg {
 /// I/O the runtime performs on the app's behalf
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    FetchGoogle { month: NaiveDate, tokens: TokenInfo, calendar_id: String, known_name: Option<String> },
-    FetchCalDav { month: NaiveDate, calendars: Vec<CalendarEntry> },
-    FetchEventKit { month: NaiveDate },
+    FetchGoogle { month: NaiveDate, generation: u64, tokens: TokenInfo, calendar_id: String, known_name: Option<String> },
+    FetchCalDav { month: NaiveDate, generation: u64, calendars: Vec<CalendarEntry> },
+    FetchEventKit { month: NaiveDate, generation: u64 },
     StartGoogleAuth,
     DiscoverICloud,
     RespondToEvent { tokens: TokenInfo, calendar_id: String, event_id: String, response: &'static str },
@@ -159,6 +161,7 @@ impl App {
                 let GoogleAuthState::Authenticated(ref tokens) = self.google_auth else { return None };
                 Some(Effect::FetchGoogle {
                     month,
+                    generation: self.fetch_generation,
                     tokens: tokens.clone(),
                     calendar_id: self.config.google.as_ref().map_or_else(|| "primary".to_string(), |g| g.calendar_id.clone()),
                     known_name: self.google_calendar_name.clone(),
@@ -167,9 +170,9 @@ impl App {
             EventSource::ICloud => {
                 let ICloudAuthState::Authenticated { ref calendars } = self.icloud_auth else { return None };
                 if self.config.icloud.as_ref()?.is_eventkit() {
-                    Some(Effect::FetchEventKit { month })
+                    Some(Effect::FetchEventKit { month, generation: self.fetch_generation })
                 } else {
-                    Some(Effect::FetchCalDav { month, calendars: calendars.clone() })
+                    Some(Effect::FetchCalDav { month, generation: self.fetch_generation, calendars: calendars.clone() })
                 }
             }
         }
@@ -204,11 +207,11 @@ impl App {
                 };
                 let stale = cache.fetched_at(month).is_none_or(|t| now.duration_since(t) >= stale_after);
                 let tried_recently = self.attempts.get(&key).is_some_and(|t| now.duration_since(*t) < RETRY_AFTER);
-                if self.in_flight.contains(&key) || !stale || tried_recently {
+                if self.in_flight.contains_key(&key) || !stale || tried_recently {
                     continue;
                 }
                 if let Some(effect) = self.fetch_effect(source, month) {
-                    self.in_flight.insert(key);
+                    self.in_flight.insert(key, self.fetch_generation);
                     self.attempts.insert(key, now);
                     effects.push(effect);
                 }
@@ -221,11 +224,27 @@ impl App {
         effects
     }
 
-    /// Refetch everything, keeping the current data on screen meanwhile
+    /// Refetch everything, keeping the current data on screen meanwhile.
+    /// Fetches already running are superseded: their results are dropped.
     fn invalidate_all(&mut self) {
         self.events.google.invalidate();
         self.events.icloud.invalidate();
+        self.new_fetch_generation();
+    }
+
+    fn new_fetch_generation(&mut self) {
+        self.fetch_generation += 1;
+        self.in_flight.clear();
         self.attempts.clear();
+    }
+
+    /// Settle a finished fetch; true if its result is current and should be used
+    fn finish_fetch(&mut self, source: EventSource, month: NaiveDate, generation: u64) -> bool {
+        let key = (source, month_key(month));
+        if self.in_flight.get(&key) == Some(&generation) {
+            self.in_flight.remove(&key);
+        }
+        generation == self.fetch_generation
     }
 
     // ---- timers ----------------------------------------------------------
@@ -279,9 +298,12 @@ impl App {
         self.dirty = true;
         let mut effects = Vec::new();
         match msg {
-            Msg::Fetched { source, month, events, calendar_name, tokens } => {
-                self.in_flight.remove(&(source, month_key(month)));
+            Msg::Fetched { source, month, generation, events, calendar_name, tokens } => {
                 self.adopt_refreshed_tokens(tokens, &mut effects);
+                if !self.finish_fetch(source, month, generation) {
+                    return effects;
+                }
+                self.last_fetch_error.remove(&source);
                 if source == EventSource::Google && calendar_name.is_some() {
                     self.google_calendar_name = calendar_name;
                 }
@@ -291,22 +313,31 @@ impl App {
                 }
                 effects.push(Effect::SaveCache);
             }
-            Msg::FetchFailed { source, month, error, auth, tokens } => {
-                self.in_flight.remove(&(source, month_key(month)));
+            Msg::FetchFailed { source, month, generation, error, auth, tokens } => {
                 self.adopt_refreshed_tokens(tokens, &mut effects);
+                if !self.finish_fetch(source, month, generation) {
+                    return effects;
+                }
                 let visible = month_key(month) == month_key(self.current_date);
-                match source {
-                    EventSource::Google if auth => self.google_signed_out(&error),
-                    // Prefetch failures stay quiet; the visible month says why it's stale
-                    EventSource::Google if visible => self.set_error(format!("Google: {}", error)),
-                    EventSource::ICloud if visible => self.set_error(format!("iCloud: {}", error)),
-                    _ => {}
+                if source == EventSource::Google && auth {
+                    self.google_signed_out(&error);
+                } else if visible {
+                    // Prefetch failures stay quiet; the visible month says why it's
+                    // stale — once, not on every retry the user already dismissed
+                    let label = if source == EventSource::Google { "Google" } else { "iCloud" };
+                    let text = format!("{}: {}", label, error);
+                    if self.last_fetch_error.get(&source) != Some(&text) {
+                        self.set_error(text.clone());
+                        self.last_fetch_error.insert(source, text);
+                    }
                 }
             }
             Msg::GoogleSignedIn(tokens) => {
                 self.google_auth = GoogleAuthState::Authenticated(tokens.clone());
                 effects.push(Effect::SaveGoogleTokens(tokens));
-                self.attempts.retain(|(source, _), _| *source != EventSource::Google);
+                // Results of requests made with the old session must not sign
+                // the user straight back out
+                self.new_fetch_generation();
                 self.set_status("Connected to Google Calendar!");
                 // Advance setup wizard past auth waiting
                 if let Some(ref mut setup) = self.setup
@@ -562,14 +593,17 @@ impl App {
                     self.set_status("Google not configured — press S for setup");
                 }
             }
-            ConnectICloud => {
-                if self.config.icloud.is_none() {
-                    self.set_status("iCloud not configured — press S for setup");
-                } else {
-                    // Re-run discovery (refreshes calendar names)
-                    return self.discover_icloud();
+            ConnectICloud => match self.config.icloud {
+                None => self.set_status("iCloud not configured — press S for setup"),
+                // System calendars need no discovery; just reload them
+                Some(ref icloud) if icloud.is_eventkit() => {
+                    self.icloud_auth = ICloudAuthState::Authenticated { calendars: vec![] };
+                    self.invalidate_all();
+                    self.set_status("Refreshing...");
                 }
-            }
+                // Re-run discovery (refreshes calendar names)
+                Some(_) => return self.discover_icloud(),
+            },
             Setup => self.open_setup_wizard(),
             Quit => self.quit = true,
         }
@@ -760,7 +794,9 @@ impl App {
         }
 
         // Reload config and initialize auth states
+        let old_icloud_method = self.config.icloud.as_ref().map(|c| c.method.clone());
         self.config = Config::load().unwrap_or(new_config);
+        let icloud_method_changed = self.config.icloud.as_ref().map(|c| c.method.clone()) != old_icloud_method;
         self.setup = None;
         let mut effects = Vec::new();
 
@@ -771,9 +807,11 @@ impl App {
             effects.extend(self.start_google_auth());
         }
 
-        // Auto-start iCloud discovery if newly configured
+        // Auto-start iCloud discovery if newly configured, failed before, or
+        // switched between EventKit and CalDAV
         if let Some(ref icloud) = self.config.icloud
-            && matches!(self.icloud_auth, ICloudAuthState::NotConfigured | ICloudAuthState::Error(_))
+            && (icloud_method_changed
+                || matches!(self.icloud_auth, ICloudAuthState::NotConfigured | ICloudAuthState::Error(_)))
         {
             if icloud.is_eventkit() {
                 self.icloud_auth = ICloudAuthState::Authenticated { calendars: vec![] };
@@ -823,14 +861,15 @@ mod tests {
             .filter_map(|e| match e {
                 Effect::FetchGoogle { month, .. } => Some(("google", *month)),
                 Effect::FetchCalDav { month, .. } => Some(("icloud", *month)),
-                Effect::FetchEventKit { month } => Some(("eventkit", *month)),
+                Effect::FetchEventKit { month, .. } => Some(("eventkit", *month)),
                 _ => None,
             })
             .collect()
     }
 
     fn deliver(app: &mut App, source: EventSource, month: NaiveDate) -> Vec<Effect> {
-        app.handle_msg(Msg::Fetched { source, month, events: vec![], calendar_name: Some("Work".into()), tokens: None })
+        let generation = app.fetch_generation;
+        app.handle_msg(Msg::Fetched { source, month, generation, events: vec![], calendar_name: Some("Work".into()), tokens: None })
     }
 
     fn key(c: char) -> KeyEvent {
@@ -852,8 +891,8 @@ mod tests {
         let later = Instant::now() + VISIBLE_STALE_AFTER + Duration::from_secs(1);
         assert!(!fetched_months(&app.wanted_fetches(later)).is_empty());
         assert!(!app.is_loading(EventSource::Google));
-        assert!(app.in_flight.contains(&(EventSource::Google, (2026, 11))), "neighbours prefetched once loaded");
-        assert!(app.in_flight.contains(&(EventSource::Google, (2026, 9))));
+        assert!(app.in_flight.contains_key(&(EventSource::Google, (2026, 11))), "neighbours prefetched once loaded");
+        assert!(app.in_flight.contains_key(&(EventSource::Google, (2026, 9))));
     }
 
     #[test]
@@ -881,7 +920,7 @@ mod tests {
         let mut app = ready_app();
         let t0 = Instant::now();
         app.wanted_fetches(t0);
-        app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), error: "offline".into(), auth: false, tokens: None });
+        app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), generation: 0, error: "offline".into(), auth: false, tokens: None });
         assert!(app.status_is_error, "visible-month failures are shown");
         assert!(fetched_months(&app.wanted_fetches(t0 + Duration::from_secs(5))).iter().all(|(s, _)| *s != "google"));
         assert_eq!(fetched_months(&app.wanted_fetches(t0 + RETRY_AFTER)), [("google", d(2026, 10, 1))]);
@@ -918,6 +957,7 @@ mod tests {
         let effects = app.handle_msg(Msg::Fetched {
             source: EventSource::Google,
             month: d(2026, 10, 1),
+            generation: 0,
             events: vec![],
             calendar_name: None,
             tokens: Some(renewed.clone()),
@@ -931,7 +971,7 @@ mod tests {
     fn test_auth_failure_signs_out_and_stops_google_fetches() {
         let mut app = ready_app();
         app.wanted_fetches(Instant::now());
-        app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), error: "revoked".into(), auth: true, tokens: None });
+        app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), generation: 0, error: "revoked".into(), auth: true, tokens: None });
         assert!(matches!(app.google_auth, GoogleAuthState::NotAuthenticated));
         assert!(app.status_message.as_deref().unwrap().contains("press g"));
         let later = Instant::now() + RETRY_AFTER * 2;
@@ -997,5 +1037,77 @@ mod tests {
     fn test_add_months() {
         assert_eq!(add_months(d(2026, 12, 1), 1), d(2027, 1, 1));
         assert_eq!(add_months(d(2026, 1, 1), -1), d(2025, 12, 1));
+    }
+
+    #[test]
+    fn test_fetch_started_before_an_action_is_discarded() {
+        // A background refresh in flight while the user deletes an event must
+        // not bring the deleted event back
+        let mut app = ready_app();
+        let day = d(2026, 10, 15);
+        app.wanted_fetches(Instant::now());
+        let old_generation = app.fetch_generation;
+        app.handle_msg(Msg::ActionDone { message: "Event deleted".into(), tokens: None });
+        let mut stale = crate::app::tests::make_event_with_attendees("Deleted", vec![]);
+        stale.date = day;
+        app.handle_msg(Msg::Fetched {
+            source: EventSource::Google, month: d(2026, 10, 1), generation: old_generation,
+            events: vec![stale], calendar_name: None, tokens: None,
+        });
+        assert!(app.events.google.get(day).is_empty());
+        // ...and the refetch it triggered is still scheduled
+        assert!(fetched_months(&app.wanted_fetches(Instant::now())).contains(&("google", d(2026, 10, 1))));
+    }
+
+    #[test]
+    fn test_late_auth_failure_does_not_undo_a_new_sign_in() {
+        let mut app = ready_app();
+        app.wanted_fetches(Instant::now());
+        let old_generation = app.fetch_generation;
+        app.handle_msg(Msg::GoogleSignedIn(tokens()));
+        app.handle_msg(Msg::FetchFailed {
+            source: EventSource::Google, month: d(2026, 10, 1), generation: old_generation,
+            error: "revoked".into(), auth: true, tokens: None,
+        });
+        assert!(matches!(app.google_auth, GoogleAuthState::Authenticated(_)));
+    }
+
+    #[test]
+    fn test_repeated_failures_raise_the_error_once() {
+        let mut app = ready_app();
+        let fail = |app: &mut App| {
+            let generation = app.fetch_generation;
+            app.handle_msg(Msg::FetchFailed {
+                source: EventSource::Google, month: d(2026, 10, 1), generation,
+                error: "offline".into(), auth: false, tokens: None,
+            });
+        };
+        fail(&mut app);
+        assert!(app.status_is_error);
+        app.clear_error(); // user dismisses it
+        fail(&mut app);
+        assert!(!app.status_is_error, "same error isn't re-raised on retry");
+        deliver(&mut app, EventSource::Google, d(2026, 10, 1));
+        fail(&mut app);
+        assert!(app.status_is_error, "a new failure after recovering is shown again");
+    }
+
+    #[test]
+    fn test_refresh_restarts_stuck_fetches() {
+        let mut app = ready_app();
+        app.wanted_fetches(Instant::now());
+        assert!(app.is_loading(EventSource::Google));
+        app.apply(Action::Refresh);
+        assert_eq!(fetched_months(&app.wanted_fetches(Instant::now())), [("google", d(2026, 10, 1)), ("icloud", d(2026, 10, 1))]);
+    }
+
+    #[test]
+    fn test_connect_icloud_with_eventkit_reloads_instead_of_discovering() {
+        let mut app = ready_app();
+        app.config.icloud = Some(ICloudConfig { method: "eventkit".into(), apple_id: None, app_password: None });
+        app.icloud_auth = ICloudAuthState::Error("x".into());
+        let effects = app.apply(Action::ConnectICloud);
+        assert!(!effects.contains(&Effect::DiscoverICloud));
+        assert!(fetched_months(&app.wanted_fetches(Instant::now())).contains(&("eventkit", d(2026, 10, 1))));
     }
 }

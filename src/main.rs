@@ -65,15 +65,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fetches = app.wanted_fetches(Instant::now());
     runtime.run_all(&mut app, fetches);
 
-    // Draw with last run's terminal background until the terminal answers
-    if let Some((r, g, b)) = load_term_bg() {
-        ui::set_term_bg(r, g, b);
+    // Terminal background: what the terminal said last time. A terminal that
+    // never answered is not asked again (that costs ~200ms and its late reply
+    // could arrive as keystrokes); with no memory at all, ask before drawing.
+    let remembered = load_term_bg();
+    match remembered {
+        Some(TermBg::Color(r, g, b)) => ui::set_term_bg(r, g, b),
+        Some(TermBg::Unanswered) => {}
+        None => {
+            if let Some((r, g, b)) = probe_term_bg() {
+                ui::set_term_bg(r, g, b);
+            }
+        }
     }
 
-    // Raw mode + alternate screen; ratatui also installs a panic hook that
-    // restores the terminal, and we restore on every return path below
+    // Raw mode + alternate screen; we restore on every return path below
     let mut terminal = ratatui::try_init()?;
-    let result = run(&mut terminal, &mut app, &mut runtime, &mut rx).await;
+    install_panic_hook();
+    let reprobe = matches!(remembered, Some(TermBg::Color(..)));
+    let result = run(&mut terminal, &mut app, &mut runtime, &mut rx, reprobe).await;
     ratatui::restore();
     runtime.finish();
     result
@@ -86,19 +96,20 @@ async fn run(
     app: &mut App,
     runtime: &mut Runtime,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
+    reprobe_term_bg: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     draw(terminal, app)?;
 
-    // Ask the terminal for its background (OSC 11) now that the first frame
-    // is up. termbg reads the reply from stdin, so this must finish before
-    // the input thread starts; terminals that never answer cost ~200ms here
-    // instead of before the first frame.
-    let probed = tokio::task::spawn_blocking(|| termbg::rgb(Duration::from_millis(120))).await;
-    if let Ok(Ok(rgb)) = probed {
-        let rgb = ((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8);
-        if ui::get_term_bg() != Some(rgb) {
+    // The theme may have changed since last run: ask again now that the first
+    // frame is up (a terminal that answered before answers within a few ms).
+    // termbg reads the reply from stdin, so this must finish before the
+    // input thread starts.
+    if reprobe_term_bg {
+        let probed = tokio::task::spawn_blocking(probe_term_bg).await.ok().flatten();
+        if let Some(rgb) = probed
+            && ui::get_term_bg() != Some(rgb)
+        {
             ui::set_term_bg(rgb.0, rgb.1, rgb.2);
-            save_term_bg(rgb);
             app.dirty = true;
         }
     }
@@ -202,18 +213,51 @@ fn term_bg_path() -> Option<PathBuf> {
     dirs::cache_dir().map(|p| p.join("calendarchy").join("term-bg"))
 }
 
-fn load_term_bg() -> Option<(u8, u8, u8)> {
-    let text = std::fs::read_to_string(term_bg_path()?).ok()?;
-    let packed = u32::from_str_radix(text.trim(), 16).ok()?;
-    let [_, r, g, b] = packed.to_be_bytes();
-    Some((r, g, b))
+/// What we learned about the terminal's background on a previous run
+enum TermBg {
+    Color(u8, u8, u8),
+    Unanswered,
 }
 
-fn save_term_bg((r, g, b): (u8, u8, u8)) {
+fn load_term_bg() -> Option<TermBg> {
+    let text = std::fs::read_to_string(term_bg_path()?).ok()?;
+    let text = text.trim();
+    if text == "none" {
+        return Some(TermBg::Unanswered);
+    }
+    let [_, r, g, b] = u32::from_str_radix(text, 16).ok()?.to_be_bytes();
+    Some(TermBg::Color(r, g, b))
+}
+
+/// Ask the terminal for its background via OSC 11, remembering the outcome
+fn probe_term_bg() -> Option<(u8, u8, u8)> {
+    let answer = termbg::rgb(Duration::from_millis(120))
+        .ok()
+        .map(|rgb| ((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8));
     if let Some(path) = term_bg_path() {
         let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let _ = std::fs::write(path, format!("{:02x}{:02x}{:02x}\n", r, g, b));
+        let text = match answer {
+            Some((r, g, b)) => format!("{:02x}{:02x}{:02x}\n", r, g, b),
+            None => "none\n".to_string(),
+        };
+        let _ = std::fs::write(path, text);
     }
+    answer
+}
+
+/// Restore the terminal only when the main thread panics. A panic in a
+/// background task is caught by tokio (that fetch just fails), so the UI must
+/// stay up; its message goes to the request log instead of over the screen.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            ratatui::restore();
+            default_hook(info);
+        } else {
+            logging::log_request("PANIC", &info.to_string());
+        }
+    }));
 }
 
 /// Performs effects: spawns network tasks (sharing one HTTP client), writes
@@ -228,8 +272,12 @@ struct Runtime {
 impl Runtime {
     fn new(tx: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
+            // Timeouts so a request stuck on a dead connection (e.g. after the
+            // laptop wakes) fails and is retried instead of hanging forever
             http: Client::builder()
-                .pool_idle_timeout(Duration::from_secs(300))
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .pool_idle_timeout(Duration::from_secs(90))
                 .build()
                 .unwrap_or_default(),
             tx,
@@ -254,12 +302,26 @@ impl Runtime {
         });
     }
 
+    /// Like `spawn`, but if the task panics send `on_panic` instead, so the
+    /// app never waits forever on a result that can't arrive
+    fn spawn_or<F>(&self, on_panic: Msg, task: F)
+    where
+        F: std::future::Future<Output = Msg> + Send + 'static,
+    {
+        let tx = self.tx.clone();
+        let handle = tokio::spawn(task);
+        tokio::spawn(async move {
+            let _ = tx.send(handle.await.unwrap_or(on_panic));
+        });
+    }
+
     fn run(&mut self, app: &mut App, effect: Effect) {
         let http = self.http.clone();
         match effect {
-            Effect::FetchGoogle { month, tokens, calendar_id, known_name } => {
+            Effect::FetchGoogle { month, generation, tokens, calendar_id, known_name } => {
                 let Some(gconfig) = app.config.google.clone() else { return };
-                self.spawn(async move {
+                let failed = fetch_failed(EventSource::Google, month, generation, "fetch task crashed");
+                self.spawn_or(failed, async move {
                     let mut session = GoogleSession::new(http.clone(), gconfig, tokens);
                     let result = sources::fetch_google_month(&http, &mut session, &calendar_id, known_name, month).await;
                     let tokens = session.into_refreshed();
@@ -267,6 +329,7 @@ impl Runtime {
                         Ok(m) => Msg::Fetched {
                             source: EventSource::Google,
                             month,
+                            generation,
                             events: m.events,
                             calendar_name: m.calendar_name,
                             tokens,
@@ -274,6 +337,7 @@ impl Runtime {
                         Err(e) => Msg::FetchFailed {
                             source: EventSource::Google,
                             month,
+                            generation,
                             auth: is_auth_failure(&e),
                             error: e.to_string(),
                             tokens,
@@ -281,26 +345,23 @@ impl Runtime {
                     }
                 });
             }
-            Effect::FetchCalDav { month, calendars } => {
+            Effect::FetchCalDav { month, generation, calendars } => {
                 let Some(icloud) = app.config.icloud.clone() else { return };
-                self.spawn(async move {
+                let failed = fetch_failed(EventSource::ICloud, month, generation, "fetch task crashed");
+                self.spawn_or(failed, async move {
                     match sources::fetch_caldav_month(&http, &icloud, &calendars, month).await {
-                        Ok(events) => Msg::Fetched { source: EventSource::ICloud, month, events, calendar_name: None, tokens: None },
-                        Err(e) => Msg::FetchFailed { source: EventSource::ICloud, month, auth: false, error: e.to_string(), tokens: None },
+                        Ok(events) => fetched(EventSource::ICloud, month, generation, events),
+                        Err(e) => fetch_failed(EventSource::ICloud, month, generation, &e.to_string()),
                     }
                 });
             }
-            Effect::FetchEventKit { month } => {
-                self.spawn(async move {
+            Effect::FetchEventKit { month, generation } => {
+                let failed = fetch_failed(EventSource::ICloud, month, generation, "fetch task crashed");
+                self.spawn_or(failed, async move {
                     match sources::fetch_eventkit_month(month).await {
-                        Ok(events) => Msg::Fetched { source: EventSource::ICloud, month, events, calendar_name: None, tokens: None },
-                        Err(e) => Msg::FetchFailed {
-                            source: EventSource::ICloud,
-                            month,
-                            auth: false,
-                            error: format!("EventKit: {}", e),
-                            tokens: None,
-                        },
+                        Ok(events) => fetched(EventSource::ICloud, month, generation, events),
+                        // The helper's errors already say "EventKit: ..."
+                        Err(e) => fetch_failed(EventSource::ICloud, month, generation, &e),
                     }
                 });
             }
@@ -393,6 +454,14 @@ impl Runtime {
     }
 }
 
+fn fetched(source: EventSource, month: chrono::NaiveDate, generation: u64, events: Vec<cache::DisplayEvent>) -> Msg {
+    Msg::Fetched { source, month, generation, events, calendar_name: None, tokens: None }
+}
+
+fn fetch_failed(source: EventSource, month: chrono::NaiveDate, generation: u64, error: &str) -> Msg {
+    Msg::FetchFailed { source, month, generation, auth: false, error: error.to_string(), tokens: None }
+}
+
 fn action_result<T>(
     result: error::Result<T>,
     done: &str,
@@ -433,5 +502,25 @@ impl CacheWriter {
     fn finish(self) {
         drop(self.tx);
         let _ = self.handle.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_a_panicking_task_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(tx);
+        let month = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        runtime.spawn_or(fetch_failed(EventSource::Google, month, 7, "fetch task crashed"), async {
+            panic!("boom");
+        });
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(Msg::FetchFailed { generation: 7, error, .. })) => assert_eq!(error, "fetch task crashed"),
+            _ => panic!("expected the fallback message"),
+        }
+        runtime.finish();
     }
 }

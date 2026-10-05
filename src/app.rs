@@ -2,7 +2,7 @@ use crate::auth::{GoogleAuthState, ICloudAuthState};
 use crate::cache::{DisplayEvent, EventCache};
 use crate::config::Config;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// (year, month) of a date — the unit of fetching and caching
@@ -119,8 +119,15 @@ pub struct App {
     /// Error messages stick until the next keypress instead of expiring
     pub status_is_error: bool,
     pub config: Config,
-    /// Month fetches currently running, per source
-    pub in_flight: HashSet<(EventSource, (i32, u32))>,
+    /// Month fetches currently running, per source, with the generation
+    /// they were started in
+    pub in_flight: HashMap<(EventSource, (i32, u32)), u64>,
+    /// Bumped by refresh, actions and sign-in: results of fetches started
+    /// before are stale and dropped (e.g. a refresh racing a delete)
+    pub fetch_generation: u64,
+    /// Last fetch error shown per source, so a retry loop doesn't re-raise
+    /// an error the user already dismissed
+    pub last_fetch_error: HashMap<EventSource, String>,
     /// When each (source, month) fetch was last started — throttles retries
     pub attempts: HashMap<(EventSource, (i32, u32)), Instant>,
     /// Google calendar display name, looked up once per session
@@ -157,7 +164,9 @@ impl App {
             status_message_time: None,
             status_is_error: false,
             config: Config::default(),
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
+            fetch_generation: 0,
+            last_fetch_error: HashMap::new(),
             attempts: HashMap::new(),
             google_calendar_name: None,
             quit: false,
@@ -183,7 +192,7 @@ impl App {
             EventSource::Google => &self.events.google,
             EventSource::ICloud => &self.events.icloud,
         };
-        self.in_flight.contains(&(source, month_key(self.current_date)))
+        self.in_flight.contains_key(&(source, month_key(self.current_date)))
             && cache.fetched_at(self.current_date).is_none()
     }
 
@@ -763,7 +772,9 @@ pub(crate) mod tests {
             status_message_time: None,
             status_is_error: false,
             config: Config::default(),
-            in_flight: HashSet::new(),
+            in_flight: HashMap::new(),
+            fetch_generation: 0,
+            last_fetch_error: HashMap::new(),
             attempts: HashMap::new(),
             google_calendar_name: None,
             quit: false,

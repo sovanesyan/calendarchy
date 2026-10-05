@@ -143,12 +143,10 @@ impl GoogleAuth {
             .await?;
         log_response(response.status().as_u16(), TOKEN_URL);
 
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(CalendarchyError::Auth(format!(
-                "Failed to refresh token: {}",
-                body
-            )));
+            return Err(refresh_error(status, body));
         }
 
         let token_response: TokenResponse = response.json().await?;
@@ -158,6 +156,16 @@ impl GoogleAuth {
             expires_at: Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64),
             token_type: token_response.token_type,
         })
+    }
+}
+
+/// Only a rejected grant (400/401: revoked or expired refresh token) means
+/// "sign in again"; 5xx/429 are transient and must not sign the user out
+fn refresh_error(status: reqwest::StatusCode, body: String) -> CalendarchyError {
+    if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED {
+        CalendarchyError::Auth(format!("Failed to refresh token: {}", body))
+    } else {
+        CalendarchyError::Api(format!("Token refresh failed ({}), will retry: {}", status, body))
     }
 }
 
@@ -281,6 +289,16 @@ mod tests {
         let code = auth.wait_for_code(&listener).await.unwrap();
         client.await.unwrap();
         assert_eq!(code, "the-code");
+    }
+
+    #[test]
+    fn test_only_rejected_grants_sign_out() {
+        use reqwest::StatusCode;
+        use crate::sources::is_auth_failure;
+        assert!(is_auth_failure(&refresh_error(StatusCode::BAD_REQUEST, "invalid_grant".into())));
+        assert!(is_auth_failure(&refresh_error(StatusCode::UNAUTHORIZED, String::new())));
+        assert!(!is_auth_failure(&refresh_error(StatusCode::SERVICE_UNAVAILABLE, String::new())));
+        assert!(!is_auth_failure(&refresh_error(StatusCode::TOO_MANY_REQUESTS, String::new())));
     }
 
     #[test]
