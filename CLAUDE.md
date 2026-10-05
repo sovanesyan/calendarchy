@@ -57,25 +57,9 @@ UI ← EventCache.get(date) ←────────────────�
 - Cache loads on startup for instant display; `fetched_months` not restored to force refresh
 - Format is versioned (`CACHE_VERSION`); mismatches are discarded. Each event still carries `time_str`/`end_time_str` on disk because the TRMNL push (`~/Work/my/trmnl/calendar-push.mjs`) reads them
 
-## Release Process
+## Releases
 
-To release a new version (e.g., 0.1.5 -> 0.1.6):
-
-1. **Bump version** in `Cargo.toml`
-2. **Commit and push** to master
-3. **Tag and push**: `git tag v0.1.6 && git push origin v0.1.6`
-4. **Done** — GitHub Actions handles everything:
-   - Builds macOS ARM/Intel + Linux binaries
-   - Creates the GitHub Release
-   - Updates the Homebrew tap (`HOMEBREW_TAP_TOKEN` secret)
-   - Updates both AUR packages (`AUR_SSH_KEY` secret)
-
-### Package Locations
-
-- **Homebrew**: `sovanesyan/homebrew-calendarchy` (auto-updated by workflow)
-- **AUR binary**: `ssh://aur@aur.archlinux.org/calendarchy-bin.git` (auto-updated by workflow)
-- **AUR source**: `ssh://aur@aur.archlinux.org/calendarchy.git` (auto-updated by workflow)
-- **Local PKGBUILDs**: `pkg/arch/` and `pkg/arch-bin/` are reference copies (workflow generates its own)
+Personal use only: no packaging or publishing (the Homebrew tap, AUR packages and release workflow were retired). Build with `cargo build --release`; on macOS the hotkey helper is `swiftc -O swift/main.swift -o calendarchy-hotkey`.
 
 ### Website
 

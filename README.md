@@ -4,16 +4,7 @@ A terminal calendar app that displays Google Calendar and iCloud Calendar events
 
 ## Installation
 
-### macOS (Homebrew)
-
-```bash
-brew tap sovanesyan/calendarchy
-brew install calendarchy
-```
-
-### Omarchy / Linux (from source)
-
-Requires [Rust](https://rustup.rs/).
+Personal project; build from source. Requires [Rust](https://rustup.rs/).
 
 ```bash
 git clone https://github.com/sovanesyan/calendarchy.git
@@ -22,7 +13,14 @@ cargo build --release
 sudo cp target/release/calendarchy /usr/local/bin/
 ```
 
-To add Calendarchy to your application launcher, copy the desktop entry:
+On macOS, also build the global-hotkey helper (needs Xcode command line tools) and put it next to the binary:
+
+```bash
+swiftc -O swift/main.swift -o calendarchy-hotkey
+sudo cp calendarchy-hotkey /usr/local/bin/
+```
+
+On Linux, to add Calendarchy to your application launcher, copy the desktop entry:
 
 ```bash
 sudo cp calendarchy.desktop /usr/share/applications/

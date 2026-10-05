@@ -62,7 +62,7 @@ fn plist_path() -> PathBuf {
 #[cfg(target_os = "macos")]
 fn calendarchy_path() -> String {
     std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("/opt/homebrew/bin/calendarchy"))
+        .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/calendarchy"))
         .to_string_lossy()
         .to_string()
 }
@@ -70,7 +70,7 @@ fn calendarchy_path() -> String {
 #[cfg(target_os = "macos")]
 pub fn install_shortcut(terminal_index: usize) -> Result<(), String> {
     let hotkey_bin = find_hotkey_binary()
-        .ok_or("calendarchy-hotkey not found. Reinstall with: brew reinstall calendarchy")?;
+        .ok_or("calendarchy-hotkey not found. Build it with: swiftc -O swift/main.swift -o calendarchy-hotkey, and put it next to calendarchy")?;
 
     let terminals: Vec<&Terminal> = TERMINALS.iter().filter(|t| {
         PathBuf::from(format!("/Applications/{}", t.app)).exists()
