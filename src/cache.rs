@@ -33,14 +33,14 @@ impl AttendeeStatus {
     }
 
     /// Get the display color for this status
-    pub fn color(&self) -> crossterm::style::Color {
-        use crossterm::style::Color;
+    pub fn color(&self) -> ratatui::style::Color {
+        use ratatui::style::Color;
         match self {
-            Self::Accepted => Color::Green,
-            Self::Organizer => Color::Blue,
-            Self::Declined => Color::Red,
-            Self::Tentative => Color::Yellow,
-            Self::NeedsAction => Color::DarkGrey,
+            Self::Accepted => Color::LightGreen,
+            Self::Organizer => Color::LightBlue,
+            Self::Declined => Color::LightRed,
+            Self::Tentative => Color::LightYellow,
+            Self::NeedsAction => Color::DarkGray,
         }
     }
 }

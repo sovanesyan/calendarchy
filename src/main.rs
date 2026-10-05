@@ -20,10 +20,9 @@ use conversion::{google_event_to_display, icloud_event_to_display};
 use chrono::{NaiveDate, Timelike};
 use config::Config;
 use crossterm::{
-    cursor,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use google::{CalendarClient, GoogleAuth, TokenInfo};
 use icloud::{CalDavClient, ICalEvent, ICloudAuth};
@@ -225,27 +224,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui::set_term_bg((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8);
     }
 
-    // Enable raw mode and enter alternate screen. Restore the terminal on
-    // panic too, or a crash leaves the shell in raw mode on the alt screen.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        default_hook(info);
-    }));
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
-
-    let result = run(&mut app, &tx, &mut rx);
-    restore_terminal();
+    // Raw mode + alternate screen; ratatui also installs a panic hook that
+    // restores the terminal, and we restore on every return path below
+    let mut terminal = ratatui::try_init()?;
+    let result = run(&mut terminal, &mut app, &tx, &mut rx);
+    ratatui::restore();
     result
 }
 
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(stdout(), LeaveAlternateScreen, cursor::Show);
-}
-
 fn run(
+    terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     tx: &mpsc::Sender<AsyncMessage>,
     rx: &mut mpsc::Receiver<AsyncMessage>,
@@ -285,8 +273,13 @@ fn run(
                 search: app.search.as_ref(),
                 show_help: app.show_help,
                 setup: app.setup.as_ref(),
+                now: chrono::Local::now(),
             };
-            ui::render(&render_state);
+            // ratatui diffs against the previous frame and flushes once; the
+            // synchronized-update bracket makes the frame appear atomically
+            execute!(stdout(), BeginSynchronizedUpdate)?;
+            terminal.draw(|frame| ui::render(frame, &render_state))?;
+            execute!(stdout(), EndSynchronizedUpdate)?;
         }
 
         // Check if we need to fetch Google events

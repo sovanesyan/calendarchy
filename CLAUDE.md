@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build              # Debug build
 cargo build --release    # Release build (used by keyboard shortcut)
-cargo test               # Run all tests (64 tests across 4 modules)
+cargo test               # Run all tests
 cargo test cache         # Run tests in cache module only
 cargo test icloud        # Run tests in icloud module only
 ```
@@ -21,12 +21,12 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 1. **Startup**: `main.rs` loads config, restores cached events from disk for instant display, then authenticates
 2. **Auth**: Google uses OAuth device flow; iCloud uses app-specific password with CalDAV discovery
 3. **Fetching**: Events are fetched per-month via async tasks, converted to `DisplayEvent`, cached to disk
-4. **Rendering**: `ui.rs` renders a month calendar grid and two event panels using crossterm
+4. **Rendering**: `ui.rs` renders a month calendar grid and two event panels into a ratatui buffer; ratatui diffs frames and writes only changed cells
 
 ### Module Structure
 
 - **`main.rs`** - App state machine, async message handling, keyboard input loop
-- **`ui.rs`** - Terminal rendering with crossterm, event panel display, calendar grid
+- **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence)
 - **`config.rs`** - Config loading from `~/.config/calendarchy/config.json`, token storage
 - **`google/`** - OAuth device flow (`auth.rs`), Calendar API client (`calendar.rs`), types (`types.rs`)

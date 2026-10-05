@@ -2,16 +2,99 @@ use crate::app::{EventSource, MatchType, NavigationMode, PendingAction, SearchSt
 use crate::auth::{AuthDisplay, GoogleAuthState, ICloudAuthState};
 use crate::cache::{AttendeeStatus, DisplayEvent, EventCache, EventId};
 use crate::logging::get_recent_logs;
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
-use crossterm::{
-    cursor,
-    execute,
-    style::{Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
-};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::Frame;
 use std::collections::HashSet;
-use std::io::{stdout, Write};
 use std::sync::OnceLock;
+use unicode_width::UnicodeWidthStr;
+
+/// Cursor-style drawing onto a ratatui buffer: move, set style, print.
+///
+/// The layout code positions everything absolutely (it predates ratatui), so
+/// rather than rewriting it into widgets this gives it the same move/print
+/// vocabulary it was written against. ratatui then diffs the finished buffer
+/// against the previous frame and writes only the changed cells, in one flush.
+pub struct Pen<'a> {
+    buf: &'a mut Buffer,
+    x: u16,
+    y: u16,
+    style: Style,
+}
+
+impl<'a> Pen<'a> {
+    pub fn new(buf: &'a mut Buffer) -> Self {
+        Self { buf, x: 0, y: 0, style: Style::reset() }
+    }
+
+    fn move_to(&mut self, x: u16, y: u16) {
+        self.x = x;
+        self.y = y;
+    }
+
+    fn fg(&mut self, color: Color) {
+        self.style.fg = Some(color);
+    }
+
+    fn bg(&mut self, color: Color) {
+        self.style.bg = Some(color);
+    }
+
+    fn bold(&mut self) {
+        self.style = self.style.add_modifier(Modifier::BOLD);
+    }
+
+    /// Back to the terminal defaults: colors and attributes (SGR 0)
+    fn reset(&mut self) {
+        self.style = Style::reset();
+    }
+
+    /// Print at the cursor and advance it; anything past the edge is clipped.
+    ///
+    /// Widths are measured per *character*, not per grapheme cluster, to match
+    /// how foot (default `grapheme-width-method=wcswidth`), alacritty and xterm
+    /// advance the cursor — e.g. 👶🏻 is 2+2 columns there. Measuring the cluster
+    /// as 2 (ratatui's default) would shift the rest of the line. truncate_str
+    /// uses the same per-char widths, so truncation and layout agree.
+    fn print(&mut self, s: &str) {
+        use unicode_width::UnicodeWidthChar;
+        let area = *self.buf.area();
+        if self.y >= area.bottom() {
+            self.x = self.x.saturating_add(s.width() as u16);
+            return;
+        }
+        let mut last: Option<u16> = None;
+        let mut tmp = [0u8; 4];
+        for c in s.chars() {
+            if c.is_control() {
+                continue;
+            }
+            let w = c.width().unwrap_or(0) as u16;
+            if w == 0 {
+                // Combining mark / ZWJ / variation selector: rides on the previous cell
+                if let Some(px) = last {
+                    let cell = &mut self.buf[(px, self.y)];
+                    let sym = format!("{}{}", cell.symbol(), c);
+                    cell.set_symbol(&sym);
+                }
+                continue;
+            }
+            if self.x + w > area.right() {
+                self.x = self.x.saturating_add(w);
+                last = None;
+                continue;
+            }
+            self.buf[(self.x, self.y)].set_symbol(c.encode_utf8(&mut tmp)).set_style(self.style);
+            // Cells covered by a wide char are blanked, as Buffer::set_stringn does
+            for dx in 1..w {
+                self.buf[(self.x + dx, self.y)].reset();
+            }
+            last = Some(self.x);
+            self.x += w;
+        }
+    }
+}
 
 /// Terminal background color, queried once at startup via OSC 11.
 /// Used to derive theme-adaptive shades (free slots, past fading).
@@ -30,7 +113,7 @@ fn term_bg() -> (u8, u8, u8) {
 fn blend_toward_bg(color: (u8, u8, u8), amount: f32) -> Color {
     let bg = term_bg();
     let mix = |c: u8, b: u8| -> u8 { (c as f32 + (b as f32 - c as f32) * amount).round() as u8 };
-    Color::Rgb { r: mix(color.0, bg.0), g: mix(color.1, bg.1), b: mix(color.2, bg.2) }
+    Color::Rgb(mix(color.0, bg.0), mix(color.1, bg.1), mix(color.2, bg.2))
 }
 
 /// The "free slot" shade: the real background nudged just enough to be visible,
@@ -40,7 +123,7 @@ fn free_block_color() -> Color {
     let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
     let shift: i16 = if luma > 128.0 { -20 } else { 24 };
     let adj = |c: u8| -> u8 { (c as i16 + shift).clamp(0, 255) as u8 };
-    Color::Rgb { r: adj(r), g: adj(g), b: adj(b) }
+    Color::Rgb(adj(r), adj(g), adj(b))
 }
 
 const CALENDAR_WIDTH: u16 = 23;
@@ -49,54 +132,54 @@ const MIN_PANEL_WIDTH: u16 = 25;
 
 // Semantic color constants
 mod colors {
-    use crossterm::style::Color;
+    use ratatui::style::Color;
 
     // Calendar sources (muted so panel labels read as chrome, not content)
-    pub const GOOGLE_ACCENT: Color = Color::Rgb { r: 96, g: 125, b: 168 };
-    pub const ICLOUD_ACCENT: Color = Color::Rgb { r: 152, g: 115, b: 168 };
+    pub const GOOGLE_ACCENT: Color = Color::Rgb(96, 125, 168);
+    pub const ICLOUD_ACCENT: Color = Color::Rgb(152, 115, 168);
 
     // Event states
-    pub const CURRENT_EVENT: Color = Color::Green;
-    pub const NEXT_EVENT: Color = Color::Yellow;
-    pub const PAST_EVENT: Color = Color::DarkGrey;
-    pub const FREE_EVENT: Color = Color::DarkGrey;
-    pub const SELECTED: Color = Color::Cyan;
+    pub const CURRENT_EVENT: Color = Color::LightGreen;
+    pub const NEXT_EVENT: Color = Color::LightYellow;
+    pub const PAST_EVENT: Color = Color::DarkGray;
+    pub const FREE_EVENT: Color = Color::DarkGray;
+    pub const SELECTED: Color = Color::LightCyan;
 
     // UI elements
-    pub const HEADER: Color = Color::Cyan;
-    pub const SEPARATOR: Color = Color::DarkGrey;
+    pub const HEADER: Color = Color::LightCyan;
+    pub const SEPARATOR: Color = Color::DarkGray;
 
     // Details panel
     pub const TITLE: Color = Color::White;
     pub const TIME: Color = Color::White;
-    pub const ACTION: Color = Color::Green;
+    pub const ACTION: Color = Color::LightGreen;
 
     // Overlap indicator
-    pub const OVERLAP_EVENT: Color = Color::Red;
+    pub const OVERLAP_EVENT: Color = Color::LightRed;
 
     // Week availability. Mid-tone marks that read on light and dark themes;
     // the free shade and past fading are derived from the real terminal
     // background at runtime (see free_block_color / blend_toward_bg).
     pub const BUSY_RGB: (u8, u8, u8) = (84, 113, 156);
     pub const HEATMAP_OVERLAP_RGB: (u8, u8, u8) = (156, 85, 85);
-    pub const BUSY_BLOCK: Color = Color::Rgb { r: BUSY_RGB.0, g: BUSY_RGB.1, b: BUSY_RGB.2 };
-    pub const HEATMAP_OVERLAP: Color = Color::Rgb { r: HEATMAP_OVERLAP_RGB.0, g: HEATMAP_OVERLAP_RGB.1, b: HEATMAP_OVERLAP_RGB.2 };
+    pub const BUSY_BLOCK: Color = Color::Rgb(BUSY_RGB.0, BUSY_RGB.1, BUSY_RGB.2);
+    pub const HEATMAP_OVERLAP: Color = Color::Rgb(HEATMAP_OVERLAP_RGB.0, HEATMAP_OVERLAP_RGB.1, HEATMAP_OVERLAP_RGB.2);
 
     // Status bar
-    pub const LOG_TEXT: Color = Color::DarkCyan;
-    pub const STATUS_MESSAGE: Color = Color::Yellow;
+    pub const LOG_TEXT: Color = Color::Cyan;
+    pub const STATUS_MESSAGE: Color = Color::LightYellow;
 }
 
 // Terminal write helpers
-fn draw_section_header(out: &mut impl Write, x: u16, y: u16, label: &str, width: usize) {
-    execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("\u{2500} {} ", label);
+fn draw_section_header(p: &mut Pen, x: u16, y: u16, label: &str, width: usize) {
+    p.move_to(x, y);
+    p.fg(Color::DarkGray);
+    p.print(&format!("\u{2500} {} ", label));
     let remaining = width.saturating_sub(label.len() + 3);
     for _ in 0..remaining {
-        print!("\u{2500}");
+        p.print(&"\u{2500}".to_string());
     }
-    execute!(out, ResetColor).unwrap();
+    p.reset();
 }
 
 pub struct RenderState<'a> {
@@ -122,6 +205,8 @@ pub struct RenderState<'a> {
     pub show_help: bool,
     // Setup wizard
     pub setup: Option<&'a SetupState>,
+    /// The clock for this frame (injected so rendering is deterministic in tests)
+    pub now: DateTime<Local>,
 }
 
 /// Information about an upcoming event for the countdown display
@@ -219,35 +304,24 @@ fn format_duration(minutes: i64) -> String {
     }
 }
 
-pub fn render(state: &RenderState) {
-    let mut out = stdout();
-    let today = Local::now().date_naive();
-
-    // Get terminal size
-    let (term_width, term_height) = terminal::size().unwrap_or((80, 24));
-
-    // Batch the whole frame so the clear+redraw appears atomically (no flicker
-    // on terminals supporting synchronized output — alacritty/ghostty/kitty/foot)
-    execute!(out, terminal::BeginSynchronizedUpdate).unwrap();
+pub fn render(frame: &mut Frame, state: &RenderState) {
+    let area = frame.area();
+    let (term_width, term_height) = (area.width, area.height);
+    let p = &mut Pen::new(frame.buffer_mut());
+    let today = state.now.date_naive();
 
     // Setup wizard takes over the whole screen
     if let Some(setup) = state.setup {
-        execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0)).unwrap();
-        render_setup_wizard(&mut out, setup, term_width, term_height);
-        execute!(out, terminal::EndSynchronizedUpdate).unwrap();
-        out.flush().unwrap();
+        render_setup_wizard(p, setup, term_width, term_height);
         return;
     }
 
-    // When search modal is active, skip redrawing underlying content to avoid flicker
-    if let Some(search) = state.search {
-        render_search_modal(&mut out, search, term_width, term_height);
-    } else {
-        // Clear and move to home position
-        execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0)).unwrap();
+    // Month view handles both normal and day timeline modes
+    render_month_view(p, state, today, term_width, term_height);
 
-        // Month view handles both normal and day timeline modes
-        render_month_view(&mut out, state, today, term_width, term_height);
+    if let Some(search) = state.search {
+        render_search_modal(p, search, state.now, term_width, term_height);
+    } else {
 
         // Render HTTP logs if enabled
         let log_height = if state.show_logs { 8 } else { 0 };
@@ -255,64 +329,64 @@ pub fn render(state: &RenderState) {
             let logs = get_recent_logs(log_height as usize);
             let log_start_row = term_height.saturating_sub(2 + log_height);
 
-            execute!(out, SetForegroundColor(colors::LOG_TEXT)).unwrap();
+            p.fg(colors::LOG_TEXT);
             for (i, log) in logs.iter().rev().enumerate() {
                 let row = log_start_row + i as u16;
                 if row < term_height.saturating_sub(2) {
-                    execute!(out, cursor::MoveTo(0, row)).unwrap();
-                    print!(" {}", truncate_str(log, term_width as usize - 2));
+                    p.move_to(0, row);
+                    p.print(&format!(" {}", truncate_str(log, (term_width as usize).saturating_sub(2))));
                 }
             }
-            execute!(out, ResetColor).unwrap();
+            p.reset();
         }
 
         // Render confirmation modal if there's a pending action
         if let Some(action) = state.pending_action {
-            render_confirmation_modal(&mut out, action, term_width, term_height);
+            render_confirmation_modal(p, action, term_width, term_height);
         }
 
         // Render help overlay on top of everything
         if state.show_help {
-            render_help_modal(&mut out, term_width, term_height);
+            render_help_modal(p, term_width, term_height);
         }
     }
 
     // Render status bar at bottom
     let status_row = term_height.saturating_sub(2);
-    execute!(out, cursor::MoveTo(0, status_row)).unwrap();
+    p.move_to(0, status_row);
 
     if let Some(msg) = state.status_message {
-        let color = if state.status_is_error { Color::Red } else { colors::STATUS_MESSAGE };
-        execute!(out, SetForegroundColor(color)).unwrap();
-        print!(" {}", truncate_str(msg, term_width as usize - 2));
-        execute!(out, ResetColor).unwrap();
+        let color = if state.status_is_error { Color::LightRed } else { colors::STATUS_MESSAGE };
+        p.fg(color);
+        p.print(&format!(" {}", truncate_str(msg, (term_width as usize).saturating_sub(2))));
+        p.reset();
     } else {
         // Show countdown to next event when no status message
-        let current_time = Local::now().time();
+        let current_time = state.now.time();
         if let Some(next_info) = find_next_event(state.events, today, current_time) {
             let title = truncate_str(&next_info.event.title, 30);
             if next_info.is_current || next_info.minutes_until <= 0 {
-                execute!(out, SetForegroundColor(colors::CURRENT_EVENT)).unwrap();
-                print!(" Now: {}", title);
+                p.fg(colors::CURRENT_EVENT);
+                p.print(&format!(" Now: {}", title));
             } else if next_info.minutes_until <= 15 {
-                execute!(out, SetForegroundColor(colors::NEXT_EVENT)).unwrap();
-                print!(" Next: {} in {}", title, format_duration(next_info.minutes_until));
+                p.fg(colors::NEXT_EVENT);
+                p.print(&format!(" Next: {} in {}", title, format_duration(next_info.minutes_until)));
             } else {
                 // Calm default: only the event title at full brightness
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!(" Next: ");
-                execute!(out, ResetColor).unwrap();
-                print!("{}", title);
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!(" in {}", format_duration(next_info.minutes_until));
+                p.fg(Color::DarkGray);
+                p.print(" Next: ");
+                p.reset();
+                p.print(&title.to_string());
+                p.fg(Color::DarkGray);
+                p.print(&format!(" in {}", format_duration(next_info.minutes_until)));
             }
-            execute!(out, ResetColor).unwrap();
+            p.reset();
         }
     }
 
     // Render controls based on current mode
-    execute!(out, cursor::MoveTo(0, term_height.saturating_sub(1))).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    p.move_to(0, term_height.saturating_sub(1));
+    p.fg(Color::DarkGray);
 
     let controls = if state.show_help {
         // Help overlay controls
@@ -333,16 +407,12 @@ pub fn render(state: &RenderState) {
         }
         c
     };
-    print!("{}", controls);
-    execute!(out, ResetColor).unwrap();
-
-    execute!(out, terminal::EndSynchronizedUpdate).unwrap();
-    out.flush().unwrap();
+    p.print(&controls);
+    p.reset();
 }
 
-fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
-    let now = Local::now();
-    let current_time = now.time();
+fn render_month_view(p: &mut Pen, state: &RenderState, today: NaiveDate, term_width: u16, term_height: u16) {
+    let current_time = state.now.time();
     let is_today = state.selected_date == today;
     let in_event_mode = state.navigation_mode == NavigationMode::Event;
 
@@ -368,17 +438,17 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
     let header_rows = 2u16;
 
     // Render calendar on left
-    render_calendar(out, state.current_date, state.selected_date, today, state.events, state.google_loading || state.icloud_loading, term_height);
+    render_calendar(p, state.current_date, state.selected_date, state.now, state.events, state.google_loading || state.icloud_loading, term_height);
 
     // Render event panels in the middle
     if events_panel_width >= MIN_PANEL_WIDTH {
         let events_x = cal_width + 1;
 
         // Events column header: selected date
-        execute!(out, cursor::MoveTo(events_x, 0)).unwrap();
-        execute!(out, SetAttribute(Attribute::Bold)).unwrap();
-        print!("{}", state.selected_date.format("%a %b %d"));
-        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        p.move_to(events_x, 0);
+        p.bold();
+        p.print(&format!("{}", state.selected_date.format("%a %b %d")));
+        p.reset();
 
         let google_events = state.events.google.get(state.selected_date);
         let icloud_events = state.events.icloud.get(state.selected_date);
@@ -421,7 +491,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         // Render Work (Google) panel
         render_event_panel(
-            out,
+            p,
             events_x,
             header_rows,
             events_panel_width,
@@ -443,7 +513,7 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
 
         // Render Personal (iCloud) panel below
         render_event_panel(
-            out,
+            p,
             events_x,
             personal_y,
             events_panel_width,
@@ -460,10 +530,10 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
         );
     } else if events_panel_width >= 4 {
         // Terminal too narrow for the event panels — say so instead of showing nothing
-        execute!(out, cursor::MoveTo(cal_width + 1, 0)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("{}", truncate_str("Too narrow for events", events_panel_width as usize));
-        execute!(out, ResetColor).unwrap();
+        p.move_to(cal_width + 1, 0);
+        p.fg(Color::DarkGray);
+        p.print(&truncate_str("Too narrow for events", events_panel_width as usize).to_string());
+        p.reset();
     }
 
     // Render details panel on the right when in Event mode
@@ -478,24 +548,25 @@ fn render_month_view(out: &mut impl Write, state: &RenderState, today: NaiveDate
             EventSource::ICloud => state.events.icloud.get(state.selected_date).get(state.selected_event_index),
         };
 
-        render_event_details_column(out, details_x, 0, details_panel_width, details_height, selected_event);
+        render_event_details_column(p, details_x, 0, details_panel_width, details_height, selected_event);
     }
 
 }
 
 fn render_calendar(
-    out: &mut impl Write,
+    p: &mut Pen,
     current_date: NaiveDate,
     selected_date: NaiveDate,
-    today: NaiveDate,
+    now: DateTime<Local>,
     events: &EventCache,
     is_loading: bool,
     term_height: u16,
 ) {
-    execute!(out, cursor::MoveTo(0, 0)).unwrap();
+    let today = now.date_naive();
+    p.move_to(0, 0);
 
     // Month header
-    execute!(out, SetAttribute(Attribute::Bold)).unwrap();
+    p.bold();
 
     let cal_width = CALENDAR_WIDTH;
     let loading_indicator = if is_loading { " *" } else { "" };
@@ -505,14 +576,14 @@ fn render_calendar(
         current_date.year(),
         loading_indicator
     );
-    print!("{}", truncate_str(&header, cal_width as usize));
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    p.print(&truncate_str(&header, cal_width as usize).to_string());
+    p.reset();
 
     // Weekday header
-    execute!(out, cursor::MoveTo(0, 2)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("Mo Tu We Th Fr Sa Su");
-    execute!(out, ResetColor).unwrap();
+    p.move_to(0, 2);
+    p.fg(Color::DarkGray);
+    p.print("Mo Tu We Th Fr Sa Su");
+    p.reset();
 
     // Calendar grid
     let first_day = current_date.with_day(1).unwrap();
@@ -521,12 +592,12 @@ fn render_calendar(
     let cols = 7;
 
     for row in 0..6 {
-        execute!(out, cursor::MoveTo(0, 3 + row as u16)).unwrap();
+        p.move_to(0, 3 + row as u16);
 
         for col in 0..cols {
             let cell = row * 7 + col; // Always use 7-day weeks for calculation
             if cell < start_weekday || cell >= start_weekday + days_in_month {
-                print!("   ");
+                p.print("   ");
             } else {
                 let day = cell - start_weekday + 1;
                 let date = first_day.with_day(day).unwrap();
@@ -536,32 +607,22 @@ fn render_calendar(
 
                 if is_selected {
                     // Explicit colors: Reverse over a dark theme made the cursor nearly invisible
-                    execute!(
-                        out,
-                        SetBackgroundColor(Color::Cyan),
-                        SetForegroundColor(Color::Black)
-                    )
-                    .unwrap();
+                    p.bg(Color::LightCyan); p.fg(Color::Black);
                 } else if is_today {
-                    execute!(
-                        out,
-                        SetForegroundColor(Color::Green),
-                        SetAttribute(Attribute::Bold)
-                    )
-                    .unwrap();
+                    p.fg(Color::LightGreen); p.bold();
                 } else if is_weekend {
-                    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+                    p.fg(Color::DarkGray);
                 }
 
-                print!("{:2} ", day);
+                p.print(&format!("{:2} ", day));
 
-                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+                p.reset();
             }
         }
     }
 
     // Render week availability below the calendar grid
-    render_week_availability(out, events, selected_date, term_height);
+    render_week_availability(p, events, selected_date, now, term_height);
 }
 
 /// Parse an event's time range into (start_minutes, end_minutes) from midnight.
@@ -659,36 +720,34 @@ fn get_week_monday(date: NaiveDate) -> NaiveDate {
 
 /// Render week availability grid below the calendar
 fn render_week_availability(
-    out: &mut impl Write,
+    p: &mut Pen,
     events: &EventCache,
     selected_date: NaiveDate,
+    now: DateTime<Local>,
     term_height: u16,
 ) {
     let start_row = 10u16; // Below the calendar grid
     let monday = get_week_monday(selected_date);
-    let today = Local::now().date_naive();
-    let current_minutes = {
-        let now = Local::now().time();
-        now.hour() * 60 + now.minute()
-    };
+    let today = now.date_naive();
+    let current_minutes = now.hour() * 60 + now.minute();
     let num_days = 7;
     let max_row = term_height.saturating_sub(2); // don't collide with the status bar
 
     // Header row: highlight the selected day's column (and today's)
-    execute!(out, cursor::MoveTo(0, start_row)).unwrap();
-    print!("   ");
+    p.move_to(0, start_row);
+    p.print("   ");
     for day_offset in 0..7i64 {
         let date = monday + Duration::days(day_offset);
         let letter = ["M", "T", "W", "T", "F", "S", "S"][day_offset as usize];
         if date == selected_date {
-            execute!(out, SetForegroundColor(colors::SELECTED), SetAttribute(Attribute::Bold)).unwrap();
+            p.fg(colors::SELECTED); p.bold();
         } else if date == today {
-            execute!(out, SetForegroundColor(Color::Green)).unwrap();
+            p.fg(Color::LightGreen);
         } else {
-            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+            p.fg(Color::DarkGray);
         }
-        print!(" {} ", letter);
-        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        p.print(&format!(" {} ", letter));
+        p.reset();
     }
 
     // Render each hour row (8am - 7pm = 12 rows)
@@ -700,12 +759,12 @@ fn render_week_availability(
             break;
         }
 
-        execute!(out, cursor::MoveTo(0, row)).unwrap();
+        p.move_to(0, row);
 
         // Hour label
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("{:2} ", hour);
-        execute!(out, ResetColor).unwrap();
+        p.fg(Color::DarkGray);
+        p.print(&format!("{:2} ", hour));
+        p.reset();
 
         // Check each weekday
         for day_offset in 0..num_days as i64 {
@@ -737,7 +796,7 @@ fn render_week_availability(
                 if past {
                     blend_toward_bg(rgb, 0.55)
                 } else {
-                    Color::Rgb { r: rgb.0, g: rgb.1, b: rgb.2 }
+                    Color::Rgb(rgb.0, rgb.1, rgb.2)
                 }
             };
             let free = free_block_color();
@@ -749,30 +808,30 @@ fn render_week_availability(
                     let top = color_for(first_half_count, first_half_past);
                     let bot = color_for(second_half_count, second_half_past);
                     if top == bot {
-                        execute!(out, SetForegroundColor(top)).unwrap();
-                        print!("██");
+                        p.fg(top);
+                        p.print("██");
                     } else {
-                        execute!(out, SetForegroundColor(top), SetBackgroundColor(bot)).unwrap();
-                        print!("▀▀");
+                        p.fg(top); p.bg(bot);
+                        p.print("▀▀");
                     }
                 }
                 (true, false) => {
-                    execute!(out, SetForegroundColor(color_for(first_half_count, first_half_past)), SetBackgroundColor(free)).unwrap();
-                    print!("▀▀");
+                    p.fg(color_for(first_half_count, first_half_past)); p.bg(free);
+                    p.print("▀▀");
                 }
                 (false, true) => {
-                    execute!(out, SetForegroundColor(color_for(second_half_count, second_half_past)), SetBackgroundColor(free)).unwrap();
-                    print!("▄▄");
+                    p.fg(color_for(second_half_count, second_half_past)); p.bg(free);
+                    p.print("▄▄");
                 }
                 (false, false) => {
-                    execute!(out, SetForegroundColor(free)).unwrap();
-                    print!("██");
+                    p.fg(free);
+                    p.print("██");
                 }
             }
-            execute!(out, ResetColor).unwrap();
-            print!(" ");
+            p.reset();
+            p.print(" ");
         }
-        execute!(out, ResetColor).unwrap();
+        p.reset();
     }
 
     // Events outside the 08:00–20:00 window would otherwise be invisible here —
@@ -801,20 +860,20 @@ fn render_week_availability(
             any |= early || late;
         }
         if any {
-            execute!(out, cursor::MoveTo(0, marker_row)).unwrap();
-            execute!(out, SetForegroundColor(Color::DarkYellow)).unwrap();
-            print!("   ");
+            p.move_to(0, marker_row);
+            p.fg(Color::Yellow);
+            p.print("   ");
             for marker in markers {
-                print!(" {} ", marker);
+                p.print(&format!(" {} ", marker));
             }
-            execute!(out, ResetColor).unwrap();
+            p.reset();
         }
     }
 }
 
 /// Render event panel with title and events
 fn render_event_panel(
-    out: &mut impl Write,
+    p: &mut Pen,
     x: u16,
     y: u16,
     width: u16,
@@ -830,23 +889,23 @@ fn render_event_panel(
     max_rows: usize,
 ) {
     // Panel header: just the label in a muted accent — no rules
-    execute!(out, cursor::MoveTo(x, y)).unwrap();
-    execute!(out, SetForegroundColor(accent_color)).unwrap();
+    p.move_to(x, y);
+    p.fg(accent_color);
     let loading_str = if is_loading { "*" } else { "" };
-    print!("{}{}", title, loading_str);
-    execute!(out, ResetColor).unwrap();
+    p.print(&format!("{}{}", title, loading_str));
+    p.reset();
 
     let content_start = y + 1;
 
     if events.is_empty() {
-        execute!(out, cursor::MoveTo(x, content_start)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        p.move_to(x, content_start);
+        p.fg(Color::DarkGray);
         if is_loading {
-            print!("Loading...");
+            p.print("Loading...");
         } else {
-            print!("No events");
+            p.print("No events");
         }
-        execute!(out, ResetColor).unwrap();
+        p.reset();
         return;
     }
 
@@ -874,7 +933,7 @@ fn render_event_panel(
 
     for (row, i) in (start..start + visible).enumerate() {
         let event = &events[i];
-        execute!(out, cursor::MoveTo(x, content_start + row as u16)).unwrap();
+        p.move_to(x, content_start + row as u16);
 
         let is_selected = selected_index == Some(i);
         let is_current = current_event_idx == Some(i);
@@ -905,28 +964,28 @@ fn render_event_panel(
 
         // Selection indicator
         if is_selected {
-            execute!(out, SetForegroundColor(Color::Cyan)).unwrap();
-            print!("\u{25B6}"); // Right-pointing triangle
+            p.fg(Color::LightCyan);
+            p.print(&"\u{25B6}".to_string()); // Right-pointing triangle
         } else if is_current && !is_unaccepted && !is_free_event {
-            execute!(out, SetForegroundColor(Color::Green)).unwrap();
-            print!("\u{25CF}"); // Filled circle
+            p.fg(Color::LightGreen);
+            p.print(&"\u{25CF}".to_string()); // Filled circle
         } else if is_overlapping && !is_past_day && !is_unaccepted && !is_free_event && !is_past_event {
-            execute!(out, SetForegroundColor(colors::OVERLAP_EVENT)).unwrap();
-            print!("!");
+            p.fg(colors::OVERLAP_EVENT);
+            p.print("!");
         } else if is_next && !is_unaccepted && !is_free_event {
-            execute!(out, SetForegroundColor(Color::Yellow)).unwrap();
-            print!("\u{25CB}"); // Empty circle
+            p.fg(Color::LightYellow);
+            p.print(&"\u{25CB}".to_string()); // Empty circle
         } else {
-            print!(" ");
+            p.print(" ");
         }
 
         // Time (carries the status color; two-space gutter before the title)
-        execute!(out, SetForegroundColor(event_color)).unwrap();
+        p.fg(event_color);
         if is_selected || ((is_current || is_next) && !is_unaccepted && !is_free_event) {
-            execute!(out, SetAttribute(Attribute::Bold)).unwrap();
+            p.bold();
         }
-        print!("{:>7}  ", event.time_str);
-        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        p.print(&format!("{:>7}  ", event.time_str));
+        p.reset();
 
         // Title stays uncolored unless the row is selected or receding —
         // status colors live on the marker and time only
@@ -939,33 +998,33 @@ fn render_event_panel(
         } else {
             Color::Reset
         };
-        execute!(out, SetForegroundColor(title_color)).unwrap();
+        p.fg(title_color);
         if is_selected {
-            execute!(out, SetAttribute(Attribute::Bold)).unwrap();
+            p.bold();
         }
         let title_width = width.saturating_sub(11) as usize;
-        print!("{}", truncate_str(&event.title, title_width));
-        execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+        p.print(&truncate_str(&event.title, title_width).to_string());
+        p.reset();
     }
 
     // Clipped-events indicator on the reserved last row
     if total > visible {
         let below = total - (start + visible);
-        execute!(out, cursor::MoveTo(x, content_start + visible as u16)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+        p.move_to(x, content_start + visible as u16);
+        p.fg(Color::DarkGray);
         let indicator = match (start > 0, below > 0) {
             (true, true) => format!(" \u{2026} {} above \u{00B7} {} more", start, below),
             (true, false) => format!(" \u{2026} {} above", start),
             _ => format!(" \u{2026} +{} more", below),
         };
-        print!("{}", truncate_str(&indicator, width as usize));
-        execute!(out, ResetColor).unwrap();
+        p.print(&truncate_str(&indicator, width as usize).to_string());
+        p.reset();
     }
 }
 
 /// Render event details in a column
 fn render_event_details_column(
-    out: &mut impl Write,
+    p: &mut Pen,
     x: u16,
     y: u16,
     width: u16,
@@ -977,30 +1036,30 @@ fn render_event_details_column(
     let max_row = y + height.saturating_sub(1);
 
     let Some(event) = event else {
-        execute!(out, cursor::MoveTo(content_x, y)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("No event selected");
-        execute!(out, ResetColor).unwrap();
+        p.move_to(content_x, y);
+        p.fg(Color::DarkGray);
+        p.print("No event selected");
+        p.reset();
         return;
     };
 
     let mut current_row = y;
 
     // Title doubles as the panel header
-    execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-    execute!(out, SetForegroundColor(colors::TITLE), SetAttribute(Attribute::Bold)).unwrap();
-    print!("{}", truncate_str(&event.title, content_width));
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    p.move_to(content_x, current_row);
+    p.fg(colors::TITLE); p.bold();
+    p.print(&truncate_str(&event.title, content_width).to_string());
+    p.reset();
     current_row += 1;
 
     // Time, with the calendar source as a dim suffix
-    execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+    p.move_to(content_x, current_row);
     let time_text = match event.end_time_str {
         Some(ref end) => format!("{} \u{2013} {}", event.time_str, end),
         None => event.time_str.clone(),
     };
-    execute!(out, SetForegroundColor(colors::TIME)).unwrap();
-    print!("{}", truncate_str(&time_text, content_width));
+    p.fg(colors::TIME);
+    p.print(&truncate_str(&time_text, content_width).to_string());
     let (source, calendar_name) = match &event.id {
         EventId::Google { calendar_name, .. } => ("Google", calendar_name),
         EventId::ICloud { calendar_name, .. } => ("iCloud", calendar_name),
@@ -1011,19 +1070,19 @@ fn render_event_details_column(
     };
     let remaining = content_width.saturating_sub(time_text.len());
     if remaining > 4 {
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("{}", truncate_str(&source_text, remaining));
+        p.fg(Color::DarkGray);
+        p.print(&truncate_str(&source_text, remaining).to_string());
     }
-    execute!(out, ResetColor).unwrap();
+    p.reset();
     current_row += 1;
 
     // Location
     if let Some(ref loc) = event.location
         && !loc.is_empty() && current_row < max_row {
-            execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-            print!("{}", truncate_str(loc, content_width));
-            execute!(out, ResetColor).unwrap();
+            p.move_to(content_x, current_row);
+            p.fg(Color::DarkGray);
+            p.print(&truncate_str(loc, content_width).to_string());
+            p.reset();
             current_row += 1;
         }
 
@@ -1039,20 +1098,20 @@ fn render_event_details_column(
         }
         actions.push("x delete");
 
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("{}", truncate_str(&actions.join("  "), content_width));
-        execute!(out, ResetColor).unwrap();
+        p.move_to(content_x, current_row);
+        p.fg(Color::DarkGray);
+        p.print(&truncate_str(&actions.join("  "), content_width).to_string());
+        p.reset();
         current_row += 1;
     }
 
     // Participants
     current_row += 1; // blank line before participants
     if !event.attendees.is_empty() && current_row < max_row {
-        execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("Participants");
-        execute!(out, ResetColor).unwrap();
+        p.move_to(content_x, current_row);
+        p.fg(Color::DarkGray);
+        p.print("Participants");
+        p.reset();
         current_row += 1;
 
         let total = event.attendees.len();
@@ -1063,19 +1122,19 @@ fn render_event_details_column(
             // On the last available row, summarize the rest instead of showing one more name
             let remaining = total - idx;
             if current_row == max_row - 1 && remaining > 1 {
-                execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!("  \u{2026} +{} more", remaining);
-                execute!(out, ResetColor).unwrap();
+                p.move_to(content_x, current_row);
+                p.fg(Color::DarkGray);
+                p.print(&format!("  \u{2026} +{} more", remaining));
+                p.reset();
                 break;
             }
 
-            execute!(out, cursor::MoveTo(content_x, current_row)).unwrap();
+            p.move_to(content_x, current_row);
 
             // Status icon
-            execute!(out, SetForegroundColor(attendee.status.color())).unwrap();
-            print!("  {} ", attendee.status.icon());
-            execute!(out, ResetColor).unwrap();
+            p.fg(attendee.status.color());
+            p.print(&format!("  {} ", attendee.status.icon()));
+            p.reset();
 
             // Name or email
             let display_name = attendee.name.as_ref().unwrap_or(&attendee.email);
@@ -1084,10 +1143,10 @@ fn render_event_details_column(
                 _ => "",
             };
             let name_width = content_width.saturating_sub(5 + status_str.len());
-            print!("{}", truncate_str(display_name, name_width));
-            execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-            print!("{}", status_str);
-            execute!(out, ResetColor).unwrap();
+            p.print(&truncate_str(display_name, name_width).to_string());
+            p.fg(Color::DarkGray);
+            p.print(&status_str.to_string());
+            p.reset();
             current_row += 1;
         }
     }
@@ -1197,7 +1256,7 @@ fn format_smart_when(date: NaiveDate, time_str: &str, today: NaiveDate) -> Strin
 }
 
 /// Render the interactive setup wizard
-fn render_setup_wizard(out: &mut impl Write, setup: &SetupState, term_width: u16, term_height: u16) {
+fn render_setup_wizard(p: &mut Pen, setup: &SetupState, term_width: u16, term_height: u16) {
     // Collect lines to render: (text, style)
     enum Style { Header, Normal, Dim, Accent, Error }
 
@@ -1326,7 +1385,7 @@ fn render_setup_wizard(out: &mut impl Write, setup: &SetupState, term_width: u16
         let row = start_y + i as u16;
         if row >= term_height { break; }
 
-        execute!(out, cursor::MoveTo(base_x, row)).unwrap();
+        p.move_to(base_x, row);
 
         // Check if this is the input line placeholder
         if !input_rendered {
@@ -1334,10 +1393,10 @@ fn render_setup_wizard(out: &mut impl Write, setup: &SetupState, term_width: u16
                 if text.is_empty() && matches!(style, Style::Normal) && i > 0 {
                     let prev = &lines[i - 1];
                     if matches!(prev.1, Style::Normal) && (prev.0.contains("Paste") || prev.0.contains("Enter")) {
-                        execute!(out, SetForegroundColor(Color::White)).unwrap();
+                        p.fg(Color::White);
                         let display = truncate_str(il, max_content_width as usize);
-                        print!("{}", display);
-                        execute!(out, ResetColor).unwrap();
+                        p.print(&display.to_string());
+                        p.reset();
                         input_rendered = true;
                         continue;
                     }
@@ -1348,39 +1407,39 @@ fn render_setup_wizard(out: &mut impl Write, setup: &SetupState, term_width: u16
         // Check if this is the error placeholder
         if matches!(style, Style::Error) {
             if let Some(ref err) = setup.error {
-                execute!(out, SetForegroundColor(Color::Red)).unwrap();
-                print!("{}", err);
-                execute!(out, ResetColor).unwrap();
+                p.fg(Color::LightRed);
+                p.print(&err.to_string());
+                p.reset();
                 continue;
             }
         }
 
         match style {
             Style::Header => {
-                execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
-                print!("{}", text);
-                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+                p.fg(colors::HEADER); p.bold();
+                p.print(&text.to_string());
+                p.reset();
             }
             Style::Accent => {
-                execute!(out, SetForegroundColor(Color::Green)).unwrap();
-                print!("{}", text);
-                execute!(out, ResetColor).unwrap();
+                p.fg(Color::LightGreen);
+                p.print(&text.to_string());
+                p.reset();
             }
             Style::Dim => {
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!("{}", text);
-                execute!(out, ResetColor).unwrap();
+                p.fg(Color::DarkGray);
+                p.print(&text.to_string());
+                p.reset();
             }
             Style::Error => {} // handled above
             Style::Normal => {
-                print!("{}", text);
+                p.print(&text.to_string());
             }
         }
     }
 }
 
 /// Render a centered search modal
-fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u16, term_height: u16) {
+fn render_search_modal(p: &mut Pen, search: &SearchState, now: DateTime<Local>, term_width: u16, term_height: u16) {
     use crate::app::EventSource;
     use crate::cache::EventId;
 
@@ -1389,68 +1448,68 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
     let start_x = (term_width.saturating_sub(modal_width)) / 2;
     let start_y = (term_height.saturating_sub(modal_height)) / 2;
 
-    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
+    p.fg(colors::HEADER);
 
     // Top border with title
-    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
-    print!("┌─ Search ");
+    p.move_to(start_x, start_y);
+    p.print("┌─ Search ");
     let remaining_top = modal_width.saturating_sub(11);
     for _ in 0..remaining_top {
-        print!("─");
+        p.print("─");
     }
-    print!("┐");
+    p.print("┐");
 
     // Empty rows
-    for row in 1..modal_height - 1 {
-        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
-        print!("│");
-        for _ in 0..modal_width - 2 {
-            print!(" ");
+    for row in 1..modal_height.saturating_sub(1) {
+        p.move_to(start_x, start_y + row);
+        p.print("│");
+        for _ in 0..modal_width.saturating_sub(2) {
+            p.print(" ");
         }
-        print!("│");
+        p.print("│");
     }
 
     // Bottom border
-    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
-    print!("└");
-    for _ in 0..modal_width - 2 {
-        print!("─");
+    p.move_to(start_x, start_y + modal_height.saturating_sub(1));
+    p.print("└");
+    for _ in 0..modal_width.saturating_sub(2) {
+        p.print("─");
     }
-    print!("┘");
+    p.print("┘");
 
-    execute!(out, ResetColor).unwrap();
+    p.reset();
 
     // Input field
     let content_x = start_x + 2;
-    let content_width = (modal_width - 4) as usize;
-    execute!(out, cursor::MoveTo(content_x, start_y + 1)).unwrap();
-    execute!(out, SetForegroundColor(Color::White), SetAttribute(Attribute::Bold)).unwrap();
+    let content_width = (modal_width.saturating_sub(4)) as usize;
+    p.move_to(content_x, start_y + 1);
+    p.fg(Color::White); p.bold();
     let query_display = truncate_str(&search.query, content_width.saturating_sub(3));
-    print!("> {}_ ", query_display);
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    p.print(&format!("> {}_ ", query_display));
+    p.reset();
 
     // Separator
-    execute!(out, cursor::MoveTo(content_x, start_y + 2)).unwrap();
-    execute!(out, SetForegroundColor(colors::SEPARATOR)).unwrap();
+    p.move_to(content_x, start_y + 2);
+    p.fg(colors::SEPARATOR);
     for _ in 0..content_width {
-        print!("─");
+        p.print("─");
     }
-    execute!(out, ResetColor).unwrap();
+    p.reset();
 
     // Results area
     let results_start_y = start_y + 3;
-    let results_height = (modal_height - 5) as usize; // 3 top (border+input+sep) + 2 bottom (hint+border)
+    let results_height = (modal_height.saturating_sub(5)) as usize; // 3 top (border+input+sep) + 2 bottom (hint+border)
 
     if search.query.is_empty() {
-        execute!(out, cursor::MoveTo(content_x, results_start_y)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("Type to search events...");
-        execute!(out, ResetColor).unwrap();
+        p.move_to(content_x, results_start_y);
+        p.fg(Color::DarkGray);
+        p.print("Type to search events...");
+        p.reset();
     } else if search.results.is_empty() {
-        execute!(out, cursor::MoveTo(content_x, results_start_y)).unwrap();
-        execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-        print!("No matching events");
-        execute!(out, ResetColor).unwrap();
+        p.move_to(content_x, results_start_y);
+        p.fg(Color::DarkGray);
+        p.print("No matching events");
+        p.reset();
     } else {
         let num_title_matches = search.results.iter()
             .filter(|r| r.match_type == MatchType::Title)
@@ -1479,7 +1538,7 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
             0
         };
 
-        let today = Local::now().date_naive();
+        let today = now.date_naive();
         let mut visual_row: usize = 0;
         let mut result_idx: usize = 0;
         let people_header_row = num_title_matches + has_title_header as usize;
@@ -1493,7 +1552,7 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
                 if visual_row >= visible_start {
                     let screen_row = results_start_y + (visual_row - visible_start) as u16;
                     let label = if visual_row == 0 { "Titles" } else { "People" };
-                    draw_section_header(out, content_x, screen_row, label, content_width);
+                    draw_section_header(p, content_x, screen_row, label, content_width);
                 }
                 visual_row += 1;
                 continue;
@@ -1508,41 +1567,41 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
 
             if visual_row >= visible_start {
                 let row = results_start_y + (visual_row - visible_start) as u16;
-                execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+                p.move_to(content_x, row);
 
                 // Selection indicator
                 if is_selected {
-                    execute!(out, SetForegroundColor(colors::SELECTED)).unwrap();
-                    print!("▶ ");
+                    p.fg(colors::SELECTED);
+                    p.print("▶ ");
                 } else {
-                    print!("  ");
+                    p.print("  ");
                 }
 
                 // Smart when column
                 let when = format_smart_when(result.event.date, &result.event.time_str, today);
-                execute!(out, SetForegroundColor(if is_selected { colors::SELECTED } else { Color::DarkGrey })).unwrap();
-                print!("{:>11} ", when);
+                p.fg(if is_selected { colors::SELECTED } else { Color::DarkGray });
+                p.print(&format!("{:>11} ", when));
 
                 // Source color indicator
                 let source_color = match result.source {
                     EventSource::Google => colors::GOOGLE_ACCENT,
                     EventSource::ICloud => colors::ICLOUD_ACCENT,
                 };
-                execute!(out, SetForegroundColor(source_color)).unwrap();
+                p.fg(source_color);
                 let source_char = match result.event.id {
                     EventId::Google { .. } => "G",
                     EventId::ICloud { .. } => "I",
                 };
-                print!("{} ", source_char);
+                p.print(&format!("{} ", source_char));
 
                 // Title
                 let title_space = content_width.saturating_sub(2 + 12 + 2);
-                execute!(out, SetForegroundColor(if is_selected { colors::SELECTED } else { Color::White })).unwrap();
+                p.fg(if is_selected { colors::SELECTED } else { Color::White });
                 if is_selected {
-                    execute!(out, SetAttribute(Attribute::Bold)).unwrap();
+                    p.bold();
                 }
-                print!("{}", truncate_str(&result.event.title, title_space));
-                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+                p.print(&truncate_str(&result.event.title, title_space).to_string());
+                p.reset();
             }
 
             result_idx += 1;
@@ -1551,20 +1610,20 @@ fn render_search_modal(out: &mut impl Write, search: &SearchState, term_width: u
     }
 
     // Bottom hint
-    let hint_y = start_y + modal_height - 2;
-    execute!(out, cursor::MoveTo(content_x, hint_y)).unwrap();
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
+    let hint_y = start_y + modal_height.saturating_sub(2);
+    p.move_to(content_x, hint_y);
+    p.fg(Color::DarkGray);
     let count_str = if search.results.is_empty() {
         String::new()
     } else {
         format!("{}/{} ", search.selected_index + 1, search.results.len())
     };
-    print!("{}\u{2191}\u{2193}:navigate Enter:select Esc:close", count_str);
-    execute!(out, ResetColor).unwrap();
+    p.print(&format!("{}\u{2191}\u{2193}:navigate Enter:select Esc:close", count_str));
+    p.reset();
 }
 
 /// Render the help overlay listing all keybindings and the availability legend
-fn render_help_modal(out: &mut impl Write, term_width: u16, term_height: u16) {
+fn render_help_modal(p: &mut Pen, term_width: u16, term_height: u16) {
     enum Line {
         Section(&'static str),
         Item(&'static str, &'static str),
@@ -1603,69 +1662,69 @@ fn render_help_modal(out: &mut impl Write, term_width: u16, term_height: u16) {
     let start_y = (term_height.saturating_sub(modal_height)) / 2;
 
     // Box with title, blank interior
-    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
-    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
-    print!("┌─ Help ");
+    p.fg(colors::HEADER);
+    p.move_to(start_x, start_y);
+    p.print("┌─ Help ");
     for _ in 0..modal_width.saturating_sub(9) {
-        print!("─");
+        p.print("─");
     }
-    print!("┐");
-    for row in 1..modal_height - 1 {
-        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
-        print!("│");
-        for _ in 0..modal_width - 2 {
-            print!(" ");
+    p.print("┐");
+    for row in 1..modal_height.saturating_sub(1) {
+        p.move_to(start_x, start_y + row);
+        p.print("│");
+        for _ in 0..modal_width.saturating_sub(2) {
+            p.print(" ");
         }
-        print!("│");
+        p.print("│");
     }
-    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
-    print!("└");
-    for _ in 0..modal_width - 2 {
-        print!("─");
+    p.move_to(start_x, start_y + modal_height.saturating_sub(1));
+    p.print("└");
+    for _ in 0..modal_width.saturating_sub(2) {
+        p.print("─");
     }
-    print!("┘");
-    execute!(out, ResetColor).unwrap();
+    p.print("┘");
+    p.reset();
 
     let content_x = start_x + 2;
-    let max_row = start_y + modal_height - 1;
+    let max_row = start_y + modal_height.saturating_sub(1);
     let mut row = start_y + 1;
     for line in &lines {
         if row >= max_row {
             break;
         }
-        execute!(out, cursor::MoveTo(content_x, row)).unwrap();
+        p.move_to(content_x, row);
         match line {
             Section(title) => {
-                execute!(out, SetForegroundColor(colors::HEADER), SetAttribute(Attribute::Bold)).unwrap();
-                print!("{}", title);
-                execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+                p.fg(colors::HEADER); p.bold();
+                p.print(&title.to_string());
+                p.reset();
             }
             Item(keys, desc) => {
-                execute!(out, SetForegroundColor(Color::White)).unwrap();
-                print!("{:>12}", keys);
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!("  {}", desc);
-                execute!(out, ResetColor).unwrap();
+                p.fg(Color::White);
+                p.print(&format!("{:>12}", keys));
+                p.fg(Color::DarkGray);
+                p.print(&format!("  {}", desc));
+                p.reset();
             }
             Legend => {
-                execute!(out, SetForegroundColor(colors::BUSY_BLOCK)).unwrap();
-                print!("{:>12}", "██");
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!(" busy  ");
-                execute!(out, SetForegroundColor(colors::HEATMAP_OVERLAP)).unwrap();
-                print!("██");
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!(" double-booked  ");
-                execute!(out, SetForegroundColor(free_block_color())).unwrap();
-                print!("██");
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!(" free");
-                execute!(out, ResetColor).unwrap();
+                p.fg(colors::BUSY_BLOCK);
+                p.print(&format!("{:>12}", "██"));
+                p.fg(Color::DarkGray);
+                p.print(" busy  ");
+                p.fg(colors::HEATMAP_OVERLAP);
+                p.print("██");
+                p.fg(Color::DarkGray);
+                p.print(" double-booked  ");
+                p.fg(free_block_color());
+                p.print("██");
+                p.fg(Color::DarkGray);
+                p.print(" free");
+                p.reset();
             }
             Note(text) => {
-                execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-                print!("{}", text);
-                execute!(out, ResetColor).unwrap();
+                p.fg(Color::DarkGray);
+                p.print(&text.to_string());
+                p.reset();
             }
         }
         row += 1;
@@ -1673,7 +1732,7 @@ fn render_help_modal(out: &mut impl Write, term_width: u16, term_height: u16) {
 }
 
 /// Render a centered confirmation modal
-fn render_confirmation_modal(out: &mut impl Write, action: &PendingAction, term_width: u16, term_height: u16) {
+fn render_confirmation_modal(p: &mut Pen, action: &PendingAction, term_width: u16, term_height: u16) {
     let prompt = match action {
         PendingAction::AcceptEvent { .. } => "Accept this event?",
         PendingAction::DeclineEvent { .. } => "Decline this event?",
@@ -1687,51 +1746,51 @@ fn render_confirmation_modal(out: &mut impl Write, action: &PendingAction, term_
     let start_y = (term_height.saturating_sub(modal_height)) / 2;
 
     // Draw modal box
-    execute!(out, SetForegroundColor(colors::HEADER)).unwrap();
+    p.fg(colors::HEADER);
 
     // Top border
-    execute!(out, cursor::MoveTo(start_x, start_y)).unwrap();
-    print!("┌");
-    for _ in 0..modal_width - 2 {
-        print!("─");
+    p.move_to(start_x, start_y);
+    p.print("┌");
+    for _ in 0..modal_width.saturating_sub(2) {
+        p.print("─");
     }
-    print!("┐");
+    p.print("┐");
 
     // Middle rows
-    for row in 1..modal_height - 1 {
-        execute!(out, cursor::MoveTo(start_x, start_y + row)).unwrap();
-        print!("│");
-        for _ in 0..modal_width - 2 {
-            print!(" ");
+    for row in 1..modal_height.saturating_sub(1) {
+        p.move_to(start_x, start_y + row);
+        p.print("│");
+        for _ in 0..modal_width.saturating_sub(2) {
+            p.print(" ");
         }
-        print!("│");
+        p.print("│");
     }
 
     // Bottom border
-    execute!(out, cursor::MoveTo(start_x, start_y + modal_height - 1)).unwrap();
-    print!("└");
-    for _ in 0..modal_width - 2 {
-        print!("─");
+    p.move_to(start_x, start_y + modal_height.saturating_sub(1));
+    p.print("└");
+    for _ in 0..modal_width.saturating_sub(2) {
+        p.print("─");
     }
-    print!("┘");
+    p.print("┘");
 
     // Title
-    execute!(out, cursor::MoveTo(start_x + 2, start_y + 1)).unwrap();
-    execute!(out, SetForegroundColor(colors::NEXT_EVENT), SetAttribute(Attribute::Bold)).unwrap();
-    print!("{}", prompt);
-    execute!(out, ResetColor, SetAttribute(Attribute::Reset)).unwrap();
+    p.move_to(start_x + 2, start_y + 1);
+    p.fg(colors::NEXT_EVENT); p.bold();
+    p.print(&prompt.to_string());
+    p.reset();
 
     // Options
-    execute!(out, cursor::MoveTo(start_x + 2, start_y + 3)).unwrap();
-    execute!(out, SetForegroundColor(colors::ACTION)).unwrap();
-    print!("[y/Enter]");
-    execute!(out, SetForegroundColor(Color::White)).unwrap();
-    print!(" Yes  ");
-    execute!(out, SetForegroundColor(Color::DarkGrey)).unwrap();
-    print!("[n/Esc]");
-    execute!(out, SetForegroundColor(Color::White)).unwrap();
-    print!(" No");
-    execute!(out, ResetColor).unwrap();
+    p.move_to(start_x + 2, start_y + 3);
+    p.fg(colors::ACTION);
+    p.print("[y/Enter]");
+    p.fg(Color::White);
+    p.print(" Yes  ");
+    p.fg(Color::DarkGray);
+    p.print("[n/Esc]");
+    p.fg(Color::White);
+    p.print(" No");
+    p.reset();
 }
 
 fn days_in_month(date: NaiveDate) -> u32 {
@@ -2039,5 +2098,117 @@ mod tests {
         let (g, i) = compute_overlapping_events(&google, &icloud);
         assert!(g.contains(&0));
         assert!(i.contains(&0));
+    }
+
+    // ---- rendering through ratatui's TestBackend -------------------------
+
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use chrono::TimeZone;
+
+    fn fixed_now() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 1, 15, 9, 30, 0).unwrap()
+    }
+
+    fn sample_cache() -> EventCache {
+        let mut cache = EventCache::new();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let mut standup = make_event_with_end("10:00", "10:30");
+        standup.title = "Standup 👶🏻 with a rather long title that must be truncated".into();
+        let mut lunch = make_event_with_end("12:00", "13:00");
+        lunch.title = "Lunch".into();
+        lunch.id = EventId::Google { calendar_id: "test".into(), event_id: "lunch".into(), calendar_name: None };
+        cache.google.store(vec![standup, lunch], day);
+        cache.icloud.store(vec![make_icloud_event_with_end("12:30", "13:30")], day);
+        cache
+    }
+
+    fn draw(width: u16, height: u16, events: &EventCache, mode: NavigationMode, show_help: bool) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let state = RenderState {
+            current_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            selected_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            show_logs: false,
+            events,
+            google_auth: &GoogleAuthState::NotConfigured,
+            icloud_auth: &ICloudAuthState::NotConfigured,
+            status_message: None,
+            status_is_error: false,
+            google_loading: false,
+            icloud_loading: false,
+            navigation_mode: mode,
+            selected_source: EventSource::Google,
+            selected_event_index: 0,
+            pending_action: None,
+            search: None,
+            show_help,
+            setup: None,
+            now: fixed_now(),
+        };
+        terminal.draw(|f| render(f, &state)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn test_render_day_view() {
+        let cache = sample_cache();
+        let screen = draw(120, 40, &cache, NavigationMode::Day, false);
+        assert!(screen.contains("January 2026"), "{screen}");
+        assert!(screen.contains("Thu Jan 15"));
+        assert!(screen.contains("Work"));
+        assert!(screen.contains("Personal"));
+        assert!(screen.contains("10:00  Standup"));
+        assert!(screen.contains("12:00  Lunch"));
+        // Countdown in the status bar uses the injected clock (09:30 → 10:00)
+        assert!(screen.contains("Next: Standup"), "{screen}");
+        assert!(screen.contains("in 30m"));
+        assert!(screen.contains("? help"));
+    }
+
+    #[test]
+    fn test_render_event_mode_shows_details() {
+        let cache = sample_cache();
+        let screen = draw(140, 40, &cache, NavigationMode::Event, false);
+        assert!(screen.contains("10:00 \u{2013} 10:30"), "{screen}");
+        assert!(screen.contains("x delete"));
+    }
+
+    #[test]
+    fn test_render_help_overlay() {
+        let cache = sample_cache();
+        let screen = draw(120, 40, &cache, NavigationMode::Day, true);
+        assert!(screen.contains("Help"));
+        assert!(screen.contains("join meeting"));
+    }
+
+    #[test]
+    fn test_render_never_panics_at_tiny_sizes() {
+        let cache = sample_cache();
+        for w in 0..=30 {
+            for h in 0..=12 {
+                for mode in [NavigationMode::Day, NavigationMode::Event] {
+                    draw(w, h, &cache, mode, false);
+                    draw(w, h, &cache, mode, true);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_pen_measures_per_char_and_clips() {
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 6, 1));
+        let mut p = Pen::new(&mut buf);
+        p.print("👶🏻ab"); // 2 + 2 columns for the emoji, as foot/alacritty draw it
+        assert_eq!(buf[(0, 0)].symbol(), "👶");
+        assert_eq!(buf[(2, 0)].symbol(), "🏻");
+        assert_eq!(buf[(4, 0)].symbol(), "a");
+        assert_eq!(buf[(5, 0)].symbol(), "b");
+        let mut p = Pen::new(&mut buf);
+        p.print("abcdefgh"); // clipped at the edge, no panic
+        assert_eq!(buf[(5, 0)].symbol(), "f");
     }
 }

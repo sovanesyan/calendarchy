@@ -4,7 +4,7 @@ version = "0.1.8"
 edition = "2024"
 
 [dependencies]
-crossterm = "0.28"
+crossterm = "0.29"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -18,3 +18,4 @@ base64 = "0.22"
 unicode-width = "0.2"
 termbg = "0.6"
 chrono-tz = "0.10.4"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
