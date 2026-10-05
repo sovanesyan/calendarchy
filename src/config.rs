@@ -3,7 +3,7 @@ use crate::google::TokenInfo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Root configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,6 +137,9 @@ impl Config {
 
         let content = fs::read_to_string(&path)?;
         let mut config: Config = serde_json::from_str(&content)?;
+        // The config can hold the iCloud app password: tighten files written
+        // by older versions with the default (world-readable) mode
+        restrict_permissions(&path);
 
         // Env vars always override saved config
         if let Some(ref mut google) = config.google {
@@ -163,8 +166,7 @@ impl Config {
         Self::ensure_config_dir()?;
         let path = Self::config_path();
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(&path, &json)?;
-        Ok(())
+        write_private(&path, json.as_bytes())
     }
 }
 
@@ -206,15 +208,45 @@ pub fn save_icloud_tokens(calendars: &[StoredCalendar]) -> Result<()> {
 fn save_all_tokens(stored: &StoredTokens) -> Result<()> {
     let path = Config::token_path();
     let json = serde_json::to_string_pretty(stored)?;
-    fs::write(&path, &json)?;
+    write_private(&path, json.as_bytes())
+}
 
+/// Write a secrets-bearing file: created 0600 from the start (no window where
+/// it's world-readable), written to a temp file and renamed into place so a
+/// crash can't leave it truncated
+fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(contents).and_then(|_| f.sync_all()))
+        .and_then(|_| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    Ok(result?)
+}
+
+/// Make a file owner-only (best effort)
+fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        if let Ok(meta) = fs::metadata(path)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
     }
-
-    Ok(())
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn load_all_tokens() -> Result<StoredTokens> {
