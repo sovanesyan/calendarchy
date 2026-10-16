@@ -150,26 +150,38 @@ pub fn remove_setup() -> Result<(), Box<dyn std::error::Error>> {
 
 // === Linux Hyprland setup ===
 
+/// Omarchy 4 configures Hyprland in Lua; older setups use hyprlang
 #[cfg(target_os = "linux")]
-const HYPRLAND_BIND: &str = "bindd = SUPER SHIFT, J, Calendarchy, exec, omarchy-launch-tui calendarchy";
+const HYPRLAND_BIND_LUA: &str = r#"o.bind("SUPER + SHIFT + J", "Calendarchy", { tui = "calendarchy", focus = true })"#;
+#[cfg(target_os = "linux")]
+const HYPRLAND_BIND_CONF: &str = "bindd = SUPER SHIFT, J, Calendarchy, exec, omarchy-launch-or-focus-tui calendarchy";
 
+/// The bindings file to add to and the line to add: `bindings.lua` when it
+/// exists, else `bindings.conf`
 #[cfg(target_os = "linux")]
-fn hyprland_bindings_path() -> PathBuf {
-    dirs::home_dir().unwrap().join(".config/hypr/bindings.conf")
+fn hyprland_bindings() -> (PathBuf, &'static str) {
+    let dir = dirs::home_dir().unwrap().join(".config/hypr");
+    let lua = dir.join("bindings.lua");
+    if lua.exists() { (lua, HYPRLAND_BIND_LUA) } else { (dir.join("bindings.conf"), HYPRLAND_BIND_CONF) }
+}
+
+/// Where the setup step adds the keybinding, for the wizard to show
+#[cfg(target_os = "linux")]
+pub fn hyprland_bindings_file() -> String {
+    let (path, _) = hyprland_bindings();
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
 fn hyprland_bind_exists() -> bool {
-    let path = hyprland_bindings_path();
-    if !path.exists() { return false; }
-    std::fs::read_to_string(&path)
+    std::fs::read_to_string(hyprland_bindings().0)
         .map(|content| content.contains("calendarchy"))
         .unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
 pub fn install_shortcut() -> Result<(), String> {
-    let path = hyprland_bindings_path();
+    let (path, bind) = hyprland_bindings();
     let mut content = if path.exists() {
         std::fs::read_to_string(&path).map_err(|e| e.to_string())?
     } else {
@@ -178,7 +190,7 @@ pub fn install_shortcut() -> Result<(), String> {
     if !content.ends_with('\n') && !content.is_empty() {
         content.push('\n');
     }
-    content.push_str(HYPRLAND_BIND);
+    content.push_str(bind);
     content.push('\n');
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(())

@@ -1,3 +1,4 @@
+mod agenda;
 mod app;
 mod auth;
 mod cache;
@@ -44,8 +45,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let date_arg = |name: &str| arg_value(name).and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());
+
     if std::env::args().any(|a| a == "--refresh") {
-        return headless::refresh().await;
+        let month = arg_value("--month").and_then(|m| chrono::NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d").ok());
+        return headless::refresh(month).await;
+    }
+
+    if std::env::args().any(|a| a == "--agenda") {
+        let days = arg_value("--days").and_then(|d| d.parse().ok()).unwrap_or(2);
+        return agenda::print(date_arg("--from"), days);
+    }
+
+    if let Some(verb) = arg_value("--event") {
+        let args: Vec<String> = std::env::args().collect();
+        let id = args.iter().skip_while(|a| *a != "--event").nth(2).ok_or("usage: calendarchy --event accept|decline|delete <id>")?;
+        // Plain message on failure: the shell window shows stderr's last line
+        if let Err(e) = headless::event_action(&verb, id).await {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     #[cfg(target_os = "macos")]
@@ -55,6 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new();
     app.config = Config::load().unwrap_or_default();
+    // `--date YYYY-MM-DD` opens on that day (the shell plugin's "open")
+    if let Some(date) = date_arg("--date") {
+        app.goto_date(date);
+    }
     let (keymap, key_problems) = keymap::Keymap::with_overrides(&app.config.keys);
     keymap::install(keymap);
     if !key_problems.is_empty() {
@@ -123,6 +147,7 @@ async fn run(
     }
 
     let mut input = spawn_input_reader();
+    let mut theme_check = tokio::time::interval(THEME_CHECK);
 
     loop {
         if app.dirty {
@@ -142,6 +167,18 @@ async fn run(
                 runtime.run_all(app, effects);
             }
             _ = tokio::time::sleep(app.next_wakeup()) => {}
+            _ = theme_check.tick() => {
+                if let Some(palette) = ui::load_palette() {
+                    // A theme switch repaints Omarchy's terminals with the
+                    // theme's background, so that's the background now (the
+                    // terminal can't be asked again while the input thread
+                    // owns stdin)
+                    if let Some((r, g, b)) = palette.background {
+                        ui::set_term_bg(r, g, b);
+                    }
+                    app.dirty = true;
+                }
+            }
         }
 
         // Apply everything already queued before drawing again, so key
@@ -161,6 +198,16 @@ async fn run(
         runtime.run_all(app, fetches);
         runtime.flush_cache(app);
     }
+}
+
+/// How often to look for a desktop theme switch (one small file read)
+const THEME_CHECK: Duration = Duration::from_secs(2);
+
+/// The argument after `name`, e.g. `--days 3`
+fn arg_value(name: &str) -> Option<String> {
+    let mut args = std::env::args().skip_while(|a| a != name);
+    args.next()?;
+    args.next()
 }
 
 fn handle_event(app: &mut App, runtime: &mut Runtime, event: Event) {

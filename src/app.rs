@@ -272,6 +272,13 @@ impl App {
         self.selected_date = today;
     }
 
+    /// Open on `date`, in event mode like startup
+    pub fn goto_date(&mut self, date: NaiveDate) {
+        self.current_date = date;
+        self.selected_date = date;
+        self.enter_event_mode();
+    }
+
     pub fn goto_now(&mut self) {
         self.goto_today();
         self.enter_event_mode();

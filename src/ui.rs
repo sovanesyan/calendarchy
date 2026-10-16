@@ -160,7 +160,7 @@ pub struct Palette {
     google: (u8, u8, u8),
     icloud: (u8, u8, u8),
     /// The theme's background, used when the terminal doesn't answer OSC 11
-    background: Option<(u8, u8, u8)>,
+    pub background: Option<(u8, u8, u8)>,
     /// Theme colors are vivid; blend them toward the background so panel
     /// labels stay calm. Defaults are already muted.
     mute: f32,
@@ -210,15 +210,23 @@ impl Palette {
     }
 }
 
-static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
 
-/// Pick up the desktop theme's colors; call once at startup
-pub fn load_palette() {
-    let _ = PALETTE.set(Palette::from_omarchy().unwrap_or_default());
+/// Pick up the desktop theme's colors; called at startup and then
+/// periodically. Returns the new palette when it changed (a theme switch).
+pub fn load_palette() -> Option<Palette> {
+    let fresh = Palette::from_omarchy().unwrap_or_default();
+    let mut current = PALETTE.write().unwrap_or_else(|e| e.into_inner());
+    if *current == Some(fresh) {
+        return None;
+    }
+    let first = current.is_none();
+    *current = Some(fresh);
+    (!first).then_some(fresh)
 }
 
 fn palette() -> Palette {
-    PALETTE.get().copied().unwrap_or_default()
+    PALETTE.read().map(|p| p.unwrap_or_default()).unwrap_or_default()
 }
 
 fn google_accent() -> Color {
@@ -1914,7 +1922,7 @@ fn render_setup_wizard(p: &mut Pen, setup: &SetupState, term_width: u16, term_he
             #[cfg(target_os = "linux")]
             {
                 lines.push(("Install Super+Shift+J to launch Calendarchy from anywhere?".into(), Style::Normal));
-                lines.push(("Adds a keybinding to ~/.config/hypr/bindings.conf".into(), Style::Dim));
+                lines.push((format!("Adds a keybinding to ~/.config/hypr/{}", crate::setup::hyprland_bindings_file()), Style::Dim));
             }
             lines.push(("".into(), Style::Normal));
             lines.push(("(y/n)".into(), Style::Accent));

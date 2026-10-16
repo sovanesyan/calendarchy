@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "local.calendarchy",
+  "name": "Calendarchy",
+  "version": "0.2.0",
+  "author": "Serge",
+  "description": "Keeps calendarchy's cache fresh and alerts before meetings (click to join).",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

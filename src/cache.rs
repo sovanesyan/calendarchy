@@ -65,7 +65,7 @@ pub enum EventId {
 
 impl EventId {
     /// Stable identity of the underlying event, ignoring display-only fields
-    fn identity(&self) -> (&str, &str) {
+    pub fn identity(&self) -> (&str, &str) {
         match self {
             EventId::Google { calendar_id, event_id, .. } => (calendar_id, event_id),
             EventId::ICloud { calendar_url, event_uid, .. } => (calendar_url, event_uid),
@@ -478,7 +478,7 @@ impl EventCache {
     }
 
     /// Get cache file path
-    fn cache_path() -> Option<PathBuf> {
+    pub fn cache_path() -> Option<PathBuf> {
         dirs::cache_dir().map(|p| p.join("calendarchy").join("events.json"))
     }
 

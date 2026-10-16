@@ -30,6 +30,8 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 - **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
 - **`keymap.rs`** - Bindings table: keys → `Action` per mode (Bulgarian phonetic keys normalised); also generates the help overlay and applies `"keys"` overrides from config
 - **`sources.rs`** - Fetch layer shared by TUI and `--refresh`: shared HTTP client, `GoogleSession` token refresh, concurrent CalDAV
+- **`headless.rs`** - `--refresh [--month YYYY-MM]`: fetch this month and the next (or one month) into the disk cache, no TUI (used by the shell plugins and the TRMNL job); `--event accept|decline|delete <id>`: one action by agenda id, then refetch its month
+- **`agenda.rs`** - `--agenda [--from YYYY-MM-DD] [--days N]`: days as JSON from the disk cache only (no network): events with details and attendees, display prefs, and the busy event that's next; read by the shell plugins
 - **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence)
 - **`config.rs`** - Config loading from `~/.config/calendarchy/config.json` (incl. optional `display` prefs and `keys`), token storage
@@ -56,6 +58,18 @@ UI ← EventCache.get(date) ←────────────────�
 - Auth tokens stored in `~/.config/calendarchy/tokens.json`
 - Cache loads on startup for instant display; `fetched_months` not restored to force refresh
 - Format is versioned (`CACHE_VERSION`); mismatches are discarded. Each event still carries `time_str`/`end_time_str` on disk because the TRMNL push (`~/Work/my/trmnl/calendar-push.mjs`) reads them
+
+## Omarchy shell plugin
+
+`shell/` holds two plugins for Omarchy 4's Quickshell `omarchy-shell`:
+
+- `local.calendarchy` (`shell/*`, kind `service`, no UI): runs `--refresh` every 5 min and sends meeting alerts 5 min before via `omarchy-notification-send` (a click joins; Zoom via its `zoommtg://` deep link, the agenda's `joinUrl`)
+- `local.calendarchy.window` (`shell/window/`, kind `panel`): the TUI's layout as a window (month + week heatmap | Work, Personal, free gaps, Coming up | details), with the TUI's keys. `Layout.js` ports the display rules from `ui.rs`/`app.rs` (gaps, heatmap, current/next, Coming up, navigation); keep the two in step. Toggle with `omarchy-shell shell toggle local.calendarchy.window '{}'`; a Hyprland rule floats it (class `org.quickshell`, title `Calendarchy`)
+
+- `Service.qml` runs `calendarchy --agenda` each minute to find due alerts (sent ones are remembered in `$XDG_RUNTIME_DIR/calendarchy-alerted.json`); `Model.js` holds the pure helpers
+- Install / update both with `shell/install.sh` (copies into `~/.config/omarchy/plugins/<id>/`; a symlink would break hot reload and `omarchy plugin validate`)
+- Hot reload doesn't always pick up a changed service; `omarchy-restart-shell` does. Logs: `journalctl --user | grep calendarchy`
+- The agenda JSON is the contract between the two: keep `agenda.rs` and the QML in step
 
 ## Releases
 

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "local.calendarchy.window",
+  "name": "Calendarchy window",
+  "version": "0.1.0",
+  "author": "Serge",
+  "description": "calendarchy as a window: the TUI's layout (month, week heatmap, Work and Personal, coming up, details) drawn with the shell's theme. Summon with: omarchy-shell shell toggle local.calendarchy.window '{}'",
+  "kinds": ["panel"],
+  "entryPoints": {
+    "panel": "Window.qml"
+  }
+}
