@@ -10,30 +10,28 @@
 //! Uses the same fetch layer as the TUI (`sources`), with both sources
 //! fetched concurrently.
 
-use chrono::{Datelike, Local, Months, NaiveDate};
-use reqwest::Client;
+use chrono::{Local, NaiveDate};
 
-use crate::cache::{EventCache, EventId};
+use crate::cache::EventCache;
 use crate::config::{self, Config};
-use crate::google::CalendarClient;
-use crate::icloud::{CalDavClient, ICloudAuth};
-use crate::sources::{self, GoogleSession};
+use crate::sources::{self, EventVerb, GoogleSession};
+use crate::utils::{add_months, month_start};
 
 /// `--refresh`: this month and the next, so readers looking a few days ahead
 /// (the shell plugin's "tomorrow", alerts) don't come up empty at the end of
 /// a month; or just `month` when one is asked for
 pub async fn refresh(month: Option<NaiveDate>) -> Result<(), Box<dyn std::error::Error>> {
-    let this = Local::now().date_naive().with_day(1).unwrap();
+    let this = month_start(Local::now().date_naive());
     let months = match month {
-        Some(m) => vec![m.with_day(1).unwrap()],
-        None => [Some(this), this.checked_add_months(Months::new(1))].into_iter().flatten().collect(),
+        Some(m) => vec![month_start(m)],
+        None => vec![this, add_months(this, 1)],
     };
     refresh_months(&months).await
 }
 
 async fn refresh_months(months: &[NaiveDate]) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load().unwrap_or_default();
-    let http = Client::new();
+    let http = sources::http_client();
 
     let google = async {
         let gconfig = config.google.clone()?;
@@ -61,17 +59,29 @@ async fn refresh_months(months: &[NaiveDate]) -> Result<(), Box<dyn std::error::
         Some(fetched)
     };
 
-    // EventKit is interactive/macOS-only, so only CalDAV refreshes here
     let icloud = async {
-        let icloud = config.icloud.clone().filter(|c| !c.is_eventkit())?;
-        let calendars = sources::saved_icloud_calendars();
-        if calendars.is_empty() {
+        let icloud = config.icloud.clone()?;
+        let mut account = sources::saved_icloud_account();
+        if account.calendars.is_empty() {
             eprintln!("icloud: no discovered calendars (run the app once to authenticate)");
             return None;
         }
+        if account.addresses.is_empty() {
+            // Saved before your addresses were discovered: find them once,
+            // keeping the saved calendars
+            match sources::discover_icloud(&http, &icloud).await {
+                Ok(found) => {
+                    account.addresses = found.addresses;
+                    if let Err(e) = config::save_icloud_account(&account) {
+                        eprintln!("icloud: couldn't save your addresses: {e}");
+                    }
+                }
+                Err(e) => eprintln!("icloud: couldn't discover your addresses: {e}"),
+            }
+        }
         let mut fetched = Vec::new();
         for &m in months {
-            match sources::fetch_caldav_month(&http, &icloud, &calendars, m).await {
+            match sources::fetch_caldav_month(&http, &icloud, &account, m).await {
                 Ok(events) => fetched.push((m, events)),
                 Err(e) => eprintln!("icloud: fetch failed: {e}"),
             }
@@ -81,7 +91,7 @@ async fn refresh_months(months: &[NaiveDate]) -> Result<(), Box<dyn std::error::
 
     let (google, icloud) = tokio::join!(google, icloud);
 
-    let mut cache = EventCache::new();
+    let mut cache = EventCache::default();
     cache.load_from_disk();
     let mut summary = Vec::new();
     let count = |fetched: &[(chrono::NaiveDate, Vec<_>)]| fetched.iter().map(|(_, e)| e.len()).sum::<usize>();
@@ -112,8 +122,9 @@ async fn refresh_months(months: &[NaiveDate]) -> Result<(), Box<dyn std::error::
 /// listed as `id`, with the TUI's rules (accept/decline are Google-only),
 /// then refetch its month so the cache shows the result
 pub async fn event_action(verb: &str, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let verb = EventVerb::parse(verb).ok_or_else(|| format!("unknown action {verb} (accept, decline or delete)"))?;
     let config = Config::load().unwrap_or_default();
-    let mut cache = EventCache::new();
+    let mut cache = EventCache::default();
     cache.load_from_disk();
     let found = [("google", &cache.google), ("icloud", &cache.icloud)]
         .into_iter()
@@ -123,54 +134,19 @@ pub async fn event_action(verb: &str, id: &str) -> Result<(), Box<dyn std::error
     let Some((event_id, date)) = found else {
         return Err(format!("no event {id} in the cache").into());
     };
-    let http = Client::new();
 
-    match (verb, event_id) {
-        ("accept" | "decline", EventId::Google { calendar_id, event_id, .. }) => {
-            let response = if verb == "accept" { "accepted" } else { "declined" };
-            google_call(&config, &http, |t| {
-                let (client, calendar_id, event_id) = (CalendarClient::with_client(http.clone()), calendar_id.clone(), event_id.clone());
-                async move { client.respond_to_event(&t, &calendar_id, &event_id, response).await.map(|_| ()) }
-            })
-            .await?;
-        }
-        ("accept" | "decline", EventId::ICloud { .. }) => {
-            return Err(format!("{} not supported for iCloud", if verb == "accept" { "Accept" } else { "Decline" }).into());
-        }
-        ("delete", EventId::Google { calendar_id, event_id, .. }) => {
-            google_call(&config, &http, |t| {
-                let (client, calendar_id, event_id) = (CalendarClient::with_client(http.clone()), calendar_id.clone(), event_id.clone());
-                async move { client.delete_event(&t, &calendar_id, &event_id).await.map(|_| ()) }
-            })
-            .await?;
-        }
-        ("delete", EventId::ICloud { calendar_url, .. }) if calendar_url.is_empty() => {
-            return Err("Delete not supported for system calendars".into());
-        }
-        ("delete", EventId::ICloud { calendar_url, event_uid, href, etag, .. }) => {
-            let icloud = config.icloud.clone().ok_or("iCloud not configured")?;
-            let client = CalDavClient::with_client(http.clone(), ICloudAuth::new(icloud));
-            client.delete_event(&calendar_url, &event_uid, href.as_deref(), etag.as_deref()).await?;
-        }
-        (other, _) => return Err(format!("unknown action {other} (accept, decline or delete)").into()),
-    }
+    let google = config.google.clone().zip(config::load_google_tokens().ok().flatten());
+    sources::check_event_action(verb, &event_id, google.is_some(), config.icloud.is_some())
+        .map_err(|refused| refused.message("open calendarchy to sign in"))?;
 
-    println!("{verb}d {id}");
-    refresh_months(&[date.with_day(1).unwrap()]).await
-}
-
-/// One Google API call with the saved tokens, refreshing (and saving) them as needed
-async fn google_call<F, Fut>(config: &Config, http: &Client, call: F) -> Result<(), Box<dyn std::error::Error>>
-where
-    F: Fn(crate::google::TokenInfo) -> Fut,
-    Fut: std::future::Future<Output = crate::error::Result<()>>,
-{
-    let gconfig = config.google.clone().ok_or("Google not configured")?;
-    let tokens = config::load_google_tokens().ok().flatten().ok_or("Not signed in to Google — open calendarchy to sign in")?;
-    let mut session = GoogleSession::new(http.clone(), gconfig, tokens);
-    let result = session.call(call).await;
-    if let Some(tokens) = session.into_refreshed() {
+    let http = sources::http_client();
+    let mut session = google.map(|(gconfig, tokens)| GoogleSession::new(http.clone(), gconfig, tokens));
+    let result = sources::event_action(&http, session.as_mut(), config.icloud.as_ref(), &event_id, verb).await;
+    if let Some(tokens) = session.and_then(GoogleSession::into_refreshed) {
         let _ = config::save_google_tokens(&tokens);
     }
-    result.map_err(|e| e.into())
+    result?;
+
+    println!("{} {id}", verb.done());
+    refresh_months(&[month_start(date)]).await
 }

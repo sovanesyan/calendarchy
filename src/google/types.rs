@@ -9,7 +9,6 @@ pub struct TokenInfo {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: DateTime<Utc>,
-    pub token_type: String,
 }
 
 impl TokenInfo {
@@ -24,11 +23,23 @@ pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: u64,
-    pub token_type: String,
 }
 
-/// A calendar event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl TokenResponse {
+    /// The tokens to keep. A refresh usually comes back without a refresh
+    /// token (the old one stays valid), so `current_refresh` is kept unless
+    /// Google rotated it.
+    pub fn into_info(self, current_refresh: Option<String>) -> TokenInfo {
+        TokenInfo {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token.or(current_refresh),
+            expires_at: Utc::now() + chrono::Duration::seconds(self.expires_in as i64),
+        }
+    }
+}
+
+/// A calendar event (only the fields we read)
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarEvent {
     pub id: String,
@@ -37,7 +48,6 @@ pub struct CalendarEvent {
     pub end: EventDateTime,
     pub location: Option<String>,
     pub description: Option<String>,
-    pub status: Option<String>,
     /// "transparent" = free, "opaque" = busy (default)
     pub transparency: Option<String>,
     pub attendees: Option<Vec<Attendee>>,
@@ -46,14 +56,14 @@ pub struct CalendarEvent {
 }
 
 /// Conference/meeting data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConferenceData {
     pub entry_points: Option<Vec<EntryPoint>>,
 }
 
 /// Conference entry point (video link, phone, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryPoint {
     pub entry_point_type: Option<String>,
@@ -61,7 +71,7 @@ pub struct EntryPoint {
 }
 
 /// Event attendee
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attendee {
     pub email: Option<String>,
@@ -72,28 +82,16 @@ pub struct Attendee {
     pub organizer: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventDateTime {
     /// For all-day events
     pub date: Option<NaiveDate>,
     /// For timed events
     pub date_time: Option<DateTime<Utc>>,
-    pub time_zone: Option<String>,
 }
 
 impl CalendarEvent {
-    #[cfg(test)]
-    /// Get the start date (works for both all-day and timed events, in local timezone)
-    pub fn start_date(&self) -> Option<NaiveDate> {
-        self.start.date.or_else(|| {
-            self.start.date_time.map(|dt| {
-                let local: DateTime<Local> = dt.with_timezone(&Local);
-                local.date_naive()
-            })
-        })
-    }
-
     /// Get display title
     pub fn title(&self) -> &str {
         self.summary.as_deref().unwrap_or("(No title)")
@@ -111,50 +109,15 @@ impl CalendarEvent {
             .unwrap_or_else(|| "All day".to_string())
     }
 
-    #[cfg(test)]
-    /// Get end time as HH:MM or None for all-day events (converted to local timezone)
-    pub fn end_time_str(&self) -> Option<String> {
-        self.end.date_time.map(|dt| {
-            let local: DateTime<Local> = dt.with_timezone(&Local);
-            format!("{:02}:{:02}", local.time().hour(), local.time().minute())
-        })
+    /// Your own entry on the guest list, if you're on it
+    fn me(&self) -> Option<&Attendee> {
+        self.attendees.as_ref()?.iter().find(|a| a.is_self == Some(true))
     }
 
-    /// Check if the current user has accepted this event
-    /// Returns true if: no attendees (own event), user is organizer, or user accepted
+    /// Whether you're going: no guests or not on the list means it's your own
+    /// event; otherwise you organise it or accepted
     pub fn is_accepted(&self) -> bool {
-        match &self.attendees {
-            None => true, // No attendees means it's your own event
-            Some(attendees) => {
-                // Find the current user's attendance
-                for attendee in attendees {
-                    if attendee.is_self == Some(true) {
-                        return matches!(
-                            attendee.response_status.as_deref(),
-                            Some("accepted") | Some("organizer") | None
-                        );
-                    }
-                }
-                // If no "self" attendee found, assume accepted (organizer or own event)
-                true
-            }
-        }
-    }
-
-    /// Check if the current user is the organizer of this event
-    pub fn is_organizer(&self) -> bool {
-        match &self.attendees {
-            None => true, // No attendees means it's your own event
-            Some(attendees) => {
-                // Check if any attendee is both self and organizer
-                for attendee in attendees {
-                    if attendee.is_self == Some(true) && attendee.organizer == Some(true) {
-                        return true;
-                    }
-                }
-                false
-            }
-        }
+        self.me().is_none_or(|me| matches!(me.response_status.as_deref(), Some("accepted") | Some("organizer") | None))
     }
 
     /// Check if the event is marked as "free" (doesn't block time)
@@ -162,42 +125,23 @@ impl CalendarEvent {
         self.transparency.as_deref() == Some("transparent")
     }
 
-    /// Extract meeting URL (Zoom, Google Meet, etc.)
+    /// Meeting link: Google Meet, then a conference video entry (Zoom etc.),
+    /// then one found in the location or description
     pub fn meeting_url(&self) -> Option<String> {
-        // Check hangout_link first (Google Meet)
-        if let Some(ref url) = self.hangout_link {
-            return Some(url.clone());
-        }
-
-        // Check conference data entry points
-        if let Some(ref conf) = self.conference_data
-            && let Some(ref entry_points) = conf.entry_points {
-                for ep in entry_points {
-                    if ep.entry_point_type.as_deref() == Some("video")
-                        && let Some(ref uri) = ep.uri {
-                            return Some(uri.clone());
-                        }
-                }
-            }
-
-        // Check location for meeting URLs
-        if let Some(ref loc) = self.location
-            && let Some(url) = extract_meeting_url(loc) {
-                return Some(url);
-            }
-
-        // Check description for meeting URLs
-        if let Some(ref desc) = self.description
-            && let Some(url) = extract_meeting_url(desc) {
-                return Some(url);
-            }
-
-        None
+        let video = || {
+            self.conference_data.as_ref()?.entry_points.as_ref()?.iter()
+                .find(|ep| ep.entry_point_type.as_deref() == Some("video"))?
+                .uri.as_deref()
+        };
+        meeting_url(
+            self.hangout_link.as_deref().or_else(video),
+            self.location.as_deref(),
+            self.description.as_deref(),
+        )
     }
 }
 
-use crate::utils::extract_meeting_url;
-
+use crate::utils::meeting_url;
 
 /// Response from events.list API
 #[derive(Debug, Deserialize)]
@@ -218,16 +162,13 @@ mod tests {
             start: EventDateTime {
                 date: None,
                 date_time: Some(datetime),
-                time_zone: None,
             },
             end: EventDateTime {
                 date: None,
                 date_time: Some(datetime + chrono::Duration::hours(1)),
-                time_zone: None,
             },
             location: None,
             description: None,
-            status: None,
             transparency: None,
             attendees: None,
             conference_data: None,
@@ -242,16 +183,13 @@ mod tests {
             start: EventDateTime {
                 date: Some(date),
                 date_time: None,
-                time_zone: None,
             },
             end: EventDateTime {
                 date: Some(date + chrono::Duration::days(1)),
                 date_time: None,
-                time_zone: None,
             },
             location: None,
             description: None,
-            status: None,
             transparency: None,
             attendees: None,
             conference_data: None,
@@ -276,23 +214,6 @@ mod tests {
     fn test_time_str_all_day() {
         let event = make_all_day_event("Holiday", NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
         assert_eq!(event.time_str(), "All day");
-    }
-
-    #[test]
-    fn test_start_date_timed_event() {
-        let dt = DateTime::parse_from_rfc3339("2026-01-15T14:30:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let event = make_timed_event("Meeting", dt);
-        // Note: start_date converts to local time, so this test may vary by timezone
-        assert!(event.start_date().is_some());
-    }
-
-    #[test]
-    fn test_start_date_all_day_event() {
-        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
-        let event = make_all_day_event("Holiday", date);
-        assert_eq!(event.start_date(), Some(date));
     }
 
     #[test]
@@ -386,12 +307,33 @@ mod tests {
     }
 
     #[test]
+    fn test_refresh_keeps_or_rotates_the_refresh_token() {
+        let response = |refresh: Option<&str>| TokenResponse { access_token: "a".into(), refresh_token: refresh.map(Into::into), expires_in: 3600 };
+        let kept = response(None).into_info(Some("old".into()));
+        assert_eq!(kept.refresh_token.as_deref(), Some("old"));
+        assert!(!kept.is_expired());
+        assert_eq!(response(Some("new")).into_info(Some("old".into())).refresh_token.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn test_is_accepted_when_not_on_the_guest_list() {
+        let mut event = make_timed_event("Meeting", Utc::now());
+        event.attendees = Some(vec![Attendee {
+            email: Some("other@example.com".to_string()),
+            display_name: None,
+            response_status: Some("declined".to_string()),
+            is_self: None,
+            organizer: None,
+        }]);
+        assert!(event.is_accepted());
+    }
+
+    #[test]
     fn test_token_is_expired() {
         let expired_token = TokenInfo {
             access_token: "test".to_string(),
             refresh_token: None,
             expires_at: Utc::now() - chrono::Duration::hours(1),
-            token_type: "Bearer".to_string(),
         };
         assert!(expired_token.is_expired());
 
@@ -399,7 +341,6 @@ mod tests {
             access_token: "test".to_string(),
             refresh_token: None,
             expires_at: Utc::now() + chrono::Duration::hours(1),
-            token_type: "Bearer".to_string(),
         };
         assert!(!valid_token.is_expired());
     }
@@ -411,7 +352,6 @@ mod tests {
             access_token: "test".to_string(),
             refresh_token: None,
             expires_at: Utc::now() + chrono::Duration::minutes(4),
-            token_type: "Bearer".to_string(),
         };
         assert!(almost_expired.is_expired());
 
@@ -420,7 +360,6 @@ mod tests {
             access_token: "test".to_string(),
             refresh_token: None,
             expires_at: Utc::now() + chrono::Duration::minutes(6),
-            token_type: "Bearer".to_string(),
         };
         assert!(!still_valid.is_expired());
     }

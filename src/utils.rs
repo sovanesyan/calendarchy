@@ -1,18 +1,10 @@
 //! Shared utility functions
 
-use crate::cache::{AttendeeStatus, DisplayAttendee};
+use chrono::{DateTime, Datelike, Days, Local, Months, NaiveDate, NaiveTime, TimeZone, Utc};
 
-/// Open a URL in the default browser (platform-specific)
-#[cfg(target_os = "macos")]
-pub fn open_url(url: &str) {
-    use std::os::unix::process::CommandExt;
-    let _ = std::process::Command::new("open")
-        .arg(url)
-        .process_group(0)
-        .spawn();
-}
+use crate::cache::DisplayAttendee;
 
-#[cfg(target_os = "linux")]
+/// Open a URL in the default browser
 pub fn open_url(url: &str) {
     use std::os::unix::process::CommandExt;
     let _ = std::process::Command::new("xdg-open")
@@ -21,27 +13,51 @@ pub fn open_url(url: &str) {
         .spawn();
 }
 
-/// Sort order for attendee status (lower = first)
-pub fn status_sort_order(status: &AttendeeStatus) -> u8 {
-    match status {
-        AttendeeStatus::Organizer => 0,
-        AttendeeStatus::Accepted => 1,
-        AttendeeStatus::Tentative => 2,
-        AttendeeStatus::NeedsAction => 3,
-        AttendeeStatus::Declined => 4,
-    }
+/// The first of the month containing `date`
+pub fn month_start(date: NaiveDate) -> NaiveDate {
+    date - Days::new(date.day0().into())
 }
 
-/// Sort attendees by status (accepted first, declined last), then by name
+/// The first of the month `delta` months after (before, if negative) the
+/// one containing `date`
+pub fn add_months(date: NaiveDate, delta: i32) -> NaiveDate {
+    let first = month_start(date);
+    let months = Months::new(delta.unsigned_abs());
+    let shifted = if delta < 0 { first.checked_sub_months(months) } else { first.checked_add_months(months) };
+    shifted.unwrap_or(first)
+}
+
+/// First and last day of the month containing `date`
+pub fn month_range(date: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let first = month_start(date);
+    let last = first.checked_add_months(Months::new(1)).and_then(|next| next.pred_opt()).unwrap_or(first);
+    (first, last)
+}
+
+/// Local midnight at the start of `start` and at the end of `end`, as UTC
+/// instants: fetches cover whole local days, so events in the first or last
+/// hours of a month aren't lost to the UTC offset
+pub fn local_day_bounds(start: NaiveDate, end: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
+    let midnight = |d: NaiveDate| {
+        let naive = d.and_time(NaiveTime::MIN);
+        // No local midnight that day (a DST jump): fall back to UTC midnight
+        Local.from_local_datetime(&naive).earliest().map_or_else(|| naive.and_utc(), |dt| dt.with_timezone(&Utc))
+    };
+    (midnight(start), midnight(end + Days::new(1)))
+}
+
+/// A meeting link: the event's own (`explicit`), else the first one found in
+/// its location, else in its description
+pub fn meeting_url(explicit: Option<&str>, location: Option<&str>, description: Option<&str>) -> Option<String> {
+    explicit
+        .map(str::to_string)
+        .or_else(|| location.and_then(extract_meeting_url))
+        .or_else(|| description.and_then(extract_meeting_url))
+}
+
+/// Sort attendees by status (organizer first, declined last), then by name
 pub fn sort_attendees(attendees: &mut [DisplayAttendee]) {
-    attendees.sort_by(|a, b| {
-        let status_cmp = status_sort_order(&a.status).cmp(&status_sort_order(&b.status));
-        if status_cmp != std::cmp::Ordering::Equal {
-            status_cmp
-        } else {
-            a.name.cmp(&b.name)
-        }
-    });
+    attendees.sort_by(|a, b| (&a.status, &a.name).cmp(&(&b.status, &b.name)));
 }
 
 /// Extract a display name from an email address
@@ -128,6 +144,46 @@ pub fn to_zoom_deeplink(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::AttendeeStatus;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn test_month_range() {
+        assert_eq!(month_range(d(2026, 2, 14)), (d(2026, 2, 1), d(2026, 2, 28)));
+        assert_eq!(month_range(d(2028, 2, 29)), (d(2028, 2, 1), d(2028, 2, 29)));
+        assert_eq!(month_range(d(2026, 12, 31)), (d(2026, 12, 1), d(2026, 12, 31)));
+    }
+
+    #[test]
+    fn test_add_months() {
+        assert_eq!(add_months(d(2026, 12, 1), 1), d(2027, 1, 1));
+        assert_eq!(add_months(d(2026, 1, 1), -1), d(2025, 12, 1));
+        assert_eq!(add_months(d(2026, 1, 31), 1), d(2026, 2, 1), "always the first of the month");
+        assert_eq!(add_months(d(2026, 3, 31), -13), d(2025, 2, 1));
+        assert_eq!(month_start(d(2026, 10, 16)), d(2026, 10, 1));
+    }
+
+    #[test]
+    fn test_local_day_bounds_cover_whole_local_days() {
+        let (start, end) = local_day_bounds(d(2026, 10, 1), d(2026, 10, 31));
+        assert_eq!(start.with_timezone(&Local).date_naive(), d(2026, 10, 1));
+        assert_eq!(end.with_timezone(&Local).date_naive(), d(2026, 11, 1));
+        use chrono::Timelike;
+        assert_eq!((start.with_timezone(&Local).hour(), end.with_timezone(&Local).hour()), (0, 0));
+    }
+
+    #[test]
+    fn test_meeting_url_order() {
+        let zoom = "https://zoom.us/j/1";
+        let meet = "see https://meet.google.com/abc-defg-hij";
+        assert_eq!(meeting_url(Some("https://x.test/own"), Some(zoom), None).as_deref(), Some("https://x.test/own"));
+        assert_eq!(meeting_url(None, Some(zoom), Some(meet)).as_deref(), Some(zoom));
+        assert_eq!(meeting_url(None, Some("Room 4"), Some(meet)).as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+        assert_eq!(meeting_url(None, None, None), None);
+    }
 
     #[test]
     fn test_is_meeting_url() {
@@ -220,14 +276,6 @@ mod tests {
     #[test]
     fn test_name_from_email_simple() {
         assert_eq!(name_from_email("jsmith@example.com"), "Jsmith");
-    }
-
-    #[test]
-    fn test_status_sort_order() {
-        assert!(status_sort_order(&AttendeeStatus::Organizer) < status_sort_order(&AttendeeStatus::Accepted));
-        assert!(status_sort_order(&AttendeeStatus::Accepted) < status_sort_order(&AttendeeStatus::Tentative));
-        assert!(status_sort_order(&AttendeeStatus::Tentative) < status_sort_order(&AttendeeStatus::NeedsAction));
-        assert!(status_sort_order(&AttendeeStatus::NeedsAction) < status_sort_order(&AttendeeStatus::Declined));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::app::EventSource;
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -13,17 +14,30 @@ pub struct DisplayAttendee {
     pub status: AttendeeStatus,
 }
 
-/// Attendee response status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Attendee response status, in display order (organizer first, declined
+/// last). Stored on disk by name, so the order is free to change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AttendeeStatus {
+    Organizer,
     Accepted,
-    Declined,
     Tentative,
     NeedsAction,
-    Organizer,
+    Declined,
 }
 
 impl AttendeeStatus {
+    /// A reply as either source spells it: Google's "needsAction", iCal's
+    /// "NEEDS-ACTION". Anything unknown counts as not replied yet.
+    pub fn parse(reply: &str) -> Self {
+        let reply: String = reply.chars().filter(|c| !matches!(c, '-' | '_')).collect();
+        match reply.to_ascii_lowercase().as_str() {
+            "accepted" => Self::Accepted,
+            "declined" => Self::Declined,
+            "tentative" => Self::Tentative,
+            _ => Self::NeedsAction,
+        }
+    }
+
     /// Get the display icon for this status
     pub fn icon(&self) -> &'static str {
         match self {
@@ -58,7 +72,6 @@ pub enum EventId {
         event_uid: String,
         etag: Option<String>,
         calendar_name: Option<String>,
-        #[serde(default)]
         href: Option<String>,
     },
 }
@@ -158,19 +171,20 @@ fn hm(minutes: u16) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
-/// Unified event representation for display: one occurrence on one day
+/// Unified event representation for display: one occurrence on one day.
+/// On disk it's written through `DiskEventRef`; reading ignores the extra
+/// display strings that adds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(into = "DiskEvent", from = "DiskEvent")]
 pub struct DisplayEvent {
     pub id: EventId,
     pub title: String,
     pub when: When,
     pub date: NaiveDate,
-    /// Part of an event covering several days (leave, a conference)
+    /// Part of an event covering several days (leave, a conference).
+    /// Defaulted: the first v3 caches were written without it
+    #[serde(default)]
     pub spans_days: bool,
     pub accepted: bool, // true if accepted or organizer, false if declined/tentative/needs-action
-    pub is_organizer: bool, // true if the user created/organizes this event
-    #[serde(default)] // backwards compat with old cache
     pub is_free: bool, // true if event is marked as "free" (doesn't block time)
     pub meeting_url: Option<String>, // Zoom, Meet, Teams link if available
     pub description: Option<String>,
@@ -179,13 +193,6 @@ pub struct DisplayEvent {
 }
 
 impl DisplayEvent {
-    /// Time column text: "All day" or "HH:MM" (the UI formats its own,
-    /// honouring the 12-hour setting)
-    #[cfg(test)]
-    pub fn time_label(&self) -> String {
-        self.when.label()
-    }
-
     /// Minutes the event blocks on its day; None for all-day, free or
     /// not-accepted events, which don't make you busy
     pub fn busy_range(&self) -> Option<(u16, u16)> {
@@ -194,72 +201,36 @@ impl DisplayEvent {
         }
         self.when.range()
     }
+
+    /// The busy range, if this occurrence can be "Now:" / "Next:". Days of a
+    /// multi-day event (leave, a conference) are banners like all-day ones:
+    /// they'd hold "Now:" all day and hide the countdown to actual meetings.
+    pub fn countdown_range(&self) -> Option<(u16, u16)> {
+        if self.spans_days {
+            return None;
+        }
+        self.busy_range()
+    }
 }
 
-/// On-disk form of an event. Besides `when` it keeps the `time_str` /
-/// `end_time_str` display strings, which external readers of the cache
-/// (the TRMNL push job) rely on.
-#[derive(Serialize, Deserialize)]
-struct DiskEvent {
-    id: EventId,
-    title: String,
-    when: When,
+/// How an event is written to disk: all of it, plus the `time_str` /
+/// `end_time_str` display strings that external readers of the cache (the
+/// TRMNL push job) rely on. Borrows the event, so saving copies nothing.
+#[derive(Serialize)]
+struct DiskEventRef<'a> {
+    #[serde(flatten)]
+    event: &'a DisplayEvent,
     time_str: String,
     end_time_str: Option<String>,
-    date: NaiveDate,
-    #[serde(default)]
-    spans_days: bool,
-    accepted: bool,
-    is_organizer: bool,
-    #[serde(default)]
-    is_free: bool,
-    meeting_url: Option<String>,
-    description: Option<String>,
-    location: Option<String>,
-    attendees: Vec<DisplayAttendee>,
 }
 
-impl From<DisplayEvent> for DiskEvent {
-    fn from(e: DisplayEvent) -> Self {
-        DiskEvent {
-            time_str: e.when.label(),
-            end_time_str: e.when.end_label(),
-            id: e.id,
-            title: e.title,
-            when: e.when,
-            date: e.date,
-            spans_days: e.spans_days,
-            accepted: e.accepted,
-            is_organizer: e.is_organizer,
-            is_free: e.is_free,
-            meeting_url: e.meeting_url,
-            description: e.description,
-            location: e.location,
-            attendees: e.attendees,
-        }
+impl<'a> DiskEventRef<'a> {
+    fn new(event: &'a DisplayEvent) -> Self {
+        DiskEventRef { event, time_str: event.when.label(), end_time_str: event.when.end_label() }
     }
 }
 
-impl From<DiskEvent> for DisplayEvent {
-    fn from(e: DiskEvent) -> Self {
-        DisplayEvent {
-            id: e.id,
-            title: e.title,
-            when: e.when,
-            date: e.date,
-            spans_days: e.spans_days,
-            accepted: e.accepted,
-            is_organizer: e.is_organizer,
-            is_free: e.is_free,
-            meeting_url: e.meeting_url,
-            description: e.description,
-            location: e.location,
-            attendees: e.attendees,
-        }
-    }
-}
-
-/// Split an event's span into per-day occurrences inside `window` (inclusive).
+/// When an event happens, before it's split into days
 pub enum Span {
     /// Inclusive first and last day
     AllDay { first: NaiveDate, last: NaiveDate },
@@ -288,6 +259,7 @@ fn last_day(end: chrono::DateTime<chrono::Local>) -> NaiveDate {
     }
 }
 
+/// Split an event's span into per-day occurrences inside `window` (inclusive)
 pub fn occurrences(span: Span, window: (NaiveDate, NaiveDate)) -> Vec<(NaiveDate, When)> {
     use chrono::Timelike;
     let minutes = |t: chrono::NaiveTime| (t.hour() * 60 + t.minute()) as u16;
@@ -339,15 +311,23 @@ struct DiskCache {
     icloud: HashMap<NaiveDate, Vec<DisplayEvent>>,
 }
 
-/// Borrowing twin of DiskCache, so saving doesn't clone the whole map
+/// Write side of DiskCache: borrows the caches, writing each event as a
+/// `DiskEventRef`
 #[derive(Serialize)]
 struct DiskCacheRef<'a> {
     version: u32,
+    #[serde(serialize_with = "serialize_days")]
     google: &'a HashMap<NaiveDate, Vec<DisplayEvent>>,
+    #[serde(serialize_with = "serialize_days")]
     icloud: &'a HashMap<NaiveDate, Vec<DisplayEvent>>,
 }
 
+fn serialize_days<S: serde::Serializer>(days: &&HashMap<NaiveDate, Vec<DisplayEvent>>, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_map(days.iter().map(|(date, events)| (date, events.iter().map(DiskEventRef::new).collect::<Vec<_>>())))
+}
+
 /// Source-specific event cache
+#[derive(Default)]
 pub struct SourceCache {
     by_date: HashMap<NaiveDate, Vec<DisplayEvent>>,
     /// When each month was last fetched successfully (not restored from disk,
@@ -356,18 +336,6 @@ pub struct SourceCache {
 }
 
 impl SourceCache {
-    pub fn new() -> Self {
-        Self {
-            by_date: HashMap::new(),
-            fetched_months: HashMap::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn has_month(&self, date: NaiveDate) -> bool {
-        self.fetched_months.contains_key(&(date.year(), date.month()))
-    }
-
     /// When the month containing `date` was last fetched, if ever
     pub fn fetched_at(&self, date: NaiveDate) -> Option<Instant> {
         self.fetched_months.get(&(date.year(), date.month())).copied()
@@ -387,8 +355,8 @@ impl SourceCache {
         let in_month = |d: &NaiveDate| d.year() == year && d.month() == month;
         self.by_date.retain(|date, _| !in_month(date));
 
-        // Identity of one occurrence: event id + date + time (EventKit ids are
-        // synthesized from the title, so two same-titled events need the time)
+        // Identity of one occurrence: event id + date + time (the time keeps
+        // apart instances that share an id and a date)
         let mut seen: HashSet<(String, String, NaiveDate, When)> = HashSet::new();
         for event in events {
             if !in_month(&event.date) {
@@ -426,55 +394,33 @@ impl SourceCache {
     pub fn all_events(&self) -> impl Iterator<Item = &DisplayEvent> {
         self.by_date.values().flat_map(|v| v.iter())
     }
-
-    #[cfg(test)]
-    pub fn clear(&mut self) {
-        self.by_date.clear();
-        self.fetched_months.clear();
-    }
-
-    /// Get raw data for serialization
-    pub fn raw_data(&self) -> &HashMap<NaiveDate, Vec<DisplayEvent>> {
-        &self.by_date
-    }
-
-    /// Load from raw data (for cache restore)
-    pub fn load_from(&mut self, data: HashMap<NaiveDate, Vec<DisplayEvent>>) {
-        self.by_date = data;
-        // Don't mark months as fetched - we want to refresh from network
-    }
-}
-
-impl Default for SourceCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Combined event cache for all sources
+#[derive(Default)]
 pub struct EventCache {
     pub google: SourceCache,
     pub icloud: SourceCache,
 }
 
 impl EventCache {
-    pub fn new() -> Self {
-        Self {
-            google: SourceCache::new(),
-            icloud: SourceCache::new(),
+    pub fn source(&self, source: EventSource) -> &SourceCache {
+        match source {
+            EventSource::Google => &self.google,
+            EventSource::ICloud => &self.icloud,
+        }
+    }
+
+    pub fn source_mut(&mut self, source: EventSource) -> &mut SourceCache {
+        match source {
+            EventSource::Google => &mut self.google,
+            EventSource::ICloud => &mut self.icloud,
         }
     }
 
     /// Check if any source has events on this date
     pub fn has_events(&self, date: NaiveDate) -> bool {
         self.google.has_events(date) || self.icloud.has_events(date)
-    }
-
-    /// Clear all caches
-    #[cfg(test)]
-    pub fn clear(&mut self) {
-        self.google.clear();
-        self.icloud.clear();
     }
 
     /// Get cache file path
@@ -494,8 +440,8 @@ impl EventCache {
     pub fn to_disk_bytes(&self) -> Option<Vec<u8>> {
         let cache = DiskCacheRef {
             version: CACHE_VERSION,
-            google: self.google.raw_data(),
-            icloud: self.icloud.raw_data(),
+            google: &self.google.by_date,
+            icloud: &self.icloud.by_date,
         };
         serde_json::to_vec(&cache).ok()
     }
@@ -523,15 +469,42 @@ impl EventCache {
             return false;
         }
 
-        self.google.load_from(cache.google);
-        self.icloud.load_from(cache.icloud);
+        // Months aren't marked fetched, so everything is still refreshed
+        self.google.by_date = cache.google;
+        self.icloud.by_date = cache.icloud;
         true
     }
 }
 
-impl Default for EventCache {
-    fn default() -> Self {
-        Self::new()
+/// Writes the event cache on its own thread. Saves that pile up while one is
+/// being written collapse into the newest, so a burst of results costs one write.
+pub struct CacheWriter {
+    tx: std::sync::mpsc::Sender<Vec<u8>>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl CacheWriter {
+    pub fn spawn() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let handle = std::thread::spawn(move || {
+            while let Ok(mut bytes) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    bytes = newer;
+                }
+                EventCache::write_disk_bytes(&bytes);
+            }
+        });
+        Self { tx, handle }
+    }
+
+    pub fn write(&self, bytes: Vec<u8>) {
+        let _ = self.tx.send(bytes);
+    }
+
+    /// Wait for the last write to land
+    pub fn finish(self) {
+        drop(self.tx);
+        let _ = self.handle.join();
     }
 }
 
@@ -547,7 +520,6 @@ mod tests {
             date,
             spans_days: false,
             accepted: true,
-            is_organizer: false,
             is_free: false,
             meeting_url: None,
             description: None,
@@ -558,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_source_cache_store_and_get() {
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
         let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
@@ -576,21 +548,21 @@ mod tests {
     }
 
     #[test]
-    fn test_source_cache_has_month() {
-        let mut cache = SourceCache::new();
+    fn test_source_cache_records_fetched_months() {
+        let mut cache = SourceCache::default();
         let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
-        assert!(!cache.has_month(month_date));
+        assert!(cache.fetched_at(month_date).is_none());
 
         cache.store(vec![], month_date);
 
-        assert!(cache.has_month(month_date));
-        assert!(!cache.has_month(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+        assert!(cache.fetched_at(month_date).is_some());
+        assert!(cache.fetched_at(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()).is_none());
     }
 
     #[test]
     fn test_source_cache_store_replaces_month_data() {
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
         let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
@@ -607,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_source_cache_has_events() {
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
         let empty_date = NaiveDate::from_ymd_opt(2026, 1, 16).unwrap();
         let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -619,40 +591,38 @@ mod tests {
     }
 
     #[test]
-    fn test_source_cache_clear() {
-        let mut cache = SourceCache::new();
+    fn test_disk_round_trip_keeps_events_and_display_strings() {
         let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
-        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let mut cache = EventCache::default();
+        let mut meeting = make_event("Meeting", date, "14:30");
+        meeting.when = meeting.when.ending("15:15");
+        cache.google.store(vec![make_event("Holiday", date, "All day"), meeting], date);
+        let bytes = cache.to_disk_bytes().unwrap();
 
-        cache.store(vec![make_event("Event", date, "10:00")], month_date);
-        assert!(cache.has_month(month_date));
-        assert!(cache.has_events(date));
+        // What the TRMNL push job reads: google/icloud → date → events with
+        // title, accepted, time_str and end_time_str
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["version"], CACHE_VERSION);
+        let day = &json["google"]["2026-01-15"];
+        assert_eq!(day[0]["time_str"], "All day");
+        assert_eq!(day[0]["end_time_str"], serde_json::Value::Null);
+        assert_eq!((&day[1]["title"], &day[1]["accepted"]), (&"Meeting".into(), &true.into()));
+        assert_eq!((&day[1]["time_str"], &day[1]["end_time_str"]), (&"14:30".into(), &"15:15".into()));
+        assert!(json["icloud"].as_object().unwrap().is_empty());
 
-        cache.clear();
-        assert!(!cache.has_month(month_date));
-        assert!(!cache.has_events(date));
-    }
-
-    #[test]
-    fn test_source_cache_load_from_does_not_mark_fetched() {
-        let mut cache = SourceCache::new();
-        let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
-        let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-
-        let mut data = HashMap::new();
-        data.insert(date, vec![make_event("Cached Event", date, "10:00")]);
-
-        cache.load_from(data);
-
-        // Data should be there
-        assert_eq!(cache.get(date).len(), 1);
-        // But month should NOT be marked as fetched (allows refresh)
-        assert!(!cache.has_month(month_date));
+        // Reading it back ignores the display strings; months aren't marked
+        // fetched, so a restored cache is still refreshed
+        let parsed: DiskCache = serde_json::from_slice(&bytes).unwrap();
+        let mut restored = EventCache::default();
+        restored.google.by_date = parsed.google;
+        assert_eq!(restored.google.get(date).len(), 2);
+        assert_eq!(restored.google.get(date)[1].when, When::parse_label("14:30").ending("15:15"));
+        assert!(restored.google.fetched_at(date).is_none());
     }
 
     #[test]
     fn test_event_cache_has_events_either_source() {
-        let mut cache = EventCache::new();
+        let mut cache = EventCache::default();
         let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
         let month_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
@@ -661,7 +631,7 @@ mod tests {
         cache.google.store(vec![make_event("Google Event", date, "10:00")], month_date);
         assert!(cache.has_events(date));
 
-        cache.google.clear();
+        cache.google.store(vec![], month_date);
         assert!(!cache.has_events(date));
 
         cache.icloud.store(vec![make_event("iCloud Event", date, "11:00")], month_date);
@@ -672,7 +642,7 @@ mod tests {
     fn test_display_event_serialization() {
         let event = make_event("Test Meeting", NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(), "14:30");
 
-        let json = serde_json::to_string(&event).unwrap();
+        let json = serde_json::to_string(&DiskEventRef::new(&event)).unwrap();
         let parsed: DisplayEvent = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.title, "Test Meeting");
@@ -680,13 +650,18 @@ mod tests {
         // External readers (TRMNL push) still get the display strings
         assert!(json.contains("\"time_str\":\"14:30\""), "{json}");
         assert!(parsed.accepted);
+
+        // Caches written before is_organizer was dropped still load
+        let old = json.replacen("\"accepted\":true", "\"accepted\":true,\"is_organizer\":true", 1);
+        assert_ne!(old, json);
+        assert_eq!(serde_json::from_str::<DisplayEvent>(&old).unwrap().title, "Test Meeting");
     }
 
     #[test]
     fn test_store_keeps_only_the_fetched_month() {
         // A multi-day event that started in August comes back on every
         // September fetch; only its September days belong to that fetch
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let aug = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
         let sep = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
         for _ in 0..5 {
@@ -698,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_store_leaves_other_months_alone() {
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let aug = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
         cache.store(vec![make_event("August", aug, "10:00")], aug);
         cache.store(vec![], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
@@ -776,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_store_dedupes_within_one_response_and_sorts() {
-        let mut cache = SourceCache::new();
+        let mut cache = SourceCache::default();
         let d = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap();
         let mut late = make_event("Late", d, "15:00");
         late.id = EventId::Google { calendar_id: "test".into(), event_id: "late".into(), calendar_name: None };
@@ -786,6 +761,17 @@ mod tests {
         cache.store(vec![late, early.clone(), early, allday], NaiveDate::from_ymd_opt(2026, 9, 1).unwrap());
         let titles: Vec<_> = cache.get(d).iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["All", "Early", "Late"]);
+    }
+
+    #[test]
+    fn test_attendee_status_parse() {
+        assert_eq!(AttendeeStatus::parse("accepted"), AttendeeStatus::Accepted);
+        assert_eq!(AttendeeStatus::parse("DECLINED"), AttendeeStatus::Declined);
+        assert_eq!(AttendeeStatus::parse("Tentative"), AttendeeStatus::Tentative);
+        assert_eq!(AttendeeStatus::parse("needsAction"), AttendeeStatus::NeedsAction);
+        assert_eq!(AttendeeStatus::parse("NEEDS-ACTION"), AttendeeStatus::NeedsAction);
+        assert_eq!(AttendeeStatus::parse("DELEGATED"), AttendeeStatus::NeedsAction);
+        assert_eq!(AttendeeStatus::parse(""), AttendeeStatus::NeedsAction);
     }
 
     #[test]

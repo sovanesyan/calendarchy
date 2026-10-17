@@ -40,12 +40,7 @@ pub fn google_event_to_display(
                 let status = if a.organizer == Some(true) {
                     AttendeeStatus::Organizer
                 } else {
-                    match a.response_status.as_deref() {
-                        Some("accepted") => AttendeeStatus::Accepted,
-                        Some("declined") => AttendeeStatus::Declined,
-                        Some("tentative") => AttendeeStatus::Tentative,
-                        _ => AttendeeStatus::NeedsAction,
-                    }
+                    AttendeeStatus::parse(a.response_status.as_deref().unwrap_or_default())
                 };
                 Some(DisplayAttendee {
                     name: Some(a.display_name.clone().unwrap_or_else(|| name_from_email(&email))),
@@ -68,7 +63,6 @@ pub fn google_event_to_display(
         date: window.0,
         spans_days: false,
         accepted: event.is_accepted(),
-        is_organizer: event.is_organizer(),
         is_free: event.is_free(),
         meeting_url: event.meeting_url(),
         description: event.description.clone(),
@@ -101,16 +95,7 @@ pub fn icloud_event_to_display(
     };
     let mut attendees: Vec<DisplayAttendee> = event.attendees.iter()
         .map(|a| {
-            let status = if a.is_organizer {
-                AttendeeStatus::Organizer
-            } else {
-                match a.partstat.as_str() {
-                    "ACCEPTED" => AttendeeStatus::Accepted,
-                    "DECLINED" => AttendeeStatus::Declined,
-                    "TENTATIVE" => AttendeeStatus::Tentative,
-                    _ => AttendeeStatus::NeedsAction,
-                }
-            };
+            let status = if a.is_organizer { AttendeeStatus::Organizer } else { AttendeeStatus::parse(&a.partstat) };
             DisplayAttendee {
                 name: Some(a.name.clone().unwrap_or_else(|| name_from_email(&a.email))),
                 email: a.email.clone(),
@@ -119,9 +104,6 @@ pub fn icloud_event_to_display(
         })
         .collect();
     sort_attendees(&mut attendees);
-
-    // For iCloud, if there are no attendees, the user created the event
-    let is_organizer = event.attendees.is_empty();
 
     let base = DisplayEvent {
         id: EventId::ICloud {
@@ -136,7 +118,6 @@ pub fn icloud_event_to_display(
         date: window.0,
         spans_days: false,
         accepted: event.accepted,
-        is_organizer,
         is_free: event.is_free(),
         meeting_url: event.meeting_url(),
         description: event.description.clone(),
@@ -159,16 +140,13 @@ mod tests {
             start: google::types::EventDateTime {
                 date: Some(date),
                 date_time: None,
-                time_zone: None,
             },
             end: google::types::EventDateTime {
                 date: Some(date + chrono::Duration::days(1)),
                 date_time: None,
-                time_zone: None,
             },
             location: None,
             description: None,
-            status: None,
             transparency: None,
             attendees: None,
             conference_data: None,
@@ -194,12 +172,12 @@ mod tests {
         use chrono::TimeZone;
         let mut event = make_google_event("late", "Late shift", NaiveDate::from_ymd_opt(2026, 10, 9).unwrap());
         let at = |d, h| chrono::Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap().with_timezone(&chrono::Utc);
-        event.start = google::types::EventDateTime { date: None, date_time: Some(at(9, 22)), time_zone: None };
-        event.end = google::types::EventDateTime { date: None, date_time: Some(at(10, 2)), time_zone: None };
+        event.start = google::types::EventDateTime { date: None, date_time: Some(at(9, 22)) };
+        event.end = google::types::EventDateTime { date: None, date_time: Some(at(10, 2)) };
         let occ = google_event_to_display(event, "cal".into(), None, year(2026));
         assert_eq!(occ.len(), 2);
-        assert_eq!((occ[0].date.day(), occ[0].time_label(), occ[0].when.end_label()), (9, "22:00".into(), Some("24:00".into())));
-        assert_eq!((occ[1].date.day(), occ[1].time_label(), occ[1].when.end_label()), (10, "00:00".into(), Some("02:00".into())));
+        assert_eq!((occ[0].date.day(), occ[0].when.label(), occ[0].when.end_label()), (9, "22:00".into(), Some("24:00".into())));
+        assert_eq!((occ[1].date.day(), occ[1].when.label(), occ[1].when.end_label()), (10, "00:00".into(), Some("02:00".into())));
     }
 
     #[test]
@@ -296,7 +274,6 @@ mod tests {
 
         assert_eq!(display.title, "Personal Event");
         assert_eq!(display.date, NaiveDate::from_ymd_opt(2026, 1, 20).unwrap());
-        assert!(display.is_organizer); // No attendees means organizer
         assert!(matches!(display.id, EventId::ICloud { .. }));
     }
 
@@ -313,6 +290,7 @@ mod tests {
             attendees: vec![
                 icloud::ICalAttendee {
                     email: "person@example.com".to_string(),
+                    address: "mailto:person@example.com".to_string(),
                     name: Some("Person".to_string()),
                     partstat: "ACCEPTED".to_string(),
                     is_organizer: false,
@@ -327,7 +305,6 @@ mod tests {
 
         let display = icloud_event_to_display(event, None, year(2026)).into_iter().next().unwrap();
 
-        assert!(!display.is_organizer); // Has attendees, not organizer
         assert_eq!(display.attendees.len(), 1);
         assert_eq!(display.attendees[0].status, AttendeeStatus::Accepted);
     }

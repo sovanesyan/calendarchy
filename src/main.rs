@@ -5,7 +5,6 @@ mod cache;
 mod config;
 mod conversion;
 mod error;
-mod eventkit;
 mod google;
 mod headless;
 mod icloud;
@@ -13,12 +12,12 @@ mod keymap;
 mod logging;
 mod setup;
 mod sources;
+mod term_bg;
 mod ui;
 mod update;
 mod utils;
 
 use std::io::stdout;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -30,11 +29,11 @@ use reqwest::Client;
 use tokio::sync::mpsc;
 
 use app::{App, EventSource};
-use cache::EventCache;
+use cache::CacheWriter;
 use config::Config;
-use google::{CalendarClient, GoogleAuth};
-use icloud::{CalDavClient, ICloudAuth};
-use sources::{is_auth_failure, GoogleSession};
+use google::GoogleAuth;
+use sources::{is_auth_failure, EventVerb, GoogleSession};
+use term_bg::TermBg;
 use update::{Effect, Msg};
 use utils::open_url;
 
@@ -68,11 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    if std::env::args().any(|a| a == "--remove-setup") {
-        return setup::remove_setup();
-    }
-
     let mut app = App::new();
     app.config = Config::load().unwrap_or_default();
     // `--date YYYY-MM-DD` opens on that day (the shell plugin's "open")
@@ -100,12 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Answers are remembered per terminal, so one that can't answer (tmux, an
     // ssh session) doesn't stop the others from being asked.
     ui::load_palette();
-    let remembered = load_term_bg();
+    let remembered = term_bg::load();
     match remembered {
         Some(TermBg::Color(r, g, b)) => ui::set_term_bg(r, g, b),
         Some(TermBg::Unanswered) => {}
         None => {
-            if let Some((r, g, b)) = probe_term_bg() {
+            if let Some((r, g, b)) = term_bg::probe() {
                 ui::set_term_bg(r, g, b);
             }
         }
@@ -137,7 +131,7 @@ async fn run(
     // termbg reads the reply from stdin, so this must finish before the
     // input thread starts.
     if reprobe_term_bg {
-        let probed = tokio::task::spawn_blocking(probe_term_bg).await.ok().flatten();
+        let probed = tokio::task::spawn_blocking(term_bg::probe).await.ok().flatten();
         if let Some(rgb) = probed
             && ui::get_term_bg() != Some(rgb)
         {
@@ -223,31 +217,10 @@ fn handle_event(app: &mut App, runtime: &mut Runtime, event: Event) {
 
 fn draw(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
     app.dirty = false;
-    let state = ui::RenderState {
-        current_date: app.current_date,
-        selected_date: app.selected_date,
-        events: &app.events,
-        google_auth: &app.google_auth,
-        icloud_auth: &app.icloud_auth,
-        status_message: app.status_message.as_deref(),
-        status_is_error: app.status_is_error,
-        google_loading: app.is_loading(EventSource::Google),
-        icloud_loading: app.is_loading(EventSource::ICloud),
-        navigation_mode: app.navigation_mode,
-        selected_source: app.selected_source,
-        selected_event_index: app.selected_event_index,
-        show_logs: app.show_logs,
-        pending_action: app.pending_action.as_ref(),
-        search: app.search.as_ref(),
-        show_help: app.show_help,
-        setup: app.setup.as_ref(),
-        display: &app.config.display,
-        now: chrono::Local::now(),
-    };
     // ratatui diffs against the previous frame and flushes once; the
     // synchronized-update bracket makes the frame appear atomically
     execute!(stdout(), BeginSynchronizedUpdate)?;
-    terminal.draw(|frame| ui::render(frame, &state))?;
+    terminal.draw(|frame| ui::render(frame, app, chrono::Local::now()))?;
     execute!(stdout(), EndSynchronizedUpdate)?;
     Ok(())
 }
@@ -265,86 +238,6 @@ fn spawn_input_reader() -> mpsc::UnboundedReceiver<Event> {
     rx
 }
 
-fn term_bg_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|p| p.join("calendarchy").join("term-bg"))
-}
-
-/// What we learned about the terminal's background on a previous run
-enum TermBg {
-    Color(u8, u8, u8),
-    Unanswered,
-}
-
-/// Which terminal we're in, as far as the environment tells: multiplexers and
-/// ssh first (they decide whether OSC 11 gets answered), then the emulator
-fn terminal_identity() -> String {
-    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let mut parts = Vec::new();
-    if var("TMUX").is_some() {
-        parts.push("tmux".to_string());
-    }
-    if var("ZELLIJ").is_some() {
-        parts.push("zellij".to_string());
-    }
-    if var("SSH_TTY").is_some() || var("SSH_CONNECTION").is_some() {
-        parts.push("ssh".to_string());
-    }
-    parts.push(var("TERM_PROGRAM").or_else(|| var("TERM")).unwrap_or_else(|| "unknown".into()));
-    // One token, so it can't be confused with the value on its line
-    parts.join("+").replace(char::is_whitespace, "_")
-}
-
-/// The remembered answer for `terminal` in the term-bg file: one
-/// "<terminal> <rrggbb|none>" line per terminal
-fn parse_term_bg(text: &str, terminal: &str) -> Option<TermBg> {
-    let value = text.lines().find_map(|line| {
-        let (who, value) = line.trim().split_once(' ')?;
-        (who == terminal).then_some(value.trim())
-    })?;
-    if value == "none" {
-        return Some(TermBg::Unanswered);
-    }
-    if value.len() != 6 {
-        return None;
-    }
-    let [_, r, g, b] = u32::from_str_radix(value, 16).ok()?.to_be_bytes();
-    Some(TermBg::Color(r, g, b))
-}
-
-/// The term-bg file with `terminal`'s line set to `value`, others kept.
-/// Lines from the old single-value format (no terminal name) are dropped.
-fn update_term_bg(text: &str, terminal: &str, value: &str) -> String {
-    let mut out: String = text
-        .lines()
-        .filter(|line| line.trim().split_once(' ').is_some_and(|(who, _)| who != terminal))
-        .map(|line| format!("{}\n", line.trim()))
-        .collect();
-    out.push_str(&format!("{} {}\n", terminal, value));
-    out
-}
-
-fn load_term_bg() -> Option<TermBg> {
-    let text = std::fs::read_to_string(term_bg_path()?).ok()?;
-    parse_term_bg(&text, &terminal_identity())
-}
-
-/// Ask the terminal for its background via OSC 11, remembering the outcome
-fn probe_term_bg() -> Option<(u8, u8, u8)> {
-    let answer = termbg::rgb(Duration::from_millis(120))
-        .ok()
-        .map(|rgb| ((rgb.r >> 8) as u8, (rgb.g >> 8) as u8, (rgb.b >> 8) as u8));
-    if let Some(path) = term_bg_path() {
-        let _ = std::fs::create_dir_all(path.parent().unwrap());
-        let value = match answer {
-            Some((r, g, b)) => format!("{:02x}{:02x}{:02x}", r, g, b),
-            None => "none".to_string(),
-        };
-        let old = std::fs::read_to_string(&path).unwrap_or_default();
-        let _ = std::fs::write(path, update_term_bg(&old, &terminal_identity(), &value));
-    }
-    answer
-}
-
 /// Restore the terminal only when the main thread panics. A panic in a
 /// background task is caught by tokio (that fetch just fails), so the UI must
 /// stay up; its message goes to the request log instead of over the screen.
@@ -355,7 +248,7 @@ fn install_panic_hook() {
             ratatui::restore();
             default_hook(info);
         } else {
-            logging::log_request("PANIC", &info.to_string());
+            logging::log_panic(&info.to_string());
         }
     }));
 }
@@ -372,14 +265,7 @@ struct Runtime {
 impl Runtime {
     fn new(tx: mpsc::UnboundedSender<Msg>) -> Self {
         Self {
-            // Timeouts so a request stuck on a dead connection (e.g. after the
-            // laptop wakes) fails and is retried instead of hanging forever
-            http: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .pool_idle_timeout(Duration::from_secs(90))
-                .build()
-                .unwrap_or_default(),
+            http: sources::http_client(),
             tx,
             cache_dirty: false,
             cache_writer: CacheWriter::spawn(),
@@ -392,18 +278,9 @@ impl Runtime {
         }
     }
 
-    fn spawn<F>(&self, task: F)
-    where
-        F: std::future::Future<Output = Msg> + Send + 'static,
-    {
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(task.await);
-        });
-    }
-
-    /// Like `spawn`, but if the task panics send `on_panic` instead, so the
-    /// app never waits forever on a result that can't arrive
+    /// Run `task` and send its result back; if it panics send `on_panic`
+    /// instead, so the app never waits forever on a result that can't arrive
+    /// (stuck on "Authenticating..." or "Deleting event...")
     fn spawn_or<F>(&self, on_panic: Msg, task: F)
     where
         F: std::future::Future<Output = Msg> + Send + 'static,
@@ -445,31 +322,21 @@ impl Runtime {
                     }
                 });
             }
-            Effect::FetchCalDav { month, generation, calendars } => {
+            Effect::FetchCalDav { month, generation, account } => {
                 let Some(icloud) = app.config.icloud.clone() else { return };
                 let failed = fetch_failed(EventSource::ICloud, month, generation, "fetch task crashed");
                 self.spawn_or(failed, async move {
-                    match sources::fetch_caldav_month(&http, &icloud, &calendars, month).await {
+                    match sources::fetch_caldav_month(&http, &icloud, &account, month).await {
                         Ok(events) => fetched(EventSource::ICloud, month, generation, events),
                         Err(e) => fetch_failed(EventSource::ICloud, month, generation, &e.to_string()),
                     }
                 });
             }
-            Effect::FetchEventKit { month, generation } => {
-                let failed = fetch_failed(EventSource::ICloud, month, generation, "fetch task crashed");
-                self.spawn_or(failed, async move {
-                    match sources::fetch_eventkit_month(month).await {
-                        Ok(events) => fetched(EventSource::ICloud, month, generation, events),
-                        // The helper's errors already say "EventKit: ..."
-                        Err(e) => fetch_failed(EventSource::ICloud, month, generation, &e),
-                    }
-                });
-            }
             Effect::StartGoogleAuth => {
                 let Some(gconfig) = app.config.google.clone() else { return };
-                let auth = GoogleAuth::with_client(http, gconfig);
+                let auth = GoogleAuth::new(http, gconfig);
                 open_url(&auth.auth_url());
-                self.spawn(async move {
+                self.spawn_or(Msg::GoogleSignInFailed("sign-in task crashed".into()), async move {
                     match auth.authenticate_with_browser().await {
                         Ok(tokens) => Msg::GoogleSignedIn(tokens),
                         Err(e) => Msg::GoogleSignInFailed(e.to_string()),
@@ -478,46 +345,20 @@ impl Runtime {
             }
             Effect::DiscoverICloud => {
                 let Some(icloud) = app.config.icloud.clone() else { return };
-                self.spawn(async move {
+                self.spawn_or(Msg::ICloudDiscoveryFailed("discovery task crashed".into()), async move {
                     match sources::discover_icloud(&http, &icloud).await {
-                        Ok(calendars) => Msg::ICloudDiscovered(calendars),
+                        Ok(account) => Msg::ICloudDiscovered(account),
                         Err(e) => Msg::ICloudDiscoveryFailed(e.to_string()),
                     }
                 });
             }
-            Effect::RespondToEvent { tokens, calendar_id, event_id, response } => {
-                let Some(gconfig) = app.config.google.clone() else { return };
-                let (done, verb) = if response == "accepted" { ("Event accepted", "accept") } else { ("Event declined", "decline") };
-                self.spawn(async move {
-                    let client = CalendarClient::with_client(http.clone());
-                    let client = &client;
-                    let (calendar_id, event_id) = (&calendar_id, &event_id);
-                    let mut session = GoogleSession::new(http, gconfig, tokens);
-                    let result = session
-                        .call(|t| async move { client.respond_to_event(&t, calendar_id, event_id, response).await })
-                        .await;
-                    action_result(result, done, verb, session.into_refreshed())
-                });
-            }
-            Effect::DeleteGoogleEvent { tokens, calendar_id, event_id } => {
-                let Some(gconfig) = app.config.google.clone() else { return };
-                self.spawn(async move {
-                    let client = CalendarClient::with_client(http.clone());
-                    let client = &client;
-                    let (calendar_id, event_id) = (&calendar_id, &event_id);
-                    let mut session = GoogleSession::new(http, gconfig, tokens);
-                    let result = session
-                        .call(|t| async move { client.delete_event(&t, calendar_id, event_id).await })
-                        .await;
-                    action_result(result, "Event deleted", "delete", session.into_refreshed())
-                });
-            }
-            Effect::DeleteICloudEvent { calendar_url, event_uid, href, etag } => {
-                let Some(icloud) = app.config.icloud.clone() else { return };
-                self.spawn(async move {
-                    let client = CalDavClient::with_client(http, ICloudAuth::new(icloud));
-                    let result = client.delete_event(&calendar_url, &event_uid, href.as_deref(), etag.as_deref()).await;
-                    action_result(result, "Event deleted", "delete", None)
+            Effect::EventAction { verb, id, tokens } => {
+                let google = app.config.google.clone().zip(tokens);
+                let icloud = app.config.icloud.clone();
+                self.spawn_or(action_crashed(verb), async move {
+                    let mut session = google.map(|(gconfig, tokens)| GoogleSession::new(http.clone(), gconfig, tokens));
+                    let result = sources::event_action(&http, session.as_mut(), icloud.as_ref(), &id, verb).await;
+                    action_result(result, verb, session.and_then(GoogleSession::into_refreshed))
                 });
             }
             Effect::OpenUrl(url) => open_url(&url),
@@ -527,12 +368,8 @@ impl Runtime {
                     app.set_error(format!("Couldn't save Google sign-in: {}", e));
                 }
             }
-            Effect::SaveICloudCalendars(calendars) => {
-                let stored: Vec<config::StoredCalendar> = calendars
-                    .iter()
-                    .map(|c| config::StoredCalendar { url: c.url.clone(), name: c.name.clone() })
-                    .collect();
-                if let Err(e) = config::save_icloud_tokens(&stored) {
+            Effect::SaveICloudAccount(account) => {
+                if let Err(e) = config::save_icloud_account(&account) {
                     app.set_error(format!("Couldn't save iCloud calendars: {}", e));
                 }
             }
@@ -562,75 +399,21 @@ fn fetch_failed(source: EventSource, month: chrono::NaiveDate, generation: u64, 
     Msg::FetchFailed { source, month, generation, auth: false, error: error.to_string(), tokens: None }
 }
 
-fn action_result<T>(
-    result: error::Result<T>,
-    done: &str,
-    verb: &str,
-    tokens: Option<google::TokenInfo>,
-) -> Msg {
+/// What an event action reports if its task dies
+fn action_crashed(verb: EventVerb) -> Msg {
+    Msg::ActionFailed { message: format!("Failed to {}: task crashed", verb.name()), auth: false, tokens: None }
+}
+
+fn action_result(result: error::Result<()>, verb: EventVerb, tokens: Option<google::TokenInfo>) -> Msg {
     match result {
-        Ok(_) => Msg::ActionDone { message: done.to_string(), tokens },
-        Err(e) => Msg::ActionFailed { auth: is_auth_failure(&e), message: format!("Failed to {}: {}", verb, e), tokens },
-    }
-}
-
-/// Writes the event cache on its own thread. Saves that pile up while one is
-/// being written collapse into the newest, so a burst of results costs one write.
-struct CacheWriter {
-    tx: std::sync::mpsc::Sender<Vec<u8>>,
-    handle: std::thread::JoinHandle<()>,
-}
-
-impl CacheWriter {
-    fn spawn() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let handle = std::thread::spawn(move || {
-            while let Ok(mut bytes) = rx.recv() {
-                while let Ok(newer) = rx.try_recv() {
-                    bytes = newer;
-                }
-                EventCache::write_disk_bytes(&bytes);
-            }
-        });
-        Self { tx, handle }
-    }
-
-    fn write(&self, bytes: Vec<u8>) {
-        let _ = self.tx.send(bytes);
-    }
-
-    fn finish(self) {
-        drop(self.tx);
-        let _ = self.handle.join();
+        Ok(()) => Msg::ActionDone { message: format!("Event {}", verb.done()), tokens },
+        Err(e) => Msg::ActionFailed { auth: is_auth_failure(&e), message: format!("Failed to {}: {}", verb.name(), e), tokens },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_term_bg_is_remembered_per_terminal() {
-        // tmux couldn't answer; foot could. Each keeps its own answer.
-        let text = update_term_bg("", "tmux+foot", "none");
-        let text = update_term_bg(&text, "foot", "fafafa");
-        assert!(matches!(parse_term_bg(&text, "tmux+foot"), Some(TermBg::Unanswered)));
-        assert!(matches!(parse_term_bg(&text, "foot"), Some(TermBg::Color(0xfa, 0xfa, 0xfa))));
-        assert!(parse_term_bg(&text, "alacritty").is_none(), "unknown terminals get asked");
-
-        // A new answer replaces that terminal's line only
-        let text = update_term_bg(&text, "foot", "1e2026");
-        assert!(matches!(parse_term_bg(&text, "foot"), Some(TermBg::Color(0x1e, 0x20, 0x26))));
-        assert!(matches!(parse_term_bg(&text, "tmux+foot"), Some(TermBg::Unanswered)));
-        assert_eq!(text.lines().count(), 2);
-    }
-
-    #[test]
-    fn test_old_single_value_term_bg_file_is_ignored() {
-        // The previous format held one value for every terminal
-        assert!(parse_term_bg("none\n", "foot").is_none());
-        assert_eq!(update_term_bg("none\n", "foot", "fafafa"), "foot fafafa\n");
-    }
 
     #[tokio::test]
     async fn test_a_panicking_task_still_reports_back() {

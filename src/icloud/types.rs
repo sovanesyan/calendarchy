@@ -6,7 +6,12 @@ use chrono::Timelike;
 #[derive(Debug, Clone)]
 pub struct ICalAttendee {
     pub name: Option<String>,
+    /// The address to show: the mailto: address, else the EMAIL= parameter,
+    /// else the raw value (e.g. an iCloud principal path)
     pub email: String,
+    /// The calendar-user address as written (`mailto:...`, a principal path,
+    /// `urn:uuid:...`), for recognising yourself
+    pub address: String,
     pub partstat: String,  // ACCEPTED, DECLINED, TENTATIVE, NEEDS-ACTION
     pub is_organizer: bool,
 }
@@ -21,7 +26,8 @@ pub struct ICalEvent {
     pub location: Option<String>,
     pub description: Option<String>,
     pub url: Option<String>,
-    pub accepted: bool, // true if accepted or no PARTSTAT found
+    /// You accepted, or it's yours (you organise it or aren't listed)
+    pub accepted: bool,
     pub attendees: Vec<ICalAttendee>,
     /// "TRANSPARENT" = free, "OPAQUE" = busy (default)
     pub transp: Option<String>,
@@ -73,27 +79,14 @@ impl ICalEvent {
         }
     }
 
-    /// Extract meeting URL (Zoom, Google Meet, etc.)
+    /// Meeting link: the URL property if it's a meeting link, then one found
+    /// in the location or description
     pub fn meeting_url(&self) -> Option<String> {
-        // Check URL field first
-        if let Some(ref url) = self.url
-            && is_meeting_url(url) {
-                return Some(url.clone());
-            }
-
-        // Check location for meeting URLs
-        if let Some(ref loc) = self.location
-            && let Some(url) = extract_meeting_url(loc) {
-                return Some(url);
-            }
-
-        // Check description for meeting URLs
-        if let Some(ref desc) = self.description
-            && let Some(url) = extract_meeting_url(desc) {
-                return Some(url);
-            }
-
-        None
+        meeting_url(
+            self.url.as_deref().filter(|url| is_meeting_url(url)),
+            self.location.as_deref(),
+            self.description.as_deref(),
+        )
     }
 
     /// Check if the event is marked as "free" (doesn't block time)
@@ -101,18 +94,21 @@ impl ICalEvent {
         self.transp.as_deref() == Some("TRANSPARENT")
     }
 
-    /// Parse an iCal VCALENDAR string into events (test-only)
+    /// Parse an iCal VCALENDAR string into events (test-only), as seen by
+    /// me@example.com
     #[cfg(test)]
     pub fn parse_ical(ical_data: &str) -> Vec<ICalEvent> {
-        Self::parse_ical_with_source(ical_data, String::new(), None, None)
+        Self::parse_ical_with_source(ical_data, String::new(), None, None, &Me::new(["me@example.com"]))
     }
 
-    /// Parse an iCal VCALENDAR string into events with calendar source info
+    /// Parse an iCal VCALENDAR string into events with calendar source info.
+    /// `me` picks out your own attendee entry, for `accepted`.
     pub fn parse_ical_with_source(
         ical_data: &str,
         calendar_url: String,
         etag: Option<String>,
         href: Option<String>,
+        me: &Me,
     ) -> Vec<ICalEvent> {
         let mut events = Vec::new();
         let mut current_event: Option<ICalEventBuilder> = None;
@@ -133,7 +129,7 @@ impl ICalEvent {
                 });
             } else if line == "END:VEVENT" {
                 if let Some(builder) = current_event.take()
-                    && let Some(event) = builder.build() {
+                    && let Some(event) = builder.build(me) {
                         events.push(event);
                     }
             } else if current_event.is_some() && line.starts_with("BEGIN:") {
@@ -153,11 +149,6 @@ impl ICalEvent {
                         "DESCRIPTION" => builder.description = Some(unescape_ical(value)),
                         "URL" => builder.url = Some(unescape_ical(value)),
                         "ATTENDEE" => {
-                            // Extract PARTSTAT from ATTENDEE line for self acceptance
-                            if let Some(partstat) = extract_partstat(key) {
-                                builder.partstat = Some(partstat.clone());
-                            }
-                            // Parse attendee details
                             if let Some(attendee) = parse_attendee(key, value) {
                                 builder.attendees.push(attendee);
                             }
@@ -166,7 +157,6 @@ impl ICalEvent {
                             // Parse organizer as an attendee
                             if let Some(mut attendee) = parse_attendee(key, value) {
                                 attendee.is_organizer = true;
-                                attendee.partstat = "ACCEPTED".to_string();
                                 builder.attendees.push(attendee);
                             }
                         }
@@ -189,7 +179,6 @@ struct ICalEventBuilder {
     location: Option<String>,
     description: Option<String>,
     url: Option<String>,
-    partstat: Option<String>, // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE
     attendees: Vec<ICalAttendee>,
     transp: Option<String>,
     calendar_url: String,
@@ -198,15 +187,8 @@ struct ICalEventBuilder {
 }
 
 impl ICalEventBuilder {
-    fn build(self) -> Option<ICalEvent> {
-        // Default to accepted if no PARTSTAT or if ACCEPTED
-        let accepted = match self.partstat.as_deref() {
-            None => true,
-            Some("ACCEPTED") => true,
-            Some("NEEDS-ACTION") | Some("TENTATIVE") | Some("DECLINED") => false,
-            _ => true,
-        };
-
+    fn build(self, me: &Me) -> Option<ICalEvent> {
+        let accepted = self_accepted(&self.attendees, me);
         Some(ICalEvent {
             uid: self.uid?,
             summary: self.summary,
@@ -223,6 +205,66 @@ impl ICalEventBuilder {
             href: self.href,
         })
     }
+}
+
+/// Who you are on invites: every calendar-user address of the account (the
+/// Apple ID, the `calendar-user-address-set` from discovery: mailto:
+/// addresses, principal paths, `urn:uuid:`s), normalised for comparison
+#[derive(Debug, Clone, Default)]
+pub struct Me {
+    addresses: Vec<String>,
+}
+
+impl Me {
+    pub fn new<S: AsRef<str>>(addresses: impl IntoIterator<Item = S>) -> Self {
+        let mut addresses: Vec<String> = addresses
+            .into_iter()
+            .map(|a| normalise_address(a.as_ref()))
+            .filter(|a| !a.is_empty())
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        Self { addresses }
+    }
+
+    /// Whether this attendee is you: its value, or its EMAIL= address
+    fn is(&self, attendee: &ICalAttendee) -> bool {
+        [&attendee.address, &attendee.email]
+            .into_iter()
+            .map(|a| normalise_address(a))
+            .any(|a| !a.is_empty() && self.addresses.contains(&a))
+    }
+}
+
+/// A calendar-user address in comparable form: emails (`mailto:` stripped)
+/// and `urn:uuid:`s lowercased; URLs and paths reduced to the path (any host,
+/// e.g. a pXX-caldav.icloud.com partition, dropped) without trailing slash
+fn normalise_address(address: &str) -> String {
+    let address = address.trim();
+    if let Some(email) = strip_prefix_ignore_case(address, "mailto:") {
+        return email.trim().to_lowercase();
+    }
+    let path = ["https://", "http://"]
+        .into_iter()
+        .find_map(|scheme| strip_prefix_ignore_case(address, scheme))
+        .map(|rest| rest.find('/').map_or("/", |i| &rest[i..]));
+    match path.or_else(|| address.starts_with('/').then_some(address)) {
+        Some(path) => path.trim_end_matches('/').to_string(),
+        None => address.to_lowercase(),
+    }
+}
+
+fn strip_prefix_ignore_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.get(..prefix.len()).filter(|p| p.eq_ignore_ascii_case(prefix)).map(|_| &s[prefix.len()..])
+}
+
+/// Whether you're going. An event you organise is yours; otherwise your own
+/// attendee entry's PARTSTAT decides. One that doesn't list you (or anyone),
+/// or with no idea who you are, counts as accepted.
+fn self_accepted(attendees: &[ICalAttendee], me: &Me) -> bool {
+    let mine: Vec<&ICalAttendee> = attendees.iter().filter(|a| me.is(a)).collect();
+    mine.is_empty()
+        || mine.iter().any(|a| a.is_organizer || !matches!(a.partstat.as_str(), "NEEDS-ACTION" | "TENTATIVE" | "DECLINED"))
 }
 
 /// Unfold iCal lines (lines starting with space/tab are continuations)
@@ -248,9 +290,18 @@ fn unfold_ical_lines(data: &str) -> Vec<String> {
     result
 }
 
-/// Parse a single iCal line into key and value
+/// Parse a single iCal line into key and value, split at the first colon
+/// outside a quoted parameter (`SENT-BY="mailto:..."` has one inside)
 fn parse_ical_line(line: &str) -> Option<(&str, &str)> {
-    let colon_pos = line.find(':')?;
+    let mut quoted = false;
+    let colon_pos = line.char_indices().find_map(|(i, c)| match c {
+        '"' => {
+            quoted = !quoted;
+            None
+        }
+        ':' if !quoted => Some(i),
+        _ => None,
+    })?;
     Some((&line[..colon_pos], &line[colon_pos + 1..]))
 }
 
@@ -365,15 +416,30 @@ fn extract_cn(key: &str) -> Option<String> {
     None
 }
 
+/// Extract a parameter's value from a property key, quotes removed
+/// e.g. ("ATTENDEE;EMAIL=\"a@b.c\";CN=A", "EMAIL") -> "a@b.c"
+fn extract_param<'a>(key: &'a str, name: &str) -> Option<&'a str> {
+    key.split(';')
+        .skip(1)
+        .find_map(|part| part.split_once('=').filter(|(k, _)| k.eq_ignore_ascii_case(name)))
+        .map(|(_, v)| v.trim_matches('"'))
+        .filter(|v| !v.is_empty())
+}
+
 /// Parse ATTENDEE or ORGANIZER line into ICalAttendee
 /// key: "ATTENDEE;PARTSTAT=ACCEPTED;CN=John Smith"
-/// value: "mailto:john@example.com"
+/// value: "mailto:john@example.com", or for iCloud users often a principal
+/// path ("/aMTM...=/principal/") or "urn:uuid:..." with the address in EMAIL=
 fn parse_attendee(key: &str, value: &str) -> Option<ICalAttendee> {
-    // Extract email from mailto: value
-    let email = value
-        .strip_prefix("mailto:")
-        .unwrap_or(value)
-        .to_string();
+    let address = value.trim();
+    if address.is_empty() {
+        return None;
+    }
+    let email = match strip_prefix_ignore_case(address, "mailto:") {
+        Some(email) => email,
+        None => extract_param(key, "EMAIL").and_then(|e| strip_prefix_ignore_case(e, "mailto:").or(Some(e))).unwrap_or(address),
+    }
+    .to_string();
 
     // Skip if no valid email
     if email.is_empty() {
@@ -389,12 +455,13 @@ fn parse_attendee(key: &str, value: &str) -> Option<ICalAttendee> {
     Some(ICalAttendee {
         name,
         email,
+        address: address.to_string(),
         partstat,
         is_organizer: false, // Caller sets this for ORGANIZER lines
     })
 }
 
-use crate::utils::{extract_meeting_url, is_meeting_url};
+use crate::utils::{is_meeting_url, meeting_url};
 
 #[cfg(test)]
 mod tests {
@@ -709,7 +776,6 @@ END:VCALENDAR"#;
         let organizer = events[0].attendees.iter().find(|a| a.is_organizer).unwrap();
         assert_eq!(organizer.name, Some("Alice Manager".to_string()));
         assert_eq!(organizer.email, "alice@example.com");
-        assert_eq!(organizer.partstat, "ACCEPTED");
 
         // Check accepted attendee
         let bob = events[0].attendees.iter().find(|a| a.email == "bob@example.com").unwrap();
@@ -724,6 +790,112 @@ END:VCALENDAR"#;
         let dave = events[0].attendees.iter().find(|a| a.email == "dave@example.com").unwrap();
         assert_eq!(dave.name, None);
         assert_eq!(dave.partstat, "TENTATIVE");
+
+        // You aren't on the list: whoever replied last doesn't decide for you
+        assert!(events[0].accepted);
+    }
+
+    fn event_with(lines: &str) -> ICalEvent {
+        let ical = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u\nDTSTART:20260115T100000Z\n{lines}\nEND:VEVENT\nEND:VCALENDAR");
+        ICalEvent::parse_ical(&ical).remove(0)
+    }
+
+    #[test]
+    fn test_acceptance_is_your_own_reply_not_the_last_one() {
+        let accepted = event_with(
+            "ATTENDEE;PARTSTAT=ACCEPTED:mailto:Me@Example.com\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:late@example.com",
+        );
+        assert!(accepted.accepted, "another guest not replying doesn't make it unaccepted");
+        let declined = event_with(
+            "ATTENDEE;PARTSTAT=DECLINED:MAILTO:me@example.com\nATTENDEE;PARTSTAT=ACCEPTED:mailto:other@example.com",
+        );
+        assert!(!declined.accepted, "matched case-insensitively, MAILTO: too");
+        assert_eq!(declined.attendees[0].email, "me@example.com");
+    }
+
+    #[test]
+    fn test_events_you_organise_are_accepted() {
+        // Organizer lines rarely carry a PARTSTAT
+        let mine = event_with("ORGANIZER;CN=Me:mailto:me@example.com\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:guest@example.com");
+        assert!(mine.accepted);
+        assert!(event_with("SUMMARY:No guests").accepted);
+    }
+
+    /// Parse one event as the iCloud account with the Apple ID
+    /// me@gmail.com, the address me@icloud.com and the given principal
+    fn icloud_event_with(lines: &str) -> ICalEvent {
+        let me = Me::new(["mailto:me@gmail.com", "mailto:me@icloud.com", "/aMTM4NTk=/principal/", "urn:uuid:AB12-CD34"]);
+        let ical = format!("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:u\nDTSTART:20260115T100000Z\n{lines}\nEND:VEVENT\nEND:VCALENDAR");
+        ICalEvent::parse_ical_with_source(&ical, String::new(), None, None, &me).remove(0)
+    }
+
+    #[test]
+    fn test_invites_from_icloud_users_find_you_by_principal() {
+        // Shape iCloud writes: organizer and guests as principal paths
+        let organiser = "ORGANIZER;CN=Friend;EMAIL=friend@icloud.com:/aMTI3NzI=/principal/\nATTENDEE;CN=Friend;PARTSTAT=ACCEPTED;ROLE=CHAIR:/aMTI3NzI=/principal/";
+        let declined = icloud_event_with(&format!("{organiser}\nATTENDEE;CN=Me;PARTSTAT=DECLINED:/aMTM4NTk=/principal/"));
+        assert!(!declined.accepted, "declined by principal path");
+        let pending = icloud_event_with(&format!(
+            "{organiser}\nATTENDEE;CN=Me;PARTSTAT=NEEDS-ACTION:https://p42-caldav.icloud.com:443/aMTM4NTk=/principal"
+        ));
+        assert!(!pending.accepted, "full URL with a partition host and no trailing slash still matches");
+        let accepted = icloud_event_with(&format!("{organiser}\nATTENDEE;PARTSTAT=ACCEPTED:urn:uuid:ab12-cd34"));
+        assert!(accepted.accepted, "urn:uuid matched case-insensitively");
+        let tentative = icloud_event_with(&format!("{organiser}\nATTENDEE;PARTSTAT=TENTATIVE:urn:uuid:AB12-CD34"));
+        assert!(!tentative.accepted);
+    }
+
+    #[test]
+    fn test_email_param_identifies_you_and_is_shown() {
+        let event = icloud_event_with(
+            "ORGANIZER;CN=Friend:mailto:friend@example.com\nATTENDEE;CN=Me;PARTSTAT=DECLINED;EMAIL=\"Me@iCloud.com\":/aOTHER=/principal/",
+        );
+        assert!(!event.accepted, "matched by EMAIL=, not the unknown path");
+        let me = &event.attendees[1];
+        assert_eq!((me.email.as_str(), me.address.as_str()), ("Me@iCloud.com", "/aOTHER=/principal/"));
+        // Without EMAIL= the path is all there is
+        let path_only = parse_attendee("ATTENDEE;CN=X", "/aX=/principal/").unwrap();
+        assert_eq!(path_only.email, "/aX=/principal/");
+        let quoted = parse_attendee("ATTENDEE;EMAIL=\"mailto:x@y.z\"", "urn:uuid:1").unwrap();
+        assert_eq!(quoted.email, "x@y.z");
+    }
+
+    #[test]
+    fn test_organising_with_another_of_your_addresses_is_accepted() {
+        // Your own event, with your work address invited and not yet replied
+        let event = icloud_event_with(
+            "ORGANIZER;CN=Me;EMAIL=me@icloud.com:/aMTM4NTk=/principal/\nATTENDEE;CN=Me;PARTSTAT=ACCEPTED:/aMTM4NTk=/principal/\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@work.com",
+        );
+        assert!(event.accepted);
+        let only_organiser = icloud_event_with(
+            "ORGANIZER:/aMTM4NTk=/principal/\nATTENDEE;PARTSTAT=DECLINED:mailto:guest@example.com",
+        );
+        assert!(only_organiser.accepted, "a guest declining doesn't decline your own event");
+    }
+
+    #[test]
+    fn test_invites_not_naming_you_count_as_accepted() {
+        let event = icloud_event_with(
+            "ORGANIZER:/aMTI3NzI=/principal/\nATTENDEE;PARTSTAT=DECLINED:/aOTHER=/principal/\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:someone@example.com",
+        );
+        assert!(event.accepted, "the last attendee's reply isn't yours");
+    }
+
+    #[test]
+    fn test_quoted_parameters_may_contain_colons() {
+        assert_eq!(
+            parse_ical_line("ORGANIZER;SENT-BY=\"mailto:pa@example.com\";CN=Boss:mailto:boss@example.com"),
+            Some(("ORGANIZER;SENT-BY=\"mailto:pa@example.com\";CN=Boss", "mailto:boss@example.com"))
+        );
+    }
+
+    #[test]
+    fn test_address_normalisation() {
+        assert_eq!(normalise_address(" MAILTO:Me@Example.COM "), "me@example.com");
+        assert_eq!(normalise_address("https://p42-caldav.icloud.com:443/aX=/principal/"), "/aX=/principal");
+        assert_eq!(normalise_address("/aX=/principal/"), "/aX=/principal");
+        assert_eq!(normalise_address("urn:uuid:AB-CD"), "urn:uuid:ab-cd");
+        assert!(Me::new(["", "mailto:"]).addresses.is_empty());
     }
 
     #[test]

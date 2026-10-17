@@ -4,16 +4,17 @@
 
 use std::time::{Duration, Instant};
 
-use chrono::{Datelike, Local, NaiveDate, Timelike};
+use chrono::{Local, NaiveDate, TimeDelta, Timelike};
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::{month_key, App, EventSource, ICloudMethod, NavigationMode, PendingAction, SetupState, SetupStep};
-use crate::auth::{CalendarEntry, GoogleAuthState, ICloudAuthState};
-use crate::cache::{DisplayEvent, EventId};
+use crate::app::{month_key, App, EventSource, NavigationMode, PendingAction, SetupState, SetupStep, Status};
+use crate::auth::{GoogleAuthState, ICloudAccount, ICloudAuthState};
+use crate::cache::{DisplayEvent, EventId, SourceCache};
 use crate::config::{self, Config};
 use crate::google::TokenInfo;
 use crate::keymap::{action_for, Action};
-use crate::utils::to_zoom_deeplink;
+use crate::sources::{check_event_action, EventVerb};
+use crate::utils::{add_months, to_zoom_deeplink};
 
 /// Refetch the visible month this often while the app is open
 pub const VISIBLE_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -45,7 +46,7 @@ pub enum Msg {
     },
     GoogleSignedIn(TokenInfo),
     GoogleSignInFailed(String),
-    ICloudDiscovered(Vec<CalendarEntry>),
+    ICloudDiscovered(ICloudAccount),
     ICloudDiscoveryFailed(String),
     ActionDone { message: String, tokens: Option<TokenInfo> },
     ActionFailed { message: String, auth: bool, tokens: Option<TokenInfo> },
@@ -55,27 +56,19 @@ pub enum Msg {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     FetchGoogle { month: NaiveDate, generation: u64, tokens: TokenInfo, calendar_id: String, known_name: Option<String> },
-    FetchCalDav { month: NaiveDate, generation: u64, calendars: Vec<CalendarEntry> },
-    FetchEventKit { month: NaiveDate, generation: u64 },
+    FetchCalDav { month: NaiveDate, generation: u64, account: ICloudAccount },
     StartGoogleAuth,
     DiscoverICloud,
-    RespondToEvent { tokens: TokenInfo, calendar_id: String, event_id: String, response: &'static str },
-    DeleteGoogleEvent { tokens: TokenInfo, calendar_id: String, event_id: String },
-    DeleteICloudEvent { calendar_url: String, event_uid: String, href: Option<String>, etag: Option<String> },
+    /// `tokens` are the Google sign-in, for Google events
+    EventAction { verb: EventVerb, id: EventId, tokens: Option<TokenInfo> },
     OpenUrl(String),
     SaveCache,
     SaveGoogleTokens(TokenInfo),
-    SaveICloudCalendars(Vec<CalendarEntry>),
+    SaveICloudAccount(ICloudAccount),
 }
 
-fn first_of_month(date: NaiveDate) -> NaiveDate {
-    date.with_day(1).unwrap()
-}
-
-fn add_months(date: NaiveDate, delta: i32) -> NaiveDate {
-    let total = date.year() * 12 + date.month0() as i32 + delta;
-    NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap()
-}
+/// How the TUI tells you to set a source up
+const SETUP_HINT: &str = "press S for setup";
 
 impl App {
     // ---- startup / configuration -----------------------------------------
@@ -95,14 +88,18 @@ impl App {
 
         self.icloud_auth = match self.config.icloud {
             None => ICloudAuthState::NotConfigured,
-            Some(ref icloud) if icloud.is_eventkit() => ICloudAuthState::Authenticated { calendars: vec![] },
             Some(_) => {
-                let calendars = crate::sources::saved_icloud_calendars();
-                if calendars.is_empty() {
+                let account = crate::sources::saved_icloud_account();
+                if account.calendars.is_empty() {
                     effects.push(Effect::DiscoverICloud);
                     ICloudAuthState::Discovering
                 } else {
-                    ICloudAuthState::Authenticated { calendars }
+                    if account.addresses.is_empty() {
+                        // Saved before your addresses were discovered: find
+                        // them in the background, fetching meanwhile
+                        effects.push(Effect::DiscoverICloud);
+                    }
+                    ICloudAuthState::Authenticated(account)
                 }
             }
         };
@@ -114,23 +111,15 @@ impl App {
     }
 
     pub fn open_setup_wizard(&mut self) {
-        let mut setup = SetupState::new();
-        setup.eventkit_available = crate::eventkit::is_available();
-
-        if self.config.google.is_some() || self.config.icloud.is_some() {
+        let step = if self.config.google.is_some() || self.config.icloud.is_some() {
             // Re-entering via S key: skip to calendar config
-            setup.step = SetupStep::GoogleAsk;
+            SetupStep::GoogleAsk
         } else if crate::setup::should_show_shortcut_step() {
-            setup.step = SetupStep::ShortcutAsk;
-            #[cfg(target_os = "macos")]
-            {
-                setup.available_terminals = crate::setup::detect_terminal_names();
-            }
+            SetupStep::ShortcutAsk
         } else {
-            setup.step = SetupStep::Welcome;
-        }
-
-        self.setup = Some(setup);
+            SetupStep::Welcome
+        };
+        self.setup = Some(SetupState::new(step));
     }
 
     fn start_google_auth(&mut self) -> Vec<Effect> {
@@ -144,17 +133,18 @@ impl App {
         vec![Effect::DiscoverICloud]
     }
 
-    // ---- fetch scheduling ------------------------------------------------
-
-    fn source_ready(&self, source: EventSource) -> bool {
-        match source {
-            EventSource::Google => matches!(self.google_auth, GoogleAuthState::Authenticated(_)),
-            EventSource::ICloud => {
-                self.config.icloud.is_some() && matches!(self.icloud_auth, ICloudAuthState::Authenticated { .. })
-            }
-        }
+    /// Switched to another Apple ID: the old account's events go now (from
+    /// the disk cache too), and fetches still running for it are dropped
+    /// when they land. Discovery for the new account follows.
+    fn forget_icloud_account(&mut self) -> Vec<Effect> {
+        self.events.icloud = SourceCache::default();
+        self.new_fetch_generation();
+        vec![Effect::SaveCache]
     }
 
+    // ---- fetch scheduling ------------------------------------------------
+
+    /// The fetch for a source and month; None if the source isn't signed in
     fn fetch_effect(&self, source: EventSource, month: NaiveDate) -> Option<Effect> {
         match source {
             EventSource::Google => {
@@ -168,12 +158,8 @@ impl App {
                 })
             }
             EventSource::ICloud => {
-                let ICloudAuthState::Authenticated { ref calendars } = self.icloud_auth else { return None };
-                if self.config.icloud.as_ref()?.is_eventkit() {
-                    Some(Effect::FetchEventKit { month, generation: self.fetch_generation })
-                } else {
-                    Some(Effect::FetchCalDav { month, generation: self.fetch_generation, calendars: calendars.clone() })
-                }
+                let ICloudAuthState::Authenticated(ref account) = self.icloud_auth else { return None };
+                self.config.icloud.is_some().then(|| Effect::FetchCalDav { month, generation: self.fetch_generation, account: account.clone() })
             }
         }
     }
@@ -182,17 +168,11 @@ impl App {
     /// missing or stale, then its neighbours once it has loaded (so jumping a
     /// month is instant). Marks them in flight; call after every state change.
     pub fn wanted_fetches(&mut self, now: Instant) -> Vec<Effect> {
-        let visible = first_of_month(self.current_date);
+        let visible = self.visible_month();
         let mut effects = Vec::new();
 
         for source in [EventSource::Google, EventSource::ICloud] {
-            if !self.source_ready(source) {
-                continue;
-            }
-            let cache = match source {
-                EventSource::Google => &self.events.google,
-                EventSource::ICloud => &self.events.icloud,
-            };
+            let cache = self.events.source(source);
             let mut months = vec![(visible, VISIBLE_STALE_AFTER)];
             if cache.fetched_at(visible).is_some() {
                 months.push((add_months(visible, 1), NEIGHBOUR_STALE_AFTER));
@@ -201,10 +181,6 @@ impl App {
 
             for (month, stale_after) in months {
                 let key = (source, month_key(month));
-                let cache = match source {
-                    EventSource::Google => &self.events.google,
-                    EventSource::ICloud => &self.events.icloud,
-                };
                 let stale = cache.fetched_at(month).is_none_or(|t| now.duration_since(t) >= stale_after);
                 let tried_recently = self.attempts.get(&key).is_some_and(|t| now.duration_since(*t) < RETRY_AFTER);
                 if self.in_flight.contains_key(&key) || !stale || tried_recently {
@@ -271,8 +247,8 @@ impl App {
         let to_next_minute = Duration::from_millis(
             60_000 - (now.second() as u64 * 1000 + (now.nanosecond() as u64 / 1_000_000).min(999)),
         );
-        let to_status_expiry = match (self.status_is_error, self.status_message_time) {
-            (false, Some(t)) => STATUS_TTL.saturating_sub(t.elapsed()) + Duration::from_millis(10),
+        let to_status_expiry = match self.status {
+            Some(Status::Info(_, t)) => STATUS_TTL.saturating_sub(t.elapsed()) + Duration::from_millis(10),
             _ => Duration::MAX,
         };
         to_next_minute.min(to_status_expiry).max(Duration::from_millis(10))
@@ -307,10 +283,7 @@ impl App {
                 if source == EventSource::Google && calendar_name.is_some() {
                     self.google_calendar_name = calendar_name;
                 }
-                match source {
-                    EventSource::Google => self.events.google.store(events, month),
-                    EventSource::ICloud => self.events.icloud.store(events, month),
-                }
+                self.events.source_mut(source).store(events, month);
                 effects.push(Effect::SaveCache);
             }
             Msg::FetchFailed { source, month, generation, error, auth, tokens } => {
@@ -318,7 +291,7 @@ impl App {
                 if !self.finish_fetch(source, month, generation) {
                     return effects;
                 }
-                let visible = month_key(month) == month_key(self.current_date);
+                let visible = month_key(month) == month_key(self.visible_month());
                 if source == EventSource::Google && auth {
                     self.google_signed_out(&error);
                 } else if visible {
@@ -347,7 +320,7 @@ impl App {
                 }
             }
             Msg::GoogleSignInFailed(error) => {
-                self.google_auth = GoogleAuthState::Error(error.clone());
+                self.google_auth = GoogleAuthState::NotAuthenticated;
                 self.set_error(format!("Google: {}", error));
                 // Advance setup wizard past auth waiting on error too
                 if let Some(ref mut setup) = self.setup
@@ -357,16 +330,31 @@ impl App {
                     setup.step = SetupStep::ICloudAsk;
                 }
             }
-            Msg::ICloudDiscovered(calendars) => {
-                let count = calendars.len();
-                effects.push(Effect::SaveICloudCalendars(calendars.clone()));
-                self.icloud_auth = ICloudAuthState::Authenticated { calendars };
+            Msg::ICloudDiscovered(mut account) => {
+                if let ICloudAuthState::Authenticated(ref old) = self.icloud_auth {
+                    // A background lookup of your addresses (calendars already
+                    // in use; a discovery you start goes through Discovering):
+                    // keep the calendars, whose URLs are in the events' ids
+                    account.calendars = old.calendars.clone();
+                    // Knowing you by other addresses changes which events count
+                    // as accepted: refetch, and drop fetches made without them
+                    if old.addresses != account.addresses {
+                        self.events.icloud.invalidate();
+                        self.new_fetch_generation();
+                    }
+                }
+                let count = account.calendars.len();
+                effects.push(Effect::SaveICloudAccount(account.clone()));
+                self.icloud_auth = ICloudAuthState::Authenticated(account);
                 self.attempts.retain(|(source, _), _| *source != EventSource::ICloud);
                 self.set_status(format!("Connected to {} iCloud calendar(s)!", count));
             }
             Msg::ICloudDiscoveryFailed(error) => {
                 self.set_error(format!("iCloud: {}", error));
-                self.icloud_auth = ICloudAuthState::Error(error);
+                // A background rediscovery failing leaves the saved calendars in use
+                if !matches!(self.icloud_auth, ICloudAuthState::Authenticated(_)) {
+                    self.icloud_auth = ICloudAuthState::Error;
+                }
             }
             Msg::ActionDone { message, tokens } => {
                 self.adopt_refreshed_tokens(tokens, &mut effects);
@@ -467,91 +455,48 @@ impl App {
         }
     }
 
-    fn confirm(&mut self, action: PendingAction) -> Vec<Effect> {
-        let google_tokens = match self.google_auth {
+    fn confirm(&mut self, PendingAction { verb, id }: PendingAction) -> Vec<Effect> {
+        let tokens = match self.google_auth {
             GoogleAuthState::Authenticated(ref t) => Some(t.clone()),
             _ => None,
         };
-        // Google actions silently do nothing if the session ended meanwhile
-        match (action, google_tokens) {
-            (PendingAction::AcceptEvent { calendar_id, event_id }, Some(tokens)) => {
-                self.set_status("Accepting event...");
-                vec![Effect::RespondToEvent { tokens, calendar_id, event_id, response: "accepted" }]
-            }
-            (PendingAction::DeclineEvent { calendar_id, event_id }, Some(tokens)) => {
-                self.set_status("Declining event...");
-                vec![Effect::RespondToEvent { tokens, calendar_id, event_id, response: "declined" }]
-            }
-            (PendingAction::DeleteGoogleEvent { calendar_id, event_id }, Some(tokens)) => {
-                self.set_status("Deleting event...");
-                vec![Effect::DeleteGoogleEvent { tokens, calendar_id, event_id }]
-            }
-            (PendingAction::AcceptEvent { .. } | PendingAction::DeclineEvent { .. } | PendingAction::DeleteGoogleEvent { .. }, None) => vec![],
-            (PendingAction::DeleteICloudEvent { calendar_url, event_uid, href, etag }, _) => {
-                if self.config.icloud.is_none() {
-                    return vec![];
-                }
-                self.set_status("Deleting event...");
-                vec![Effect::DeleteICloudEvent { calendar_url, event_uid, href, etag }]
-            }
+        // The Google session may have ended while the question was up
+        if let Err(refused) = check_event_action(verb, &id, tokens.is_some(), self.config.icloud.is_some()) {
+            self.set_status(refused.message(SETUP_HINT));
+            return vec![];
         }
+        self.set_status(verb.in_progress());
+        vec![Effect::EventAction { verb, id, tokens }]
     }
 
     /// Ask to confirm an accept/decline/delete on the selected event
-    fn request_event_action(&mut self, action: Action) {
+    fn request_event_action(&mut self, verb: EventVerb) {
         let Some(event) = self.get_selected_event() else { return };
+        let id = event.id.clone();
         let google_signed_in = matches!(self.google_auth, GoogleAuthState::Authenticated(_));
-        match (action, event.id.clone()) {
-            (Action::Accept | Action::Decline, EventId::Google { calendar_id, event_id, .. }) => {
-                if !google_signed_in {
-                    self.set_status("Not signed in to Google — press S for setup");
-                } else if action == Action::Accept {
-                    self.pending_action = Some(PendingAction::AcceptEvent { calendar_id, event_id });
-                } else {
-                    self.pending_action = Some(PendingAction::DeclineEvent { calendar_id, event_id });
-                }
-            }
-            (Action::Accept, EventId::ICloud { .. }) => self.set_status("Accept not supported for iCloud"),
-            (Action::Decline, EventId::ICloud { .. }) => self.set_status("Decline not supported for iCloud"),
-            (_, EventId::Google { calendar_id, event_id, .. }) => {
-                if google_signed_in {
-                    self.pending_action = Some(PendingAction::DeleteGoogleEvent { calendar_id, event_id });
-                } else {
-                    self.set_status("Not signed in to Google — press S for setup");
-                }
-            }
-            (_, EventId::ICloud { calendar_url, .. }) if calendar_url.is_empty() => {
-                // EventKit events have no CalDAV resource to delete
-                self.set_status("Delete not supported for system calendars");
-            }
-            (_, EventId::ICloud { calendar_url, event_uid, href, etag, .. }) => {
-                if self.config.icloud.is_some() {
-                    self.pending_action = Some(PendingAction::DeleteICloudEvent { calendar_url, event_uid, href, etag });
-                } else {
-                    self.set_status("iCloud not configured — press S for setup");
-                }
-            }
+        match check_event_action(verb, &id, google_signed_in, self.config.icloud.is_some()) {
+            Ok(()) => self.pending_action = Some(PendingAction { verb, id }),
+            Err(refused) => self.set_status(refused.message(SETUP_HINT)),
         }
     }
 
     pub fn apply(&mut self, action: Action) -> Vec<Effect> {
         use Action::*;
         match action {
-            NextDay => self.next_day(),
-            PrevDay => self.prev_day(),
-            NextWeek => self.next_week(),
-            PrevWeek => self.prev_week(),
+            NextDay => self.selected_date += TimeDelta::days(1),
+            PrevDay => self.selected_date -= TimeDelta::days(1),
+            NextWeek => self.selected_date += TimeDelta::days(7),
+            PrevWeek => self.selected_date -= TimeDelta::days(7),
             NextMonth | PrevMonth => {
-                if action == NextMonth { self.next_month() } else { self.prev_month() }
+                // To the 1st of that month
+                self.selected_date = add_months(self.selected_date, if action == NextMonth { 1 } else { -1 });
                 // Month jump invalidates the event selection, so drop to Day mode
                 if self.navigation_mode == NavigationMode::Event {
                     self.exit_event_mode();
                 }
             }
             EnterEvents => {
-                if self.events.has_events(self.selected_date) {
-                    self.enter_event_mode();
-                } else {
+                if !self.enter_event_mode() {
                     self.set_status("No events on this day");
                 }
             }
@@ -574,9 +519,11 @@ impl App {
                     return vec![Effect::OpenUrl(to_zoom_deeplink(&url).unwrap_or(url))];
                 }
             }
-            Accept | Decline | Delete => self.request_event_action(action),
-            Today => self.goto_today(),
-            Now => self.goto_now(),
+            Accept => self.request_event_action(EventVerb::Accept),
+            Decline => self.request_event_action(EventVerb::Decline),
+            Delete => self.request_event_action(EventVerb::Delete),
+            Today => self.selected_date = Local::now().date_naive(),
+            Now => self.goto_date(Local::now().date_naive()),
             Refresh => {
                 self.invalidate_all();
                 self.set_status("Refreshing...");
@@ -596,12 +543,6 @@ impl App {
             }
             ConnectICloud => match self.config.icloud {
                 None => self.set_status("iCloud not configured — press S for setup"),
-                // System calendars need no discovery; just reload them
-                Some(ref icloud) if icloud.is_eventkit() => {
-                    self.icloud_auth = ICloudAuthState::Authenticated { calendars: vec![] };
-                    self.invalidate_all();
-                    self.set_status("Refreshing...");
-                }
                 // Re-run discovery (refreshes calendar names)
                 Some(_) => return self.discover_icloud(),
             },
@@ -618,7 +559,6 @@ impl App {
             && matches!(key, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter);
         if google_yes {
             if let Some(ref mut setup) = self.setup {
-                setup.google_enabled = true;
                 setup.step = SetupStep::GoogleAuthWaiting;
                 setup.error = None;
             }
@@ -636,39 +576,12 @@ impl App {
 
         match setup.step {
             SetupStep::ShortcutAsk => match key {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    #[cfg(target_os = "macos")]
-                    {
-                        if setup.available_terminals.is_empty() {
-                            setup.error = Some("No supported terminals found".to_string());
-                        } else {
-                            setup.step = SetupStep::ShortcutTerminalChoice;
-                        }
-                    }
-                    #[cfg(target_os = "linux")]
-                    {
-                        match crate::setup::install_shortcut() {
-                            Ok(()) => setup.step = SetupStep::Welcome,
-                            Err(e) => setup.error = Some(format!("Failed: {}", e)),
-                        }
-                    }
-                }
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => match crate::setup::install_shortcut() {
+                    Ok(()) => setup.step = SetupStep::Welcome,
+                    Err(e) => setup.error = Some(format!("Failed: {}", e)),
+                },
                 KeyCode::Char('n') | KeyCode::Char('N') => setup.step = SetupStep::Welcome,
                 KeyCode::Char('q') | KeyCode::Esc => quit = true,
-                _ => {}
-            },
-            SetupStep::ShortcutTerminalChoice => match key {
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    let idx = (c as u8).wrapping_sub(b'1') as usize;
-                    if idx < setup.available_terminals.len() {
-                        #[cfg(target_os = "macos")]
-                        match crate::setup::install_shortcut(idx) {
-                            Ok(()) => setup.step = SetupStep::Welcome,
-                            Err(e) => setup.error = Some(e),
-                        }
-                    }
-                }
-                KeyCode::Esc => setup.step = SetupStep::ShortcutAsk,
                 _ => {}
             },
             SetupStep::Welcome => match key {
@@ -688,37 +601,16 @@ impl App {
             }
             SetupStep::ICloudAsk => match key {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    if setup.eventkit_available {
-                        setup.step = SetupStep::ICloudMethod;
-                    } else {
-                        setup.step = SetupStep::ICloudOpenUrl;
-                        effects.push(Effect::OpenUrl("https://appleid.apple.com/account/manage".into()));
-                    }
+                    setup.step = SetupStep::ICloudOpenUrl;
+                    effects.push(Effect::OpenUrl("https://appleid.apple.com/account/manage".into()));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => setup.step = SetupStep::Done,
                 KeyCode::Esc => setup.step = SetupStep::GoogleAsk,
                 _ => {}
             },
-            SetupStep::ICloudMethod => match key {
-                KeyCode::Char('1') | KeyCode::Enter => {
-                    // EventKit - zero config, done
-                    setup.icloud_method = Some(ICloudMethod::EventKit);
-                    setup.step = SetupStep::Done;
-                }
-                KeyCode::Char('2') => {
-                    // CalDAV - need credentials
-                    setup.icloud_method = Some(ICloudMethod::CalDav);
-                    setup.step = SetupStep::ICloudOpenUrl;
-                    effects.push(Effect::OpenUrl("https://appleid.apple.com/account/manage".into()));
-                }
-                KeyCode::Esc => setup.step = SetupStep::ICloudAsk,
-                _ => {}
-            },
             SetupStep::ICloudOpenUrl => match key {
                 KeyCode::Enter => setup.step = SetupStep::ICloudAppleId,
-                KeyCode::Esc => {
-                    setup.step = if setup.eventkit_available { SetupStep::ICloudMethod } else { SetupStep::ICloudAsk };
-                }
+                KeyCode::Esc => setup.step = SetupStep::ICloudAsk,
                 _ => {}
             },
             SetupStep::ICloudAppleId | SetupStep::ICloudPassword => {
@@ -764,28 +656,18 @@ impl App {
     /// Save the wizard's choices and connect whatever was newly configured
     fn finish_setup(&mut self) -> Vec<Effect> {
         let setup = self.setup.as_mut().unwrap();
-        let has_google = setup.google_enabled;
-        let has_eventkit = setup.icloud_method == Some(ICloudMethod::EventKit);
-        let has_caldav = setup.icloud_apple_id.is_some();
+        // Saying yes to Google already saved it to the config
+        let has_icloud = setup.icloud_apple_id.is_some();
 
-        if !has_google && !has_eventkit && !has_caldav && self.config.google.is_none() && self.config.icloud.is_none() {
+        if !has_icloud && self.config.google.is_none() && self.config.icloud.is_none() {
             setup.error = Some("Set up at least one calendar".to_string());
             setup.step = SetupStep::GoogleAsk;
             return vec![];
         }
 
         let mut new_config = self.config.clone();
-        if has_google && new_config.google.is_none() {
-            new_config.google = Some(config::GoogleConfig::default());
-        }
-        if has_eventkit {
-            new_config.icloud = Some(config::ICloudConfig { method: "eventkit".to_string(), apple_id: None, app_password: None });
-        } else if let (Some(apple_id), Some(app_password)) = (setup.icloud_apple_id.take(), setup.icloud_password.take()) {
-            new_config.icloud = Some(config::ICloudConfig {
-                method: "caldav".to_string(),
-                apple_id: Some(apple_id),
-                app_password: Some(app_password),
-            });
+        if let (Some(apple_id), Some(app_password)) = (setup.icloud_apple_id.take(), setup.icloud_password.take()) {
+            new_config.icloud = Some(config::ICloudConfig { apple_id: Some(apple_id), app_password: Some(app_password) });
         }
 
         if let Err(e) = new_config.save() {
@@ -795,9 +677,9 @@ impl App {
         }
 
         // Reload config and initialize auth states
-        let old_icloud_method = self.config.icloud.as_ref().map(|c| c.method.clone());
+        let old_apple_id = self.config.icloud.as_ref().and_then(|c| c.apple_id.clone());
         self.config = Config::load().unwrap_or(new_config);
-        let icloud_method_changed = self.config.icloud.as_ref().map(|c| c.method.clone()) != old_icloud_method;
+        let icloud_account_changed = self.config.icloud.as_ref().and_then(|c| c.apple_id.clone()) != old_apple_id;
         self.setup = None;
         let mut effects = Vec::new();
 
@@ -808,17 +690,17 @@ impl App {
             effects.extend(self.start_google_auth());
         }
 
+        if icloud_account_changed && old_apple_id.is_some() {
+            effects.extend(self.forget_icloud_account());
+        }
+
         // Auto-start iCloud discovery if newly configured, failed before, or
-        // switched between EventKit and CalDAV
-        if let Some(ref icloud) = self.config.icloud
-            && (icloud_method_changed
-                || matches!(self.icloud_auth, ICloudAuthState::NotConfigured | ICloudAuthState::Error(_)))
+        // switched to another Apple ID
+        if self.config.icloud.is_some()
+            && (icloud_account_changed
+                || matches!(self.icloud_auth, ICloudAuthState::NotConfigured | ICloudAuthState::Error))
         {
-            if icloud.is_eventkit() {
-                self.icloud_auth = ICloudAuthState::Authenticated { calendars: vec![] };
-            } else {
-                effects.extend(self.discover_icloud());
-            }
+            effects.extend(self.discover_icloud());
         }
         effects
     }
@@ -827,7 +709,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::app_on;
+    use crate::auth::CalendarEntry;
     use crate::config::{GoogleConfig, ICloudConfig};
     use crossterm::event::KeyModifiers;
 
@@ -840,19 +722,19 @@ mod tests {
             access_token: "a".into(),
             refresh_token: Some("r".into()),
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-            token_type: "Bearer".into(),
         }
     }
 
     /// App on 2026-10-15 with Google signed in and CalDAV with one calendar
     fn ready_app() -> App {
-        let mut app = app_on(d(2026, 10, 15));
+        let mut app = App::on(d(2026, 10, 15));
         app.config.google = Some(GoogleConfig::default());
-        app.config.icloud = Some(ICloudConfig { method: "caldav".into(), apple_id: Some("a".into()), app_password: Some("p".into()) });
+        app.config.icloud = Some(ICloudConfig { apple_id: Some("a".into()), app_password: Some("p".into()) });
         app.google_auth = GoogleAuthState::Authenticated(tokens());
-        app.icloud_auth = ICloudAuthState::Authenticated {
+        app.icloud_auth = ICloudAuthState::Authenticated(ICloudAccount {
             calendars: vec![CalendarEntry { url: "https://cal/1".into(), name: Some("Home".into()) }],
-        };
+            addresses: vec!["/1/principal/".into()],
+        });
         app
     }
 
@@ -862,7 +744,6 @@ mod tests {
             .filter_map(|e| match e {
                 Effect::FetchGoogle { month, .. } => Some(("google", *month)),
                 Effect::FetchCalDav { month, .. } => Some(("icloud", *month)),
-                Effect::FetchEventKit { month, .. } => Some(("eventkit", *month)),
                 _ => None,
             })
             .collect()
@@ -901,10 +782,8 @@ mod tests {
         let mut app = ready_app();
         let t0 = Instant::now();
         app.wanted_fetches(t0);
-        for m in [d(2026, 10, 1)] {
-            deliver(&mut app, EventSource::Google, m);
-            deliver(&mut app, EventSource::ICloud, m);
-        }
+        deliver(&mut app, EventSource::Google, d(2026, 10, 1));
+        deliver(&mut app, EventSource::ICloud, d(2026, 10, 1));
         for m in [d(2026, 11, 1), d(2026, 9, 1)] {
             app.wanted_fetches(t0);
             deliver(&mut app, EventSource::Google, m);
@@ -922,7 +801,7 @@ mod tests {
         let t0 = Instant::now();
         app.wanted_fetches(t0);
         app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), generation: 0, error: "offline".into(), auth: false, tokens: None });
-        assert!(app.status_is_error, "visible-month failures are shown");
+        assert!(app.status.as_ref().is_some_and(Status::is_error), "visible-month failures are shown");
         assert!(fetched_months(&app.wanted_fetches(t0 + Duration::from_secs(5))).iter().all(|(s, _)| *s != "google"));
         assert_eq!(fetched_months(&app.wanted_fetches(t0 + RETRY_AFTER)), [("google", d(2026, 10, 1))]);
     }
@@ -935,6 +814,25 @@ mod tests {
         let months = fetched_months(&app.wanted_fetches(Instant::now()));
         assert!(months.contains(&("google", d(2026, 11, 1))), "{months:?}");
         assert!(months.contains(&("icloud", d(2026, 11, 1))));
+    }
+
+    #[test]
+    fn test_day_steps_follow_the_visible_month() {
+        let mut app = ready_app();
+        app.selected_date = d(2026, 10, 31);
+        assert_eq!(fetched_months(&app.wanted_fetches(Instant::now())), [("google", d(2026, 10, 1)), ("icloud", d(2026, 10, 1))]);
+        app.apply(Action::NextDay);
+        assert_eq!(app.visible_month(), d(2026, 11, 1));
+        assert_eq!(fetched_months(&app.wanted_fetches(Instant::now())), [("google", d(2026, 11, 1)), ("icloud", d(2026, 11, 1))]);
+        assert!(app.is_loading(EventSource::Google), "loading shows for the month on screen");
+        // Back into October: already in flight, nothing new
+        app.apply(Action::PrevWeek);
+        assert_eq!(app.selected_date, d(2026, 10, 25));
+        assert!(app.wanted_fetches(Instant::now()).is_empty());
+        // A failure for a month no longer on screen stays quiet
+        let generation = app.fetch_generation;
+        app.handle_msg(Msg::FetchFailed { source: EventSource::ICloud, month: d(2026, 11, 1), generation, error: "offline".into(), auth: false, tokens: None });
+        assert!(app.status.is_none());
     }
 
     #[test]
@@ -974,7 +872,7 @@ mod tests {
         app.wanted_fetches(Instant::now());
         app.handle_msg(Msg::FetchFailed { source: EventSource::Google, month: d(2026, 10, 1), generation: 0, error: "revoked".into(), auth: true, tokens: None });
         assert!(matches!(app.google_auth, GoogleAuthState::NotAuthenticated));
-        assert!(app.status_message.as_deref().unwrap().contains("press g"));
+        assert!(app.status.as_ref().unwrap().text().contains("press g"));
         let later = Instant::now() + RETRY_AFTER * 2;
         assert!(fetched_months(&app.wanted_fetches(later)).iter().all(|(s, _)| *s != "google"));
     }
@@ -1035,12 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn test_add_months() {
-        assert_eq!(add_months(d(2026, 12, 1), 1), d(2027, 1, 1));
-        assert_eq!(add_months(d(2026, 1, 1), -1), d(2025, 12, 1));
-    }
-
-    #[test]
     fn test_fetch_started_before_an_action_is_discarded() {
         // A background refresh in flight while the user deletes an event must
         // not bring the deleted event back
@@ -1083,14 +975,95 @@ mod tests {
                 error: "offline".into(), auth: false, tokens: None,
             });
         };
+        let showing_error = |app: &App| app.status.as_ref().is_some_and(Status::is_error);
         fail(&mut app);
-        assert!(app.status_is_error);
+        assert!(showing_error(&app));
         app.clear_error(); // user dismisses it
         fail(&mut app);
-        assert!(!app.status_is_error, "same error isn't re-raised on retry");
+        assert!(!showing_error(&app), "same error isn't re-raised on retry");
         deliver(&mut app, EventSource::Google, d(2026, 10, 1));
         fail(&mut app);
-        assert!(app.status_is_error, "a new failure after recovering is shown again");
+        assert!(showing_error(&app), "a new failure after recovering is shown again");
+    }
+
+    fn icloud_event(title: &str, day: NaiveDate) -> DisplayEvent {
+        let mut ev = crate::app::tests::make_event_with_attendees(title, vec![]);
+        ev.date = day;
+        ev
+    }
+
+    #[test]
+    fn test_switching_apple_id_drops_the_old_accounts_events() {
+        let mut app = ready_app();
+        let day = d(2026, 10, 15);
+        app.events.icloud.store(vec![icloud_event("Old account", day)], day);
+        app.wanted_fetches(Instant::now());
+        let old_generation = app.fetch_generation;
+
+        let mut effects = app.forget_icloud_account();
+        effects.extend(app.discover_icloud());
+        assert!(app.events.icloud.get(day).is_empty(), "gone at once");
+        assert!(effects.contains(&Effect::SaveCache), "and from the disk cache the shell reads");
+        assert!(effects.contains(&Effect::DiscoverICloud));
+
+        // A fetch the old account had running doesn't bring them back
+        app.handle_msg(Msg::Fetched {
+            source: EventSource::ICloud, month: d(2026, 10, 1), generation: old_generation,
+            events: vec![icloud_event("Old account", day)], calendar_name: None, tokens: None,
+        });
+        assert!(app.events.icloud.get(day).is_empty());
+
+        // Once the new account is discovered its events are fetched
+        app.handle_msg(Msg::ICloudDiscovered(ICloudAccount {
+            calendars: vec![CalendarEntry { url: "https://cal/2".into(), name: None }],
+            addresses: vec!["/2/principal/".into()],
+        }));
+        let fetches = app.wanted_fetches(Instant::now());
+        assert!(fetches.iter().any(|e| matches!(e, Effect::FetchCalDav { account, .. } if account.calendars[0].url == "https://cal/2")));
+    }
+
+    #[test]
+    fn test_rediscovery_with_new_addresses_refetches_icloud() {
+        // Upgrading from a tokens.json without addresses: what's cached and
+        // in flight was judged without knowing all of you
+        let mut app = ready_app();
+        let day = d(2026, 10, 15);
+        app.wanted_fetches(Instant::now());
+        deliver(&mut app, EventSource::ICloud, d(2026, 10, 1));
+        app.events.icloud.store(vec![icloud_event("Invite", day)], day);
+        let ICloudAuthState::Authenticated(ref account) = app.icloud_auth else { unreachable!() };
+        let same = account.clone();
+
+        let generation = app.fetch_generation;
+        let effects = app.handle_msg(Msg::ICloudDiscovered(same.clone()));
+        assert!(effects.contains(&Effect::SaveICloudAccount(same.clone())));
+        assert_eq!(app.fetch_generation, generation, "nothing changed: nothing refetched");
+
+        let wider = ICloudAccount { addresses: vec!["mailto:me@icloud.com".into(), "/1/principal/".into()], ..same };
+        // Discovery may spell the calendar URLs differently (another host);
+        // the ones in use are kept
+        let moved = ICloudAccount {
+            calendars: vec![CalendarEntry { url: "https://p42-cal/1".into(), name: Some("Home".into()) }],
+            ..wider.clone()
+        };
+        let effects = app.handle_msg(Msg::ICloudDiscovered(moved));
+        assert!(effects.contains(&Effect::SaveICloudAccount(wider.clone())));
+        assert!(app.fetch_generation > generation);
+        assert_eq!(app.events.icloud.get(day).len(), 1, "kept on screen until the refetch lands");
+        let fetches = app.wanted_fetches(Instant::now());
+        assert!(fetches.contains(&Effect::FetchCalDav { month: d(2026, 10, 1), generation: app.fetch_generation, account: wider }));
+    }
+
+    #[test]
+    fn test_background_rediscovery_failing_keeps_the_saved_calendars() {
+        let mut app = ready_app();
+        app.handle_msg(Msg::ICloudDiscoveryFailed("offline".into()));
+        assert!(matches!(app.icloud_auth, ICloudAuthState::Authenticated(_)));
+        assert!(fetched_months(&app.wanted_fetches(Instant::now())).contains(&("icloud", d(2026, 10, 1))));
+        // A discovery the user started (no calendars yet) still fails
+        app.discover_icloud();
+        app.handle_msg(Msg::ICloudDiscoveryFailed("bad password".into()));
+        assert!(matches!(app.icloud_auth, ICloudAuthState::Error));
     }
 
     #[test]
@@ -1100,15 +1073,5 @@ mod tests {
         assert!(app.is_loading(EventSource::Google));
         app.apply(Action::Refresh);
         assert_eq!(fetched_months(&app.wanted_fetches(Instant::now())), [("google", d(2026, 10, 1)), ("icloud", d(2026, 10, 1))]);
-    }
-
-    #[test]
-    fn test_connect_icloud_with_eventkit_reloads_instead_of_discovering() {
-        let mut app = ready_app();
-        app.config.icloud = Some(ICloudConfig { method: "eventkit".into(), apple_id: None, app_password: None });
-        app.icloud_auth = ICloudAuthState::Error("x".into());
-        let effects = app.apply(Action::ConnectICloud);
-        assert!(!effects.contains(&Effect::DiscoverICloud));
-        assert!(fetched_months(&app.wanted_fetches(Instant::now())).contains(&("eventkit", d(2026, 10, 1))));
     }
 }

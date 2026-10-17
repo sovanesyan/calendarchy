@@ -5,7 +5,7 @@
 //! phonetic layout keys are normalised to their Latin equivalents first, so
 //! each binding is written once.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::NavigationMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Something a key does. Config names it in snake case, as in
+/// `"keys": { "next_day": "l" }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     // Day navigation
     NextDay,
@@ -42,45 +45,29 @@ pub enum Action {
     Search,
     Help,
     OpenGoogleWeb,
+    #[serde(rename = "open_icloud_web")] // not "open_i_cloud_web"
     OpenICloudWeb,
     ConnectGoogle,
+    #[serde(rename = "connect_icloud")]
     ConnectICloud,
     Setup,
     Quit,
 }
 
-/// Config names for actions, as used in `"keys": { ... }`
-const ACTION_NAMES: &[(Action, &str)] = &[
-    (Action::NextDay, "next_day"),
-    (Action::PrevDay, "prev_day"),
-    (Action::NextWeek, "next_week"),
-    (Action::PrevWeek, "prev_week"),
-    (Action::NextMonth, "next_month"),
-    (Action::PrevMonth, "prev_month"),
-    (Action::EnterEvents, "enter_events"),
-    (Action::NextEvent, "next_event"),
-    (Action::PrevEvent, "prev_event"),
-    (Action::JumpEventsForward, "jump_events_forward"),
-    (Action::JumpEventsBack, "jump_events_back"),
-    (Action::ExitEvents, "exit_events"),
-    (Action::SwitchPanel, "switch_panel"),
-    (Action::Join, "join"),
-    (Action::Accept, "accept"),
-    (Action::Decline, "decline"),
-    (Action::Delete, "delete"),
-    (Action::Today, "today"),
-    (Action::Now, "now"),
-    (Action::Refresh, "refresh"),
-    (Action::ToggleLogs, "toggle_logs"),
-    (Action::Search, "search"),
-    (Action::Help, "help"),
-    (Action::OpenGoogleWeb, "open_google_web"),
-    (Action::OpenICloudWeb, "open_icloud_web"),
-    (Action::ConnectGoogle, "connect_google"),
-    (Action::ConnectICloud, "connect_icloud"),
-    (Action::Setup, "setup"),
-    (Action::Quit, "quit"),
-];
+impl Action {
+    /// The action's config name, e.g. "next_day"
+    fn name(self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(name)) => name,
+            _ => unreachable!("actions serialize as their name"),
+        }
+    }
+
+    /// The action a config name stands for
+    fn from_name(name: &str) -> Option<Action> {
+        serde_json::from_value(serde_json::Value::String(name.to_string())).ok()
+    }
+}
 
 /// A key as bound: a key code, with or without Ctrl. Other modifiers are
 /// ignored (Shift is already in the character: 'J' vs 'j').
@@ -125,6 +112,31 @@ impl Key {
             _ => "?".to_string(),
         };
         if self.ctrl { format!("^{}", base) } else { base }
+    }
+
+    /// The key as config writes it, which `parse` reads back: "J",
+    /// "ctrl+d", "enter", "esc", "tab", "shift+tab", "left", "space", "f5"
+    pub fn spec(&self) -> String {
+        let base = match self.code {
+            KeyCode::Char(' ') => "space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "enter".to_string(),
+            KeyCode::Esc => "esc".to_string(),
+            KeyCode::Tab => "tab".to_string(),
+            KeyCode::BackTab => "shift+tab".to_string(),
+            KeyCode::Left => "left".to_string(),
+            KeyCode::Right => "right".to_string(),
+            KeyCode::Up => "up".to_string(),
+            KeyCode::Down => "down".to_string(),
+            KeyCode::Backspace => "backspace".to_string(),
+            KeyCode::Home => "home".to_string(),
+            KeyCode::End => "end".to_string(),
+            KeyCode::PageUp => "pageup".to_string(),
+            KeyCode::PageDown => "pagedown".to_string(),
+            KeyCode::F(n) => format!("f{}", n),
+            _ => "?".to_string(),
+        };
+        if self.ctrl { format!("ctrl+{}", base) } else { base }
     }
 
     /// Parse a key from config: "J", "ctrl+d" (or "^d", "C-d"), "enter",
@@ -275,7 +287,7 @@ impl Keymap {
         let mut names: Vec<&String> = overrides.keys().collect();
         names.sort(); // deterministic problem order
         for name in names {
-            let Some(&(action, _)) = ACTION_NAMES.iter().find(|(_, n)| n == name) else {
+            let Some(action) = Action::from_name(name) else {
                 problems.push(format!("unknown action \"{}\"", name));
                 continue;
             };
@@ -305,6 +317,12 @@ impl Keymap {
             },
             ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
         };
+        self.resolve(mode, pressed)
+    }
+
+    /// What a (normalised) key does in `mode`: a rebound key first, then a
+    /// mode-specific binding, then a shared one
+    fn resolve(&self, mode: NavigationMode, pressed: Key) -> Option<Action> {
         let find = |pred: &dyn Fn(&Binding) -> bool| {
             self.bindings
                 .iter()
@@ -325,6 +343,36 @@ impl Keymap {
         for key in bindings.into_iter().flat_map(|b| b.keys.iter()) {
             if !keys.contains(key) {
                 keys.push(*key);
+            }
+        }
+        keys
+    }
+
+    /// What each action's keys are in `mode`, by config name, as key specs
+    /// (`Key::spec`). Only keys that really trigger the action there are
+    /// listed, so each key appears under one action at most; actions left
+    /// without a key are omitted.
+    pub fn effective(&self, mode: NavigationMode) -> BTreeMap<String, Vec<String>> {
+        let mut out = BTreeMap::new();
+        for binding in self.bindings.iter().filter(|b| b.scope.covers(mode)) {
+            let keys = self.keys_in(mode, binding.action);
+            if !keys.is_empty() {
+                out.insert(binding.action.name(), keys.iter().map(Key::spec).collect());
+            }
+        }
+        out
+    }
+
+    /// The keys that really trigger `action` in `mode`, shared bindings
+    /// first (as keys_for); the first is the one to show in a hint
+    pub fn keys_in(&self, mode: NavigationMode, action: Action) -> Vec<Key> {
+        let mut bindings: Vec<&Binding> =
+            self.bindings.iter().filter(|b| b.action == action && b.scope.covers(mode)).collect();
+        bindings.sort_by_key(|b| b.scope != Scope::Both);
+        let mut keys: Vec<Key> = Vec::new();
+        for &key in bindings.iter().flat_map(|b| b.keys.iter()) {
+            if self.resolve(mode, key) == Some(action) && !keys.contains(&key) {
+                keys.push(key);
             }
         }
         keys
@@ -352,15 +400,15 @@ impl Keymap {
 
 static KEYMAP: OnceLock<Keymap> = OnceLock::new();
 
-/// Use this keymap for the rest of the run (call once, at startup)
+/// Use this keymap for the rest of the run (call once, at startup, before
+/// any key is looked up)
 pub fn install(keymap: Keymap) {
     let _ = KEYMAP.set(keymap);
 }
 
 /// The keymap in use: the installed one, or the defaults
 pub fn active() -> &'static Keymap {
-    static DEFAULT: OnceLock<Keymap> = OnceLock::new();
-    KEYMAP.get().unwrap_or_else(|| DEFAULT.get_or_init(Keymap::default))
+    KEYMAP.get_or_init(Keymap::default)
 }
 
 /// Map a Bulgarian phonetic key to the Latin key in the same position
@@ -428,10 +476,23 @@ mod tests {
     }
 
     #[test]
-    fn test_every_action_has_a_config_name() {
-        for &(_, action, _) in DEFAULTS {
-            assert!(ACTION_NAMES.iter().any(|(a, _)| *a == action), "{action:?} has no config name");
+    fn test_action_config_names() {
+        // The names config files already use; renaming one would break them
+        let names = [
+            "next_day", "prev_day", "next_week", "prev_week", "next_month", "prev_month", "enter_events",
+            "next_event", "prev_event", "jump_events_forward", "jump_events_back", "exit_events",
+            "switch_panel", "join", "accept", "decline", "delete", "today", "now", "refresh",
+            "toggle_logs", "search", "help", "open_google_web", "open_icloud_web", "connect_google",
+            "connect_icloud", "setup", "quit",
+        ];
+        for name in names {
+            let action = Action::from_name(name).unwrap_or_else(|| panic!("{name} no longer parses"));
+            assert_eq!(action.name(), name);
         }
+        for &(_, action, _) in DEFAULTS {
+            assert!(names.contains(&action.name().as_str()), "{action:?} is missing from the list above");
+        }
+        assert_eq!(Action::from_name("NextDay"), None);
     }
 
     #[test]
@@ -471,6 +532,33 @@ mod tests {
         let overrides: HashMap<String, KeySpec> = serde_json::from_str(r#"{ "delete": "d" }"#).unwrap();
         let (map, _) = Keymap::with_overrides(&overrides);
         assert_eq!(map.action_for(NavigationMode::Event, key('d')), Some(Delete));
+    }
+
+    #[test]
+    fn test_key_specs_read_back() {
+        for &(_, _, keys) in DEFAULTS {
+            for key in keys {
+                assert_eq!(Key::parse(&key.spec()), Some(*key), "{}", key.spec());
+            }
+        }
+        assert_eq!(super::ctrl('d').spec(), "ctrl+d");
+        assert_eq!(code(KeyCode::BackTab).spec(), "shift+tab");
+    }
+
+    #[test]
+    fn test_effective_bindings_per_mode() {
+        let overrides: HashMap<String, KeySpec> = serde_json::from_str(r#"{ "delete": "d", "join": ["o", "enter"] }"#).unwrap();
+        let (map, _) = Keymap::with_overrides(&overrides);
+        let day = map.effective(NavigationMode::Day);
+        assert_eq!(day["next_day"], ["l", "right"]);
+        assert_eq!(day["next_month"], ["L", "ctrl+d"]);
+        assert!(!day.contains_key("next_event") && !day.contains_key("delete"));
+        let event = map.effective(NavigationMode::Event);
+        assert_eq!(event["delete"], ["d"]);
+        assert_eq!(event["join"], ["o", "enter"]);
+        assert_eq!(event["jump_events_forward"], ["ctrl+d"]);
+        assert_eq!(event["next_month"], ["L"], "^d jumps events here");
+        assert!(!event.contains_key("decline"), "its only key went to delete");
     }
 
     #[test]

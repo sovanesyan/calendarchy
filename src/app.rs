@@ -3,7 +3,10 @@ use crate::cache::{clock, DisplayEvent, EventCache, EventId};
 #[cfg(test)]
 use crate::cache::When;
 use crate::config::Config;
-use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, Timelike};
+use crate::sources::EventVerb;
+use crate::update::STATUS_TTL;
+use crate::utils::month_start;
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -19,8 +22,9 @@ pub struct SearchState {
     pub selected_index: usize,
 }
 
-/// Whether a search result matched on title or participant
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Whether a search result matched on title or participant, in result
+/// order (title matches first)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchType {
     Title,
     Participant,
@@ -37,50 +41,33 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetupStep {
     ShortcutAsk,
-    ShortcutTerminalChoice, // macOS only — pick terminal emulator
     Welcome,
     GoogleAsk,
     GoogleAuthWaiting,
     ICloudAsk,
-    ICloudMethod,     // Choose EventKit vs CalDAV (macOS only)
     ICloudOpenUrl,
     ICloudAppleId,
     ICloudPassword,
     Done,
 }
 
-/// Which iCloud method was chosen
-#[derive(Debug, Clone, PartialEq)]
-pub enum ICloudMethod {
-    EventKit,
-    CalDav,
-}
-
 /// State for the interactive setup wizard
 pub struct SetupState {
     pub step: SetupStep,
     pub input: String,
-    pub google_enabled: bool,
-    pub icloud_method: Option<ICloudMethod>,
     pub icloud_apple_id: Option<String>,
     pub icloud_password: Option<String>,
     pub error: Option<String>,
-    pub eventkit_available: bool,
-    pub available_terminals: Vec<String>,
 }
 
 impl SetupState {
-    pub fn new() -> Self {
+    pub fn new(step: SetupStep) -> Self {
         Self {
-            step: SetupStep::Welcome,
+            step,
             input: String::new(),
-            google_enabled: false,
-            icloud_method: None,
             icloud_apple_id: None,
             icloud_password: None,
             error: None,
-            eventkit_available: false,
-            available_terminals: Vec::new(),
         }
     }
 }
@@ -99,27 +86,52 @@ pub enum EventSource {
     ICloud,
 }
 
-/// Pending action awaiting confirmation
+impl EventSource {
+    pub fn other(self) -> Self {
+        match self {
+            EventSource::Google => EventSource::ICloud,
+            EventSource::ICloud => EventSource::Google,
+        }
+    }
+}
+
+/// An event action awaiting confirmation
 #[derive(Debug, Clone)]
-pub enum PendingAction {
-    AcceptEvent { calendar_id: String, event_id: String },
-    DeclineEvent { calendar_id: String, event_id: String },
-    DeleteGoogleEvent { calendar_id: String, event_id: String },
-    DeleteICloudEvent { calendar_url: String, event_uid: String, href: Option<String>, etag: Option<String> },
+pub struct PendingAction {
+    pub verb: EventVerb,
+    pub id: EventId,
+}
+
+/// The status bar message
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    /// Disappears `STATUS_TTL` after it was set
+    Info(String, Instant),
+    /// Stays on screen until the next keypress
+    Error(String),
+}
+
+impl Status {
+    pub fn text(&self) -> &str {
+        match self {
+            Status::Info(text, _) | Status::Error(text) => text,
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, Status::Error(_))
+    }
 }
 
 /// Application state
 pub struct App {
-    pub current_date: NaiveDate,
+    /// The selected day; its month is the one shown (see `visible_month`)
     pub selected_date: NaiveDate,
     pub show_logs: bool,
     pub events: EventCache,
     pub google_auth: GoogleAuthState,
     pub icloud_auth: ICloudAuthState,
-    pub status_message: Option<String>,
-    pub status_message_time: Option<std::time::Instant>,
-    /// Error messages stick until the next keypress instead of expiring
-    pub status_is_error: bool,
+    pub status: Option<Status>,
     pub config: Config,
     /// Month fetches currently running, per source, with the generation
     /// they were started in
@@ -150,21 +162,24 @@ pub struct App {
 }
 
 impl App {
+    /// Today, with the cached events loaded and the current or next event
+    /// selected
     pub fn new() -> Self {
-        let today = Local::now().date_naive();
-        let mut events = EventCache::new();
-        events.load_from_disk();
+        let mut app = Self::on(Local::now().date_naive());
+        app.events.load_from_disk();
+        app.enter_event_mode();
+        app
+    }
 
-        let mut app = Self {
-            current_date: today,
-            selected_date: today,
+    /// An app on `date` with nothing loaded, configured or signed in
+    pub fn on(date: NaiveDate) -> Self {
+        Self {
+            selected_date: date,
             show_logs: false,
-            events,
+            events: EventCache::default(),
             google_auth: GoogleAuthState::NotConfigured,
             icloud_auth: ICloudAuthState::NotConfigured,
-            status_message: None,
-            status_message_time: None,
-            status_is_error: false,
+            status: None,
             config: Config::default(),
             in_flight: HashMap::new(),
             fetch_generation: 0,
@@ -181,43 +196,36 @@ impl App {
             dirty: true,
             last_render_minute: Local::now().minute(),
             setup: None,
-        };
+        }
+    }
 
-        app.enter_event_mode();
-        app
+    /// The month on screen (its 1st): the selected day's
+    pub fn visible_month(&self) -> NaiveDate {
+        month_start(self.selected_date)
     }
 
     /// Whether the visible month is being fetched for a source and has no
     /// fresh data yet — background refreshes of a loaded month stay silent
     pub fn is_loading(&self, source: EventSource) -> bool {
-        let cache = match source {
-            EventSource::Google => &self.events.google,
-            EventSource::ICloud => &self.events.icloud,
-        };
-        self.in_flight.contains_key(&(source, month_key(self.current_date)))
-            && cache.fetched_at(self.current_date).is_none()
+        let visible = self.visible_month();
+        self.in_flight.contains_key(&(source, month_key(visible)))
+            && self.events.source(source).fetched_at(visible).is_none()
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some(msg.into());
-        self.status_message_time = Some(std::time::Instant::now());
-        self.status_is_error = false;
+        self.status = Some(Status::Info(msg.into(), Instant::now()));
     }
 
     /// Errors stay on screen until the next keypress (see clear_error)
     pub fn set_error(&mut self, msg: impl Into<String>) {
-        self.status_message = Some(msg.into());
-        self.status_message_time = None;
-        self.status_is_error = true;
+        self.status = Some(Status::Error(msg.into()));
     }
 
     pub fn clear_expired_status(&mut self) -> bool {
-        if !self.status_is_error
-            && let Some(time) = self.status_message_time
-            && time.elapsed() > std::time::Duration::from_secs(3)
+        if let Some(Status::Info(_, time)) = self.status
+            && time.elapsed() > STATUS_TTL
         {
-            self.status_message = None;
-            self.status_message_time = None;
+            self.status = None;
             return true;
         }
         false
@@ -225,70 +233,21 @@ impl App {
 
     /// Dismiss a sticky error message; returns true if one was showing
     pub fn clear_error(&mut self) -> bool {
-        if self.status_is_error {
-            self.status_message = None;
-            self.status_message_time = None;
-            self.status_is_error = false;
+        if self.status.as_ref().is_some_and(Status::is_error) {
+            self.status = None;
             return true;
         }
         false
     }
 
-    pub fn next_day(&mut self) {
-        self.selected_date += Duration::days(1);
-        self.sync_month_if_needed();
-    }
-
-    pub fn prev_day(&mut self) {
-        self.selected_date -= Duration::days(1);
-        self.sync_month_if_needed();
-    }
-
-    pub fn next_week(&mut self) {
-        self.selected_date += Duration::days(7);
-        self.sync_month_if_needed();
-    }
-
-    pub fn prev_week(&mut self) {
-        self.selected_date -= Duration::days(7);
-        self.sync_month_if_needed();
-    }
-
-    fn sync_month_if_needed(&mut self) {
-        self.show_month_of(self.selected_date);
-    }
-
-    /// Display the month containing `date`. Fetching follows from state (see
-    /// `App::wanted_fetches`), so changing the month is all that's needed.
-    fn show_month_of(&mut self, date: NaiveDate) {
-        if date.month() != self.current_date.month() || date.year() != self.current_date.year() {
-            self.current_date = date.with_day(1).unwrap();
-        }
-    }
-
-    pub fn goto_today(&mut self) {
-        let today = Local::now().date_naive();
-        self.current_date = today;
-        self.selected_date = today;
-    }
-
     /// Open on `date`, in event mode like startup
     pub fn goto_date(&mut self, date: NaiveDate) {
-        self.current_date = date;
         self.selected_date = date;
         self.enter_event_mode();
     }
 
-    pub fn goto_now(&mut self) {
-        self.goto_today();
-        self.enter_event_mode();
-    }
-
     pub fn get_current_source_events(&self) -> &[DisplayEvent] {
-        match self.selected_source {
-            EventSource::Google => self.events.google.get(self.selected_date),
-            EventSource::ICloud => self.events.icloud.get(self.selected_date),
-        }
+        self.events.source(self.selected_source).get(self.selected_date)
     }
 
     pub fn get_selected_event(&self) -> Option<&DisplayEvent> {
@@ -299,84 +258,63 @@ impl App {
         }
     }
 
-    pub fn enter_event_mode(&mut self) {
-        let google_events = self.events.google.get(self.selected_date);
-        let icloud_events = self.events.icloud.get(self.selected_date);
+    /// Select an event on the selected day: today, the one under way (Google
+    /// first) or else the next to start; otherwise the day's first. False,
+    /// leaving the mode alone, if the day has no events.
+    pub fn enter_event_mode(&mut self) -> bool {
+        self.enter_event_mode_at(Local::now().naive_local())
+    }
 
-        if google_events.is_empty() && icloud_events.is_empty() {
-            return;
+    fn enter_event_mode_at(&mut self, now: NaiveDateTime) -> bool {
+        let date = self.selected_date;
+        if !self.events.has_events(date) {
+            return false;
         }
-
         self.navigation_mode = NavigationMode::Event;
 
-        let today = Local::now().date_naive();
-        if self.selected_date == today {
-            let current_time = Local::now().time();
-
-            if let Some((idx, is_current_or_next)) = find_current_or_next_event(google_events, current_time)
-                && is_current_or_next {
-                    self.selected_source = EventSource::Google;
-                    self.selected_event_index = idx;
-                    return;
-                }
-
-            if let Some((idx, is_current_or_next)) = find_current_or_next_event(icloud_events, current_time)
-                && is_current_or_next {
-                    self.selected_source = EventSource::ICloud;
-                    self.selected_event_index = idx;
-                    return;
-                }
-
-            let google_next = find_current_or_next_event(google_events, current_time);
-            let icloud_next = find_current_or_next_event(icloud_events, current_time);
-
-            match (google_next, icloud_next) {
-                (Some((g_idx, _)), Some((i_idx, _))) => {
-                    let g_time = google_events[g_idx].when.sort_key();
-                    let i_time = icloud_events[i_idx].when.sort_key();
-                    if g_time <= i_time {
-                        self.selected_source = EventSource::Google;
-                        self.selected_event_index = g_idx;
-                    } else {
-                        self.selected_source = EventSource::ICloud;
-                        self.selected_event_index = i_idx;
-                    }
-                    return;
-                }
-                (Some((idx, _)), None) => {
-                    self.selected_source = EventSource::Google;
-                    self.selected_event_index = idx;
-                    return;
-                }
-                (None, Some((idx, _))) => {
-                    self.selected_source = EventSource::ICloud;
-                    self.selected_event_index = idx;
-                    return;
-                }
-                (None, None) => {}
+        if date == now.date() {
+            let found = [EventSource::Google, EventSource::ICloud]
+                .map(|source| (source, find_current_or_next_event(self.events.source(source).get(date), now.time())));
+            let current = found.iter().find_map(|&(source, f)| match f {
+                Some((index, true)) => Some((source, index)),
+                _ => None,
+            });
+            // Ties go to Google: min_by_key keeps the first minimum
+            let next = || {
+                found
+                    .iter()
+                    .filter_map(|&(source, f)| f.map(|(index, _)| (source, index)))
+                    .min_by_key(|&(source, index)| self.events.source(source).get(date)[index].when.sort_key())
+            };
+            if let Some((source, index)) = current.or_else(next) {
+                self.selected_source = source;
+                self.selected_event_index = index;
+                return true;
             }
         }
+        self.select_first();
+        true
+    }
 
-        if !google_events.is_empty() {
-            self.selected_source = EventSource::Google;
-            self.selected_event_index = 0;
-        } else {
-            self.selected_source = EventSource::ICloud;
-            self.selected_event_index = 0;
-        }
+    /// Select the selected day's first event: Google's first, else iCloud's
+    fn select_first(&mut self) {
+        let google_empty = self.events.google.get(self.selected_date).is_empty();
+        self.selected_source = if google_empty { EventSource::ICloud } else { EventSource::Google };
+        self.selected_event_index = 0;
+    }
+
+    /// Select the selected day's last event: iCloud's last, else Google's
+    fn select_last(&mut self) {
+        let icloud_empty = self.events.icloud.get(self.selected_date).is_empty();
+        self.selected_source = if icloud_empty { EventSource::Google } else { EventSource::ICloud };
+        self.selected_event_index = self.get_current_source_events().len().saturating_sub(1);
     }
 
     /// Jump to the other panel, landing on the event closest in time to the
     /// selected one (the first starting at or after it, else the last)
     pub fn switch_panel(&mut self) {
-        let other = match self.selected_source {
-            EventSource::Google => EventSource::ICloud,
-            EventSource::ICloud => EventSource::Google,
-        };
-        let other_events = match other {
-            EventSource::Google => self.events.google.get(self.selected_date),
-            EventSource::ICloud => self.events.icloud.get(self.selected_date),
-        };
+        let other = self.selected_source.other();
+        let other_events = self.events.source(other).get(self.selected_date);
         if other_events.is_empty() {
             let label = match other {
                 EventSource::Google => self.config.display.google_label(),
@@ -412,10 +350,10 @@ impl App {
                 self.selected_source = EventSource::ICloud;
                 self.selected_event_index = 0;
             } else {
-                self.navigate_to_next_day_with_events();
+                self.jump_to_day_with_events(1);
             }
         } else {
-            self.navigate_to_next_day_with_events();
+            self.jump_to_day_with_events(1);
         }
     }
 
@@ -428,76 +366,23 @@ impl App {
                 self.selected_source = EventSource::Google;
                 self.selected_event_index = google_events.len().saturating_sub(1);
             } else {
-                self.navigate_to_prev_day_with_events();
+                self.jump_to_day_with_events(-1);
             }
         } else {
-            self.navigate_to_prev_day_with_events();
+            self.jump_to_day_with_events(-1);
         }
     }
 
-    fn navigate_to_next_day_with_events(&mut self) {
-        let mut check_date = self.selected_date + Duration::days(1);
-        let limit = self.selected_date + Duration::days(90);
-
-        while check_date <= limit {
-            if self.events.has_events(check_date) {
-                self.selected_date = check_date;
-                self.show_month_of(check_date);
-                let google_events = self.events.google.get(check_date);
-                if !google_events.is_empty() {
-                    self.selected_source = EventSource::Google;
-                    self.selected_event_index = 0;
-                } else {
-                    self.selected_source = EventSource::ICloud;
-                    self.selected_event_index = 0;
-                }
-                return;
-            }
-            check_date += Duration::days(1);
+    /// Move to the nearest day with events within 90 days, forwards (`step`
+    /// 1, landing on its first event) or backwards (-1, on its last)
+    fn jump_to_day_with_events(&mut self, step: i64) {
+        let found = (1..=90)
+            .map(|n| self.selected_date + Duration::days(n * step))
+            .find(|&date| self.events.has_events(date));
+        if let Some(date) = found {
+            self.selected_date = date;
+            if step > 0 { self.select_first() } else { self.select_last() }
         }
-    }
-
-    fn navigate_to_prev_day_with_events(&mut self) {
-        let mut check_date = self.selected_date - Duration::days(1);
-        let limit = self.selected_date - Duration::days(90);
-
-        while check_date >= limit {
-            if self.events.has_events(check_date) {
-                self.selected_date = check_date;
-                self.show_month_of(check_date);
-                let icloud_events = self.events.icloud.get(check_date);
-                let google_events = self.events.google.get(check_date);
-                if !icloud_events.is_empty() {
-                    self.selected_source = EventSource::ICloud;
-                    self.selected_event_index = icloud_events.len().saturating_sub(1);
-                } else {
-                    self.selected_source = EventSource::Google;
-                    self.selected_event_index = google_events.len().saturating_sub(1);
-                }
-                return;
-            }
-            check_date -= Duration::days(1);
-        }
-    }
-
-    pub fn next_month(&mut self) {
-        let (year, month) = if self.current_date.month() == 12 {
-            (self.current_date.year() + 1, 1)
-        } else {
-            (self.current_date.year(), self.current_date.month() + 1)
-        };
-        self.selected_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-        self.show_month_of(self.selected_date);
-    }
-
-    pub fn prev_month(&mut self) {
-        let (year, month) = if self.current_date.month() == 1 {
-            (self.current_date.year() - 1, 12)
-        } else {
-            (self.current_date.year(), self.current_date.month() - 1)
-        };
-        self.selected_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-        self.show_month_of(self.selected_date);
     }
 
     pub fn open_search(&mut self) {
@@ -537,9 +422,7 @@ impl App {
                 }
             }
             results.sort_by(|a, b| {
-                let a_title = a.event.title.to_lowercase().contains(&query_lower);
-                let b_title = b.event.title.to_lowercase().contains(&query_lower);
-                b_title.cmp(&a_title)
+                a.match_type.cmp(&b.match_type)
                     .then_with(|| a.event.date.cmp(&b.event.date))
                     // Timed before all-day within a date, then by start
                     .then_with(|| {
@@ -582,28 +465,16 @@ impl App {
 
         // Navigate to the date
         self.selected_date = date;
-        self.show_month_of(date);
 
         // Enter event mode on the correct source/index
         self.navigation_mode = NavigationMode::Event;
         self.selected_source = source;
-
-        let events = match source {
-            EventSource::Google => self.events.google.get(date),
-            EventSource::ICloud => self.events.icloud.get(date),
-        };
-        self.selected_event_index = events.iter()
+        self.selected_event_index = self.events.source(source).get(date).iter()
             .position(|e| e.id == event_id)
             .unwrap_or(0);
 
         self.close_search();
     }
-}
-
-/// Check if an event matches the search query (case-insensitive)
-#[cfg(test)]
-fn event_matches_query(event: &DisplayEvent, query_lower: &str) -> bool {
-    event_match_type(event, query_lower).is_some()
 }
 
 /// Determine how an event matches the search query, returning the match type.
@@ -633,8 +504,8 @@ fn find_current_or_next_event(events: &[DisplayEvent], current_time: NaiveTime) 
     for (i, event) in events.iter().enumerate() {
         let Some(start) = event.when.start().and_then(clock) else { continue };
 
-        // Compared as clock times (sub-second precision), as before; an end of
-        // midnight means "until the end of the day"
+        // Compared as clock times (sub-second precision); an end of midnight
+        // means "until the end of the day"
         if let Some(end) = event.when.end()
             && start <= current_time
             && clock(end).is_none_or(|end| current_time < end)
@@ -667,7 +538,6 @@ pub(crate) mod tests {
             spans_days: false,
             date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             accepted: true,
-            is_organizer: false,
             is_free: false,
             meeting_url: None,
             description: None,
@@ -677,14 +547,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_event_matches_query_title() {
+    fn test_event_match_type_title_words() {
         let event = make_event_with_attendees("Sprint Planning", vec![]);
-        assert!(event_matches_query(&event, "sprint"));
-        assert!(event_matches_query(&event, "planning"));
+        assert_eq!(event_match_type(&event, "sprint"), Some(MatchType::Title));
+        assert_eq!(event_match_type(&event, "planning"), Some(MatchType::Title));
     }
 
     #[test]
-    fn test_event_matches_query_attendee_name() {
+    fn test_event_match_type_attendee_name() {
         let event = make_event_with_attendees("Meeting", vec![
             DisplayAttendee {
                 name: Some("Alice Johnson".to_string()),
@@ -692,12 +562,12 @@ pub(crate) mod tests {
                 status: AttendeeStatus::Accepted,
             },
         ]);
-        assert!(event_matches_query(&event, "alice"));
-        assert!(event_matches_query(&event, "johnson"));
+        assert_eq!(event_match_type(&event, "alice"), Some(MatchType::Participant));
+        assert_eq!(event_match_type(&event, "johnson"), Some(MatchType::Participant));
     }
 
     #[test]
-    fn test_event_matches_query_attendee_email() {
+    fn test_event_match_type_attendee_email() {
         let event = make_event_with_attendees("Meeting", vec![
             DisplayAttendee {
                 name: None,
@@ -705,12 +575,12 @@ pub(crate) mod tests {
                 status: AttendeeStatus::Accepted,
             },
         ]);
-        assert!(event_matches_query(&event, "bob@company"));
-        assert!(event_matches_query(&event, "company.org"));
+        assert_eq!(event_match_type(&event, "bob@company"), Some(MatchType::Participant));
+        assert_eq!(event_match_type(&event, "company.org"), Some(MatchType::Participant));
     }
 
     #[test]
-    fn test_event_matches_query_case_insensitive() {
+    fn test_event_match_type_case_insensitive() {
         let event = make_event_with_attendees("Team Standup", vec![
             DisplayAttendee {
                 name: Some("Charlie Brown".to_string()),
@@ -718,9 +588,9 @@ pub(crate) mod tests {
                 status: AttendeeStatus::Accepted,
             },
         ]);
-        assert!(event_matches_query(&event, "team standup"));
-        assert!(event_matches_query(&event, "charlie brown"));
-        assert!(event_matches_query(&event, "charlie@example.com"));
+        assert_eq!(event_match_type(&event, "team standup"), Some(MatchType::Title));
+        assert_eq!(event_match_type(&event, "charlie brown"), Some(MatchType::Participant));
+        assert_eq!(event_match_type(&event, "charlie@example.com"), Some(MatchType::Participant));
     }
 
     #[test]
@@ -770,57 +640,14 @@ pub(crate) mod tests {
             },
         ]);
         assert_eq!(event_match_type(&event, "bob"), None);
-    }
-
-    #[test]
-    fn test_event_matches_query_no_match() {
-        let event = make_event_with_attendees("Sprint Planning", vec![
-            DisplayAttendee {
-                name: Some("Alice".to_string()),
-                email: "alice@example.com".to_string(),
-                status: AttendeeStatus::Accepted,
-            },
-        ]);
-        assert!(!event_matches_query(&event, "retro"));
-        assert!(!event_matches_query(&event, "bob"));
-        assert!(!event_matches_query(&event, "xyz"));
-    }
-
-    pub(crate) fn app_on(date: NaiveDate) -> App {
-        let mut app = App {
-            current_date: date,
-            selected_date: date,
-            show_logs: false,
-            events: EventCache::new(),
-            google_auth: GoogleAuthState::NotConfigured,
-            icloud_auth: ICloudAuthState::NotConfigured,
-            status_message: None,
-            status_message_time: None,
-            status_is_error: false,
-            config: Config::default(),
-            in_flight: HashMap::new(),
-            fetch_generation: 0,
-            last_fetch_error: HashMap::new(),
-            attempts: HashMap::new(),
-            google_calendar_name: None,
-            quit: false,
-            navigation_mode: NavigationMode::Day,
-            selected_source: EventSource::Google,
-            selected_event_index: 0,
-            pending_action: None,
-            search: None,
-            show_help: false,
-            dirty: true,
-            last_render_minute: 0,
-            setup: None,
-        };
-        app
+        assert_eq!(event_match_type(&event, "retro"), None);
+        assert_eq!(event_match_type(&event, "xyz"), None);
     }
 
     #[test]
     fn test_switch_panel_lands_on_the_nearest_event() {
         let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
-        let mut app = app_on(day);
+        let mut app = App::on(day);
         let at = |label: &str, id: &str, icloud: bool| {
             let mut e = make_event_with_attendees(label, vec![]);
             e.when = When::parse_label(label);
@@ -843,28 +670,29 @@ pub(crate) mod tests {
         assert_eq!((app.selected_source, app.selected_event_index), (EventSource::Google, 0));
 
         // Nothing over there: stay put and say so
-        let mut app = app_on(day);
+        let mut app = App::on(day);
         app.events.google.store(vec![at("09:00", "g1", false)], day);
         app.navigation_mode = NavigationMode::Event;
         app.switch_panel();
         assert_eq!(app.selected_source, EventSource::Google);
-        assert!(app.status_message.as_deref().unwrap().contains("Personal"));
+        assert!(app.status.as_ref().unwrap().text().contains("Personal"));
     }
 
     #[test]
     fn test_month_jumps_move_to_the_first_of_the_month() {
-        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
-        app.next_month();
-        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        let mut app = App::on(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+        app.apply(crate::keymap::Action::NextMonth);
+        assert_eq!(app.selected_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        assert_eq!(app.visible_month(), NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
 
-        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
-        app.prev_month();
-        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
+        let mut app = App::on(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+        app.apply(crate::keymap::Action::PrevMonth);
+        assert_eq!(app.visible_month(), NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
     }
 
     #[test]
     fn test_event_jump_into_next_month_switches_month() {
-        let mut app = app_on(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
+        let mut app = App::on(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
         let target = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
         let mut ev = make_event_with_attendees("Later", vec![]);
         ev.date = target;
@@ -872,14 +700,82 @@ pub(crate) mod tests {
         app.navigation_mode = NavigationMode::Event;
         app.next_event();
         assert_eq!(app.selected_date, target);
-        assert_eq!(app.current_date, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        assert_eq!(app.visible_month(), NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+    }
+
+    fn timed(start: &str, end: &str, icloud: bool) -> DisplayEvent {
+        let mut e = make_event_with_attendees(start, vec![]);
+        e.when = When::parse_label(start).ending(end);
+        if icloud {
+            e.id = EventId::ICloud { calendar_url: "c".into(), event_uid: start.into(), etag: None, calendar_name: None, href: None };
+        }
+        e
+    }
+
+    #[test]
+    fn test_enter_event_mode_prefers_the_current_event_then_the_next() {
+        let day = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let at = |hm: &str| day.and_time(NaiveTime::parse_from_str(hm, "%H:%M").unwrap());
+        let entered = |google: Vec<DisplayEvent>, icloud: Vec<DisplayEvent>, now: NaiveDateTime| {
+            let mut app = App::on(day);
+            app.events.google.store(google, day);
+            app.events.icloud.store(icloud, day);
+            assert!(app.enter_event_mode_at(now));
+            assert_eq!(app.navigation_mode, NavigationMode::Event);
+            (app.selected_source, app.selected_event_index)
+        };
+        let g = |s, e| timed(s, e, false);
+        let i = |s, e| timed(s, e, true);
+
+        // Under way in iCloud beats Google's next
+        assert_eq!(entered(vec![g("09:00", "10:00"), g("12:00", "13:00")], vec![i("10:00", "11:00")], at("10:30")), (EventSource::ICloud, 0));
+        // Under way in both: Google's
+        assert_eq!(entered(vec![g("08:00", "09:00"), g("10:15", "11:00")], vec![i("10:00", "11:00")], at("10:30")), (EventSource::Google, 1));
+        // Nothing under way: the earliest next, Google on a tie
+        assert_eq!(entered(vec![g("12:00", "13:00")], vec![i("09:00", "09:30"), i("11:00", "12:00")], at("10:30")), (EventSource::ICloud, 1));
+        assert_eq!(entered(vec![g("12:00", "13:00")], vec![i("12:00", "12:30")], at("10:30")), (EventSource::Google, 0));
+        // All over, or another day: the day's first
+        assert_eq!(entered(vec![g("08:00", "09:00")], vec![i("07:00", "08:00")], at("20:00")), (EventSource::Google, 0));
+        assert_eq!(entered(vec![], vec![i("12:00", "13:00"), i("14:00", "15:00")], at("10:30") + Duration::days(1)), (EventSource::ICloud, 0));
+
+        // No events: stays in Day mode
+        let mut app = App::on(day);
+        assert!(!app.enter_event_mode_at(at("10:30")));
+        assert_eq!(app.navigation_mode, NavigationMode::Day);
+    }
+
+    #[test]
+    fn test_stepping_past_a_day_lands_on_the_nearest_day_with_events() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 1, day).unwrap();
+        let on = |mut e: DisplayEvent, day| {
+            e.date = d(day);
+            e
+        };
+        let mut app = App::on(d(15));
+        app.events.google.store(vec![on(timed("09:00", "10:00", false), 10), on(timed("09:00", "10:00", false), 13), on(timed("11:00", "12:00", false), 13)], d(1));
+        app.events.icloud.store(vec![on(timed("10:00", "11:00", true), 10), on(timed("12:00", "13:00", true), 10)], d(1));
+        app.navigation_mode = NavigationMode::Event;
+
+        // Backwards: the day's last event, iCloud's if it has any
+        app.prev_event();
+        assert_eq!((app.selected_date, app.selected_source, app.selected_event_index), (d(13), EventSource::Google, 1));
+        app.selected_event_index = 0;
+        app.prev_event();
+        assert_eq!((app.selected_date, app.selected_source, app.selected_event_index), (d(10), EventSource::ICloud, 1));
+        // Forwards: the day's first, Google's if it has any
+        app.next_event();
+        assert_eq!((app.selected_date, app.selected_source, app.selected_event_index), (d(13), EventSource::Google, 0));
+        // Nothing further within 90 days: stay put
+        app.selected_event_index = 1;
+        app.next_event();
+        assert_eq!((app.selected_date, app.selected_event_index), (d(13), 1));
     }
 
     #[test]
     fn test_search_lists_a_multi_day_event_once() {
         // Five upcoming days of leave, stored per month they fall in
         let today = Local::now().date_naive();
-        let mut app = app_on(today);
+        let mut app = App::on(today);
         for offset in 1..=5 {
             let mut e = make_event_with_attendees("Leave", vec![]);
             e.date = today + Duration::days(offset);

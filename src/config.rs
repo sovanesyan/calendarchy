@@ -1,6 +1,8 @@
+use crate::auth::ICloudAccount;
+#[cfg(test)]
+use crate::auth::CalendarEntry;
 use crate::error::Result;
 use crate::google::TokenInfo;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,65 +127,27 @@ fn default_google_client_secret() -> String {
 /// iCloud Calendar configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ICloudConfig {
-    /// "eventkit" (macOS, zero config) or "caldav" (cross-platform)
-    /// Defaults to "caldav" for backward compatibility
-    #[serde(default = "default_icloud_method")]
-    pub method: String,
-    /// Required for caldav method
+    /// Required for CalDAV
     #[serde(default)]
     pub apple_id: Option<String>,
-    /// Required for caldav method
+    /// Required for CalDAV
     #[serde(default)]
     pub app_password: Option<String>,
-}
-
-fn default_icloud_method() -> String {
-    "caldav".to_string()
-}
-
-impl ICloudConfig {
-    pub fn is_eventkit(&self) -> bool {
-        self.method == "eventkit"
-    }
-
-    #[allow(dead_code)]
-    pub fn is_caldav(&self) -> bool {
-        self.method == "caldav"
-    }
 }
 
 fn default_calendar_id() -> String {
     "primary".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct StoredTokens {
     pub google: Option<GoogleTokens>,
-    pub icloud: Option<ICloudTokens>,
+    pub icloud: Option<ICloudAccount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoogleTokens {
     pub tokens: TokenInfo,
-    pub stored_at: DateTime<Utc>,
-}
-
-/// Stored calendar entry with URL and optional display name
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredCalendar {
-    pub url: String,
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ICloudTokens {
-    /// Legacy field for backwards compatibility
-    #[serde(default)]
-    pub calendar_urls: Vec<String>,
-    /// New field with calendar names
-    #[serde(default)]
-    pub calendars: Vec<StoredCalendar>,
-    pub stored_at: DateTime<Utc>,
 }
 
 impl Config {
@@ -209,9 +173,6 @@ impl Config {
 
         let content = fs::read_to_string(&path)?;
         let mut config: Config = serde_json::from_str(&content)?;
-        // The config can hold the iCloud app password: tighten files written
-        // by older versions with the default (world-readable) mode
-        restrict_permissions(&path);
 
         // Env vars always override saved config
         if let Some(ref mut google) = config.google {
@@ -226,16 +187,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn ensure_config_dir() -> Result<()> {
-        let dir = Self::config_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        Ok(())
-    }
-
     pub fn save(&self) -> Result<()> {
-        Self::ensure_config_dir()?;
         let path = Self::config_path();
         let json = serde_json::to_string_pretty(self)?;
         write_private(&path, json.as_bytes())
@@ -244,35 +196,16 @@ impl Config {
 
 /// Save Google tokens
 pub fn save_google_tokens(tokens: &TokenInfo) -> Result<()> {
-    Config::ensure_config_dir()?;
-
-    let mut stored = load_all_tokens().unwrap_or(StoredTokens {
-        google: None,
-        icloud: None,
-    });
-
-    stored.google = Some(GoogleTokens {
-        tokens: tokens.clone(),
-        stored_at: Utc::now(),
-    });
+    let mut stored = load_all_tokens().unwrap_or_default();
+    stored.google = Some(GoogleTokens { tokens: tokens.clone() });
 
     save_all_tokens(&stored)
 }
 
 /// Save iCloud discovery info
-pub fn save_icloud_tokens(calendars: &[StoredCalendar]) -> Result<()> {
-    Config::ensure_config_dir()?;
-
-    let mut stored = load_all_tokens().unwrap_or(StoredTokens {
-        google: None,
-        icloud: None,
-    });
-
-    stored.icloud = Some(ICloudTokens {
-        calendar_urls: Vec::new(), // Legacy field, keep empty
-        calendars: calendars.to_vec(),
-        stored_at: Utc::now(),
-    });
+pub fn save_icloud_account(account: &ICloudAccount) -> Result<()> {
+    let mut stored = load_all_tokens().unwrap_or_default();
+    stored.icloud = Some(account.clone());
 
     save_all_tokens(&stored)
 }
@@ -285,10 +218,15 @@ fn save_all_tokens(stored: &StoredTokens) -> Result<()> {
 
 /// Write a secrets-bearing file: created 0600 from the start (no window where
 /// it's world-readable), written to a temp file and renamed into place so a
-/// crash can't leave it truncated
+/// crash can't leave it truncated. Creates the config directory if needed.
 fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // A leftover temp file would keep its old mode: start from scratch
+    let _ = fs::remove_file(&tmp);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -306,28 +244,10 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(result?)
 }
 
-/// Make a file owner-only (best effort)
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path)
-            && meta.permissions().mode() & 0o077 != 0
-        {
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
 fn load_all_tokens() -> Result<StoredTokens> {
     let path = Config::token_path();
     if !path.exists() {
-        return Ok(StoredTokens {
-            google: None,
-            icloud: None,
-        });
+        return Ok(StoredTokens::default());
     }
 
     let content = fs::read_to_string(&path)?;
@@ -342,7 +262,7 @@ pub fn load_google_tokens() -> Result<Option<TokenInfo>> {
 }
 
 /// Load iCloud discovery info
-pub fn load_icloud_tokens() -> Result<Option<ICloudTokens>> {
+pub fn load_icloud_account() -> Result<Option<ICloudAccount>> {
     let stored = load_all_tokens()?;
     Ok(stored.icloud)
 }
@@ -378,5 +298,66 @@ mod display_tests {
         assert!(!json.contains("display"));
         let parsed: Config = serde_json::from_str(r#"{"display":{"working_hours":"09:00-17:00"}}"#).unwrap();
         assert_eq!(parsed.display.working_minutes(), Some((540, 1020)));
+    }
+
+    #[test]
+    fn test_old_token_files_still_load() {
+        let old = r#"{
+            "google": { "tokens": { "access_token": "a", "refresh_token": "r", "expires_at": "2026-10-16T10:00:00Z", "token_type": "Bearer" }, "stored_at": "2026-10-16T09:00:00Z" },
+            "icloud": { "calendar_urls": [], "calendars": [{ "url": "https://caldav.icloud.com/1/calendars/home/", "name": "Home" }], "stored_at": "2026-10-16T09:00:00Z" }
+        }"#;
+        let stored: StoredTokens = serde_json::from_str(old).unwrap();
+        assert_eq!(stored.google.unwrap().tokens.refresh_token.as_deref(), Some("r"));
+        let icloud = stored.icloud.unwrap();
+        assert_eq!(
+            icloud.calendars,
+            [CalendarEntry { url: "https://caldav.icloud.com/1/calendars/home/".into(), name: Some("Home".into()) }]
+        );
+        assert!(icloud.addresses.is_empty(), "saved before addresses were discovered");
+    }
+
+    #[test]
+    fn test_token_file_round_trips() {
+        // The shape tokens.json has today: calendars as { url, name }, an
+        // unnamed one with name null, and your calendar-user addresses
+        let current = r#"{
+            "google": { "tokens": { "access_token": "a", "refresh_token": "r", "expires_at": "2026-10-16T10:00:00Z" } },
+            "icloud": { "calendars": [
+                { "url": "https://p42-caldav.icloud.com/1/calendars/home/", "name": "Home" },
+                { "url": "https://p42-caldav.icloud.com/1/calendars/work/", "name": null }
+            ], "addresses": ["mailto:me@icloud.com", "/aMTM=/principal/"] }
+        }"#;
+        let stored: StoredTokens = serde_json::from_str(current).unwrap();
+        let icloud = stored.icloud.as_ref().unwrap();
+        assert_eq!(icloud.calendars.len(), 2);
+        assert_eq!(icloud.calendars[1], CalendarEntry { url: "https://p42-caldav.icloud.com/1/calendars/work/".into(), name: None });
+        assert_eq!(icloud.addresses, ["mailto:me@icloud.com", "/aMTM=/principal/"]);
+
+        let written: serde_json::Value = serde_json::to_value(&stored).unwrap();
+        assert_eq!(written, serde_json::from_str::<serde_json::Value>(current).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_private_files_are_written_owner_only() {
+        // config.json holds the app password, tokens.json the sign-ins
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("calendarchy-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"{\"secret\":1}").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let content = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600, "an existing world-readable file is replaced, not reused");
+        assert_eq!(content, "{\"secret\":1}");
+    }
+
+    #[test]
+    fn test_icloud_config_ignores_legacy_method_field() {
+        let parsed: Config = serde_json::from_str(r#"{"icloud":{"method":"caldav","apple_id":"a@b.c","app_password":"p"}}"#).unwrap();
+        assert_eq!(parsed.icloud.and_then(|c| c.apple_id).as_deref(), Some("a@b.c"));
     }
 }

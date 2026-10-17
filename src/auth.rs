@@ -1,10 +1,5 @@
 use crate::google::TokenInfo;
 
-/// Trait for auth state display
-pub trait AuthDisplay {
-    fn is_authenticated(&self) -> bool;
-}
-
 /// Google authentication state
 #[derive(Debug, Clone)]
 pub enum GoogleAuthState {
@@ -12,20 +7,28 @@ pub enum GoogleAuthState {
     NotAuthenticated,
     Authenticating,
     Authenticated(TokenInfo),
-    Error(String),
 }
 
-impl AuthDisplay for GoogleAuthState {
-    fn is_authenticated(&self) -> bool {
-        matches!(self, GoogleAuthState::Authenticated(_))
-    }
-}
-
-/// Calendar with URL and display name
-#[derive(Debug, Clone, PartialEq)]
+/// A CalDAV calendar: its URL and display name. Saved in tokens.json as
+/// `{ "url", "name" }`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CalendarEntry {
     pub url: String,
     pub name: Option<String>,
+}
+
+/// What CalDAV discovery finds for an iCloud account; saved in tokens.json
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ICloudAccount {
+    /// The calendars found by the last discovery
+    #[serde(default)]
+    pub calendars: Vec<CalendarEntry>,
+    /// Your calendar-user addresses: the principal and its
+    /// `calendar-user-address-set` (mailto: addresses, principal paths,
+    /// `urn:uuid:`s), which is how iCloud writes you on invites. Empty in
+    /// files saved before they were discovered; that triggers a rediscovery
+    #[serde(default)]
+    pub addresses: Vec<String>,
 }
 
 /// iCloud authentication state
@@ -33,13 +36,7 @@ pub struct CalendarEntry {
 pub enum ICloudAuthState {
     NotConfigured,
     Discovering,
-    Authenticated { calendars: Vec<CalendarEntry> },
-    #[allow(dead_code)]
-    Error(String),
-}
-
-impl AuthDisplay for ICloudAuthState {
-    fn is_authenticated(&self) -> bool {
-        matches!(self, ICloudAuthState::Authenticated { .. })
-    }
+    Authenticated(ICloudAccount),
+    /// Discovery failed; finishing setup retries it
+    Error,
 }

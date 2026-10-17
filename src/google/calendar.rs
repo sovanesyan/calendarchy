@@ -1,7 +1,9 @@
-use crate::error::{check_google_response, check_google_response_no_body, CalendarchyError, Result};
+use crate::error::{check_google, CalendarchyError, Result};
 use crate::google::types::{CalendarEvent, EventsListResponse, TokenInfo};
+use serde_json::Value;
 use crate::logging::{log_request, log_response};
-use chrono::{Duration, Local, NaiveDate, TimeZone};
+use crate::utils::local_day_bounds;
+use chrono::{NaiveDate, SecondsFormat};
 use reqwest::{Client, StatusCode};
 
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
@@ -11,12 +13,8 @@ pub struct CalendarClient {
 }
 
 impl CalendarClient {
-    pub fn new() -> Self {
-        Self::with_client(Client::new())
-    }
-
     /// Use a shared client so connections (and TLS sessions) are reused
-    pub fn with_client(client: Client) -> Self {
+    pub fn new(client: Client) -> Self {
         Self { client }
     }
 
@@ -34,17 +32,9 @@ impl CalendarClient {
             urlencoding::encode(calendar_id)
         );
 
-        // Local-midnight boundaries in RFC3339, so events near the month edges
-        // aren't lost to the UTC offset
-        let local_midnight = |d: NaiveDate| {
-            Local
-                .from_local_datetime(&d.and_hms_opt(0, 0, 0).unwrap())
-                .earliest()
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| format!("{}T00:00:00Z", d))
-        };
-        let time_min_str = local_midnight(time_min);
-        let time_max_str = local_midnight(time_max + Duration::days(1));
+        let (time_min, time_max) = local_day_bounds(time_min, time_max);
+        let time_min_str = time_min.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let time_max_str = time_max.to_rfc3339_opts(SecondsFormat::Secs, true);
 
         let mut all_events = Vec::new();
         let mut page_token: Option<String> = None;
@@ -70,7 +60,7 @@ impl CalendarClient {
             let response = request.send().await?;
             log_response(response.status().as_u16(), &url);
 
-            let body = check_google_response(response, "Calendar API error").await?;
+            let body = check_google(response, "Calendar API error").await?;
             let events_response: EventsListResponse = serde_json::from_str(&body)?;
 
             if let Some(items) = events_response.items {
@@ -101,7 +91,9 @@ impl CalendarClient {
             urlencoding::encode(event_id)
         );
 
-        // First, get the current event to find our attendee entry
+        // First, get the current event to find our attendee entry. It's kept
+        // as raw JSON so every field of that entry (optional, comment, ...)
+        // survives the round trip
         log_request("GET", &url);
         let get_response = self
             .client
@@ -111,32 +103,24 @@ impl CalendarClient {
             .await?;
         log_response(get_response.status().as_u16(), &url);
 
-        let body = check_google_response(get_response, "Failed to get event").await?;
-        let mut event: CalendarEvent = serde_json::from_str(&body)?;
+        let body = check_google(get_response, "Failed to get event").await?;
+        let event: Value = serde_json::from_str(&body)?;
+        let patch = response_patch(event, response)
+            .ok_or_else(|| CalendarchyError::Api("You're not a guest of this event".to_string()))?;
 
-        // Update the self attendee's response status
-        if let Some(ref mut attendees) = event.attendees {
-            for attendee in attendees.iter_mut() {
-                if attendee.is_self == Some(true) {
-                    attendee.response_status = Some(response.to_string());
-                    break;
-                }
-            }
-        }
-
-        // PATCH the event back
+        // PATCH only your own reply; the rest of the event is left alone
         log_request("PATCH", &url);
         let patch_response = self
             .client
             .patch(&url)
             .bearer_auth(&token.access_token)
             .query(&[("sendUpdates", "none")]) // Don't send notification emails
-            .json(&event)
+            .json(&patch)
             .send()
             .await?;
         log_response(patch_response.status().as_u16(), &url);
 
-        check_google_response_no_body(patch_response, "Failed to update event").await
+        check_google(patch_response, "Failed to update event").await.map(drop)
     }
 
     /// Delete an event
@@ -163,7 +147,11 @@ impl CalendarClient {
             .await?;
         log_response(response.status().as_u16(), &url);
 
-        check_google_response_no_body(response, "Failed to delete event").await
+        // Already gone (deleted elsewhere) counts as deleted
+        if already_gone(response.status()) {
+            return Ok(());
+        }
+        check_google(response, "Failed to delete event").await.map(drop)
     }
 
     /// Get calendar display name
@@ -205,8 +193,66 @@ impl CalendarClient {
     }
 }
 
-impl Default for CalendarClient {
-    fn default() -> Self {
-        Self::new()
+/// The PATCH body that sets only your own reply: your attendee entry (every
+/// field as Google sent it) with `responseStatus` set, and `attendeesOmitted`
+/// so the other guests (and their concurrent replies) are left alone. None
+/// when you aren't on the list
+fn response_patch(mut event: Value, response: &str) -> Option<Value> {
+    let attendees = event.get_mut("attendees")?.as_array_mut()?;
+    let mut me = attendees
+        .iter_mut()
+        .find(|a| a.get("self").and_then(Value::as_bool) == Some(true))?
+        .take();
+    me["responseStatus"] = response.into();
+    Some(serde_json::json!({ "attendees": [me], "attendeesOmitted": true }))
+}
+
+/// A DELETE answered 404 or 410: the event was already deleted
+fn already_gone(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_response_patches_only_your_own_entry() {
+        let event = serde_json::json!({
+            "id": "e1",
+            "summary": "Review",
+            "attendees": [
+                { "email": "room@resource.calendar.google.com", "resource": true, "responseStatus": "accepted" },
+                { "email": "me@example.com", "self": true, "optional": true, "comment": "maybe", "responseStatus": "needsAction" },
+                { "email": "boss@example.com", "organizer": true, "additionalGuests": 2, "responseStatus": "accepted" }
+            ]
+        });
+        assert_eq!(
+            response_patch(event, "accepted").unwrap(),
+            serde_json::json!({
+                "attendees": [
+                    { "email": "me@example.com", "self": true, "optional": true, "comment": "maybe", "responseStatus": "accepted" }
+                ],
+                "attendeesOmitted": true
+            })
+        );
+    }
+
+    #[test]
+    fn test_response_needs_you_on_the_guest_list() {
+        assert!(response_patch(serde_json::json!({ "id": "e1" }), "declined").is_none());
+        let others = serde_json::json!({ "attendees": [{ "email": "a@b.c", "responseStatus": "accepted" }] });
+        assert!(response_patch(others, "declined").is_none());
+        // A truncated list (attendeesOmitted on read) still has your entry
+        let truncated = serde_json::json!({ "attendeesOmitted": true, "attendees": [{ "email": "me@x.y", "self": true }] });
+        assert_eq!(response_patch(truncated, "declined").unwrap()["attendees"][0]["responseStatus"], "declined");
+    }
+
+    #[test]
+    fn test_deleting_an_event_already_gone_succeeds() {
+        assert!(already_gone(StatusCode::NOT_FOUND));
+        assert!(already_gone(StatusCode::GONE));
+        assert!(!already_gone(StatusCode::FORBIDDEN));
+        assert!(!already_gone(StatusCode::UNAUTHORIZED), "a 401 still refreshes the token");
     }
 }

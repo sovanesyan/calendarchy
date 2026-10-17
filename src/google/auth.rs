@@ -2,7 +2,6 @@ use crate::config::GoogleConfig;
 use crate::error::{CalendarchyError, Result};
 use crate::google::types::{TokenInfo, TokenResponse};
 use crate::logging::{log_request, log_response};
-use chrono::Utc;
 use reqwest::Client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::Duration;
@@ -25,12 +24,7 @@ pub struct GoogleAuth {
 }
 
 impl GoogleAuth {
-    #[cfg(test)]
-    pub fn new(config: GoogleConfig) -> Self {
-        Self::with_client(Client::new(), config)
-    }
-
-    pub fn with_client(client: Client, config: GoogleConfig) -> Self {
+    pub fn new(client: Client, config: GoogleConfig) -> Self {
         Self { client, config, state: random_state() }
     }
 
@@ -119,12 +113,7 @@ impl GoogleAuth {
         }
 
         let token_response: TokenResponse = response.json().await?;
-        Ok(TokenInfo {
-            access_token: token_response.access_token,
-            refresh_token: token_response.refresh_token,
-            expires_at: Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64),
-            token_type: token_response.token_type,
-        })
+        Ok(token_response.into_info(None))
     }
 
     /// Refresh an expired token
@@ -150,12 +139,7 @@ impl GoogleAuth {
         }
 
         let token_response: TokenResponse = response.json().await?;
-        Ok(TokenInfo {
-            access_token: token_response.access_token,
-            refresh_token: Some(refresh_token.to_string()), // Keep original
-            expires_at: Utc::now() + chrono::Duration::seconds(token_response.expires_in as i64),
-            token_type: token_response.token_type,
-        })
+        Ok(token_response.into_info(Some(refresh_token.to_string())))
     }
 }
 
@@ -272,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_listener_skips_stray_requests_until_the_redirect() {
-        let auth = GoogleAuth::new(GoogleConfig::default());
+        let auth = GoogleAuth::new(Client::new(), GoogleConfig::default());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let state = auth.state.clone();
