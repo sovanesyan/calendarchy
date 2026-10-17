@@ -1,6 +1,6 @@
 # Calendarchy
 
-A terminal calendar app that displays Google Calendar and iCloud Calendar events side by side.
+A terminal calendar app that displays Google Calendar and iCloud Calendar events side by side. Linux only (built for Omarchy / Hyprland); iCloud is read over CalDAV.
 
 ## Installation
 
@@ -13,14 +13,7 @@ cargo build --release
 sudo cp target/release/calendarchy /usr/local/bin/
 ```
 
-On macOS, also build the global-hotkey helper (needs Xcode command line tools) and put it next to the binary:
-
-```bash
-swiftc -O swift/main.swift -o calendarchy-hotkey
-sudo cp calendarchy-hotkey /usr/local/bin/
-```
-
-On Linux, to add Calendarchy to your application launcher, copy the desktop entry:
+To add Calendarchy to your application launcher, copy the desktop entry (it opens Calendarchy with Omarchy's `omarchy-launch-or-focus-tui`, so a running one is focused instead):
 
 ```bash
 sudo cp calendarchy.desktop /usr/share/applications/
@@ -28,7 +21,7 @@ sudo cp calendarchy.desktop /usr/share/applications/
 
 ## Configuration
 
-Create `~/.config/calendarchy/config.json`:
+On first run with no config, a setup wizard connects Google (in the browser) and iCloud (Apple ID and an [app-specific password](https://appleid.apple.com/account/manage)) and writes `~/.config/calendarchy/config.json`; press `S` to run it again. Or write the file yourself:
 
 ```json
 {
@@ -37,13 +30,13 @@ Create `~/.config/calendarchy/config.json`:
     "client_secret": "YOUR_CLIENT_SECRET"
   },
   "icloud": {
-    "username": "YOUR_APPLE_ID",
+    "apple_id": "YOUR_APPLE_ID",
     "app_password": "YOUR_APP_SPECIFIC_PASSWORD"
   }
 }
 ```
 
-Either source can be omitted if you only use one.
+Either source can be omitted if you only use one. Google's `client_id` / `client_secret` are optional (a built-in OAuth client is used by default; `CALENDARCHY_GOOGLE_CLIENT_ID` / `CALENDARCHY_GOOGLE_CLIENT_SECRET` override it), as is `calendar_id` (default `primary`), so `"google": {}` is enough.
 
 ### Optional settings
 
@@ -81,18 +74,41 @@ calendarchy
 
 Navigate with arrow keys. Events from both calendars are displayed in side-by-side panels.
 
-### Keyboard shortcut (macOS)
+Pass `--date YYYY-MM-DD` to open on that day; `--version` prints the version.
 
-Set up a global Cmd+Shift+J shortcut to launch Calendarchy from anywhere:
+### Keyboard shortcut (Hyprland)
+
+On first run, the setup wizard offers to add a Super+Alt+J binding to `~/.config/hypr/bindings.lua` (or `bindings.conf`) that launches or focuses Calendarchy. It's skipped when that file already has a line launching `calendarchy` (the shell window's toggle doesn't count). To remove it, delete the `calendarchy` line from that file.
+
+## Headless
+
+These run without the TUI and exit:
+
+- `calendarchy --refresh [--month YYYY-MM]`: fetch this month and the next (or just the given month) from both sources into the disk cache (`~/.cache/calendarchy/events.json`).
+- `calendarchy --agenda [--from YYYY-MM-DD] [--days N]`: print days as JSON from the disk cache only, no network (`--from` defaults to today, `--days` to 2). Includes event details, display prefs, the key bindings in effect and the next meeting. The shape is documented at the top of `src/agenda.rs`.
+- `calendarchy --event accept|decline|delete <id>`: act on one event by the id `--agenda` prints, then refetch its month. Accept and decline are Google only.
+
+## Omarchy shell
+
+`shell/` holds two plugins for the Omarchy 4 shell (`omarchy-shell`):
+
+- `local.calendarchy`, a background service: runs `calendarchy --refresh` every 5 minutes and sends a notification 5 minutes before each meeting. Clicking it joins the meeting (Zoom opens in the app), or opens Calendarchy when there's no link.
+- `local.calendarchy.window`, the TUI's layout as a window (month and week heatmap, Work and Personal panels, free gaps, coming up, details), with the same keys, including your `keys` overrides.
+
+Install or update both (the `calendarchy` binary must be on your `PATH`):
 
 ```bash
-calendarchy --setup
+shell/install.sh
 ```
 
-This installs a background helper that listens for the hotkey and opens Calendarchy in your terminal. macOS will prompt for Accessibility permission on first use — grant it in System Settings > Privacy & Security > Accessibility.
-
-To remove the shortcut:
+Toggle the window, e.g. from a Hyprland binding:
 
 ```bash
-calendarchy --remove-setup
+omarchy-shell shell toggle local.calendarchy.window '{}'
+```
+
+To float it, add a window rule for class `org.quickshell`, title `Calendarchy`; in `~/.config/hypr/hyprland.lua`:
+
+```lua
+o.window({ class = "^org\\.quickshell$", title = "^Calendarchy$" }, { float = true, size = { 1500, 900 }, center = true })
 ```
