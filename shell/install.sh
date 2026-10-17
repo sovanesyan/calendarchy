@@ -10,17 +10,21 @@ set -euo pipefail
 src="$(cd "$(dirname "$0")" && pwd)"
 plugins="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
 
-# copy <plugin dir> <id> <files...>
+# copy <plugin dir> <id> <files...>: each file lands at the top of the plugin
 copy() {
   local from="$1" id="$2"; shift 2
   local dest="$plugins/$id"
   mkdir -p "$dest"
-  for f in "$@"; do install -m 644 "$from/$f" "$dest/$f"; done
+  for f in "$@"; do install -m 644 "$from/$f" "$dest/$(basename "$f")"; done
   omarchy plugin validate "$dest"
 }
 
-# The service (refresh, alerts) and the window
-copy "$src" local.calendarchy manifest.json Service.qml Model.js
+# Model.js was merged into Layout.js
+rm -f "$plugins/local.calendarchy/Model.js"
+
+# The service (refresh, alerts) and the window; both use the window's
+# Layout.js (the TUI's display rules), so the service gets its own copy
+copy "$src" local.calendarchy manifest.json Service.qml window/Layout.js
 copy "$src/window" local.calendarchy.window manifest.json Window.qml Layout.js
 
 # The file watcher reloads after a debounce; rescan now so enable can see them

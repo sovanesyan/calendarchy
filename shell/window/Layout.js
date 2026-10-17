@@ -1,11 +1,13 @@
 .pragma library
 
-// The TUI's display rules (src/ui.rs, src/app.rs), ported for the window.
+// The TUI's display rules (src/ui.rs, src/app.rs), ported for the window and
+// the service's alerts (install.sh copies this file into both plugins).
 // Everything here is pure: it takes the JSON `calendarchy --agenda` prints
 // (days keyed by date, each with google / icloud lists) and returns what to
 // draw. Dates are "YYYY-MM-DD" strings, times are minutes since midnight.
 
 var SOURCES = ["google", "icloud"]
+function otherSource(s) { return s === "google" ? "icloud" : "google" }
 var DAY_MINUTES = 1440
 
 function pad(n) { return (n < 10 ? "0" : "") + n }
@@ -58,6 +60,13 @@ function isoWeek(monday) {
   return 1 + Math.round(((d - jan4) / 86400000 - 3 + ((jan4.getDay() + 6) % 7)) / 7)
 }
 
+// The week-number column: the ISO week of the grid row starting `weekFirst`,
+// blank for a row with no day in `month`
+function weekLabel(weekFirst, month, sundayFirst) {
+  if (!sameMonth(weekFirst, month) && !sameMonth(addDays(weekFirst, 6), month)) return ""
+  return String(isoWeek(sundayFirst ? addDays(weekFirst, 1) : weekFirst))
+}
+
 // ---------------------------------------------------------------- times
 
 function hm(minutes, twelveHour) {
@@ -69,6 +78,19 @@ function hm(minutes, twelveHour) {
 }
 
 function timeText(e, twelveHour) { return e.allDay ? "All day" : hm(e.start, twelveHour) }
+
+// "09:00 – 10:00", as the details panel: the start, and the end if it has one
+function timeRange(e, twelveHour) {
+  if (e.allDay || e.end === null || e.end === undefined) return timeText(e, twelveHour)
+  return hm(e.start, twelveHour) + " – " + hm(e.end, twelveHour)
+}
+
+// "12 min", "1 h 05", for an alert's countdown in minutes
+function countdown(minutes) {
+  if (minutes < 60) return minutes + " min"
+  var h = Math.floor(minutes / 60), m = minutes % 60
+  return m ? h + " h " + pad(m) : h + " h"
+}
 
 // format_duration: "43m", "2h 15m", "2h", "3d 2h"
 function formatDuration(m) {
@@ -88,6 +110,7 @@ function formatLength(e) {
   return r ? h + "h" + pad(r) : h + "h"
 }
 
+// "zoom", "meet", "teams" or "link", from a meeting URL
 function meetingKind(url) {
   if (!url) return ""
   if (url.indexOf("zoom.us") >= 0 || url.indexOf("zoommtg:") === 0) return "zoom"
@@ -109,14 +132,18 @@ function smartWhen(date, start, today, twelveHour) {
 
 // ---------------------------------------------------------------- busy time
 
-// busy_range: timed, accepted, not free; no end = one hour
+// The minutes an event blocks, as the agenda decides them (busy_range:
+// timed, accepted, not free; no end = one hour): [start, end] or null.
+// Binaries before the range was added sent a bool, so derive it from that
 function busyRange(e) {
+  if (Array.isArray(e.busy)) return e.busy
   if (!e.busy) return null
   var end = e.end === null || e.end === undefined ? e.start + 60 : e.end
   return [e.start, Math.min(end, DAY_MINUTES)]
 }
 
 function dayOf(byDate, date) { return byDate[date] || { date: date, google: [], icloud: [] } }
+function dayEvents(byDate, date, source) { return dayOf(byDate, date)[source] || [] }
 
 function busyRanges(day) {
   var out = []
@@ -327,6 +354,118 @@ function fitLine(items, budget, twelveHour) {
   return { parts: parts, more: 0 }
 }
 
+// ---------------------------------------------------------------- navigation (app.rs)
+
+// A selection is { date, source, index }; null means there's nothing to
+// select (back to day mode) or nowhere to move
+
+function hasEvents(byDate, date) {
+  var d = byDate[date]
+  return !!d && ((d.google || []).length + (d.icloud || []).length) > 0
+}
+
+// After a reload: keep the selection on an event that's still there
+function clampSelection(byDate, date, source, index) {
+  var list = dayEvents(byDate, date, source)
+  if (list.length === 0) {
+    var other = otherSource(source)
+    return dayEvents(byDate, date, other).length ? { date: date, source: other, index: 0 } : null
+  }
+  return { date: date, source: source, index: Math.min(index, list.length - 1) }
+}
+
+// Enter: on today the event under way, else the next one (earliest of the
+// two panels); otherwise the first event, Work before Personal
+function enterEvents(byDate, date, today, now) {
+  var g = dayEvents(byDate, date, "google"), i = dayEvents(byDate, date, "icloud")
+  if (g.length === 0 && i.length === 0) return null
+  var at = function(source, index) { return { date: date, source: source, index: index } }
+  if (date === today) {
+    var gc = currentNext(g, true, now), ic = currentNext(i, true, now)
+    if (gc.current >= 0) return at("google", gc.current)
+    if (ic.current >= 0) return at("icloud", ic.current)
+    if (gc.next >= 0 && (ic.next < 0 || g[gc.next].start <= i[ic.next].start)) return at("google", gc.next)
+    if (ic.next >= 0) return at("icloud", ic.next)
+  }
+  return at(g.length ? "google" : "icloud", 0)
+}
+
+// j: down the panel, on to Personal, then to the next day with events (as
+// far as what's loaded goes)
+function nextEvent(byDate, date, source, index) {
+  var g = dayEvents(byDate, date, "google"), i = dayEvents(byDate, date, "icloud")
+  if (source === "google" && index + 1 < g.length) return { date: date, source: source, index: index + 1 }
+  if (source === "google" && i.length) return { date: date, source: "icloud", index: 0 }
+  if (source === "icloud" && index + 1 < i.length) return { date: date, source: source, index: index + 1 }
+  for (var d = 1; d <= 90; d++) {
+    var next = addDays(date, d)
+    if (!byDate[next]) break
+    if (hasEvents(byDate, next))
+      return { date: next, source: dayEvents(byDate, next, "google").length ? "google" : "icloud", index: 0 }
+  }
+  return null
+}
+
+// k: up the panel, back to Work, then to the last event of the day before
+function prevEvent(byDate, date, source, index) {
+  var g = dayEvents(byDate, date, "google")
+  if (index > 0) return { date: date, source: source, index: index - 1 }
+  if (source === "icloud" && g.length) return { date: date, source: "google", index: g.length - 1 }
+  for (var d = 1; d <= 90; d++) {
+    var prev = addDays(date, -d)
+    if (!byDate[prev]) break
+    if (hasEvents(byDate, prev)) {
+      var pi = dayEvents(byDate, prev, "icloud").length
+      return pi ? { date: prev, source: "icloud", index: pi - 1 }
+        : { date: prev, source: "google", index: dayEvents(byDate, prev, "google").length - 1 }
+    }
+  }
+  return null
+}
+
+// Tab: the other panel's first event at or after this one, else its last
+function switchPanel(byDate, date, source, index) {
+  var other = otherSource(source)
+  var list = dayEvents(byDate, date, other)
+  if (list.length === 0) return null
+  var cur = dayEvents(byDate, date, source)[index]
+  var key = function(e) { return e.allDay ? -1 : e.start }
+  var target = list.length - 1
+  if (cur) for (var j = 0; j < list.length; j++) if (key(list[j]) >= key(cur)) { target = j; break }
+  return { date: date, source: other, index: target }
+}
+
+// ---------------------------------------------------------------- actions
+
+// The event actions, by the verb `calendarchy --event` takes
+var VERBS = {
+  accept: { name: "Accept", prompt: "Accept this event?", doing: "Accepting event...", done: "Event accepted" },
+  decline: { name: "Decline", prompt: "Decline this event?", doing: "Declining event...", done: "Event declined" },
+  "delete": { name: "Delete", prompt: "Delete this event?", doing: "Deleting event...", done: "Event deleted" }
+}
+
+// ---------------------------------------------------------------- alerts
+
+// Events eligible for an alert at the agenda's `now`: today's busy timed
+// events starting within `lead` minutes, each keyed by id + date + start
+function dueAlerts(agenda, lead) {
+  var due = []
+  if (!agenda || !agenda.days || agenda.days.length === 0) return due
+  var day = agenda.days[0]
+  if (day.date !== agenda.today) return due
+  for (var s = 0; s < SOURCES.length; s++) {
+    var events = day[SOURCES[s]] || []
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i]
+      var busy = busyRange(e)
+      if (!busy) continue
+      var until = busy[0] - agenda.now
+      if (until >= 0 && until <= lead) due.push({ key: e.id + "@" + day.date + "@" + e.start, event: e, until: until })
+    }
+  }
+  return due
+}
+
 // ---------------------------------------------------------------- details
 
 function decodeEntities(s) {
@@ -377,26 +516,250 @@ function footerNext(next, today, now) {
   return { label: "Next: ", title: title, rest: " in " + formatDuration(minutes), soon: minutes <= 15 }
 }
 
-// Footer hints, as the TUI's second footer line
-function hints(mode, e, labels, signedIn) {
+// Footer hints, as the TUI's second footer line, with the keys as bound
+// (`tables` from windowKeys); a hint whose action has no key is left out
+function hints(mode, e, sources, tables) {
+  var t = tables[mode] || {}
+  var parts = []
+  var hint = function(action, text) { var k = keyLabel(t, action); if (k) parts.push(k + " " + text) }
+  hint("help", "help")
+  hint("quit", "quit")
   if (mode === "day") {
-    var h = ["? help", "q quit", "Enter events"]
-    if (!signedIn.google) h.push("g connect " + labels.google.toLowerCase())
-    if (!signedIn.icloud) h.push("i connect " + labels.icloud.toLowerCase())
-    return h.join(" · ")
+    hint("enter_events", "events")
+    if (!sources.google.configured) hint("connect_google", "connect " + sources.google.label.toLowerCase())
+    if (!sources.icloud.configured) hint("connect_icloud", "connect " + sources.icloud.label.toLowerCase())
+    return parts.join(" · ")
   }
-  var parts = ["? help", "q quit"]
-  if (e && e.event.meetingUrl) parts.push("J join")
-  if (e && e.source === "google") parts.push(e.event.accepted ? "d decline" : "a accept")
-  parts.push("x delete")
-  parts.push("Tab other panel", "Esc back")
+  if (e && e.event.meetingUrl) hint("join", "join")
+  if (e && e.source === "google") { if (e.event.accepted) hint("decline", "decline"); else hint("accept", "accept") }
+  hint("delete", "delete")
+  hint("switch_panel", "other panel")
+  hint("exit_events", "back")
   return parts.join(" · ")
 }
 
-// Bulgarian phonetic keys are their Latin twins, as keymap.rs maps them
+// ---------------------------------------------------------------- keys (keymap.rs)
+
+// The agenda's `keys` are the bindings in effect, config overrides applied:
+// per mode ("day", "event"), action name → key specs as config writes them
+// ("J", "ctrl+d", "enter", "esc", "tab", "shift+tab", "left", "space",
+// "f5"). These are the defaults (Keymap::effective with no overrides), for
+// an agenda from a binary that doesn't print them.
+var DEFAULT_KEYS = {
+  day: {
+    connect_google: ["g"], connect_icloud: ["i"], enter_events: ["enter"], help: ["?"],
+    next_day: ["l", "right"], next_month: ["L", "ctrl+d"], next_week: ["j", "down"], now: ["n"],
+    open_google_web: ["1"], open_icloud_web: ["2"], prev_day: ["h", "left"], prev_month: ["H", "ctrl+u"],
+    prev_week: ["k", "up"], quit: ["q"], refresh: ["r"], search: ["f"], setup: ["S"], today: ["t"],
+    toggle_logs: ["D"]
+  },
+  event: {
+    accept: ["a"], decline: ["d"], "delete": ["x"], exit_events: ["esc"], help: ["?"], join: ["J"],
+    jump_events_back: ["ctrl+u"], jump_events_forward: ["ctrl+d"], next_event: ["j", "down"],
+    next_month: ["L"], now: ["n"], open_google_web: ["1"], open_icloud_web: ["2"],
+    prev_event: ["k", "up"], prev_month: ["H"], quit: ["q"], refresh: ["r"], search: ["f"],
+    setup: ["S"], switch_panel: ["tab", "shift+tab"], today: ["t"], toggle_logs: ["D"]
+  }
+}
+
+// The window's own keys on top of the TUI's, each only while its key is free
+// in that mode: Enter joins (the TUI has Enter for nothing on an event), Esc
+// closes from the days (the TUI never quits on Esc; a window can)
+var WINDOW_KEYS = { day: { quit: ["esc"] }, event: { join: ["enter"] } }
+
+var NAMED_KEYS = {
+  enter: "enter", "return": "enter", esc: "esc", escape: "esc", tab: "tab",
+  backtab: "shift+tab", "shift+tab": "shift+tab", "s-tab": "shift+tab", space: "space",
+  left: "left", right: "right", up: "up", down: "down", backspace: "backspace",
+  home: "home", end: "end", pageup: "pageup", pagedown: "pagedown"
+}
+
+// Key::parse then Key::spec: a config key spec in its canonical form ("^d",
+// "C-d", "Ctrl+d" → "ctrl+d"; "Return" → "enter"; " " → "space"), or null
+// when it isn't one. Matching is on canonical specs.
+function canonicalKey(spec) {
+  if (typeof spec !== "string") return null
+  spec = spec.trim()
+  var lower = spec.toLowerCase()
+  var prefixes = ["ctrl+", "ctrl-", "c-", "^"]
+  for (var p = 0; p < prefixes.length; p++) {
+    if (lower.indexOf(prefixes[p]) === 0 && spec.length > prefixes[p].length) {
+      var rest = canonicalKey(spec.slice(prefixes[p].length))
+      return rest === null ? null : rest.indexOf("ctrl+") === 0 ? rest : "ctrl+" + rest
+    }
+  }
+  var chars = Array.from(spec)
+  if (chars.length === 1) return chars[0] === " " ? "space" : chars[0]
+  if (NAMED_KEYS.hasOwnProperty(lower)) return NAMED_KEYS[lower]
+  var f = /^f(\d+)$/.exec(lower)
+  if (f && Number(f[1]) >= 1 && Number(f[1]) <= 12) return "f" + Number(f[1])
+  return null
+}
+
+// Bulgarian phonetic keys are their Latin twins, as keymap.rs's latin()
 var LATIN = {
   "й": "j", "к": "k", "л": "l", "х": "h", "Й": "J", "К": "K", "Л": "L", "Х": "H",
-  "т": "t", "р": "r", "н": "n", "ф": "f", "г": "g", "и": "i", "я": "q", "а": "a",
-  "д": "d", "ь": "x", "Д": "D", "С": "S", "о": "o"
+  "т": "t", "р": "r", "н": "n", "ф": "f", "г": "g", "и": "i",
+  "я": "q", "а": "a", "д": "d", "ь": "x", "Д": "D", "С": "S"
 }
 function latin(t) { return LATIN[t] || t }
+
+// Qt::Key and Qt::KeyboardModifier values (stable across Qt versions),
+// spelled out so this stays plain JS
+var QT_KEYS = {
+  0x01000000: "esc", 0x01000001: "tab", 0x01000002: "shift+tab", 0x01000003: "backspace",
+  0x01000004: "enter", 0x01000005: "enter", 0x01000010: "home", 0x01000011: "end",
+  0x01000012: "left", 0x01000013: "up", 0x01000014: "right", 0x01000015: "down",
+  0x01000016: "pageup", 0x01000017: "pagedown", 0x20: "space"
+}
+var QT_KEY_F1 = 0x01000030
+var QT_SHIFT = 0x02000000, QT_CTRL = 0x04000000
+
+// A QML key event (event.key, event.text, event.modifiers) as a canonical
+// spec, as action_for sees a crossterm key: Ctrl is kept, other modifiers
+// are dropped (Shift is already in the character: "J" vs "j", and makes Tab
+// "shift+tab"), Bulgarian phonetic letters become Latin. Null for a key with
+// nothing to match (a bare modifier, a dead key).
+function pressedKey(key, text, modifiers) {
+  var ctrl = (modifiers & QT_CTRL) !== 0, shift = (modifiers & QT_SHIFT) !== 0
+  var base = QT_KEYS[key] || null
+  if (base === "tab" && shift) base = "shift+tab"
+  if (!base && key >= QT_KEY_F1 && key < QT_KEY_F1 + 12) base = "f" + (key - QT_KEY_F1 + 1)
+  if (!base) {
+    // The text has the case; with Ctrl it's a control character, so go by
+    // the key code (an upper-case letter, for Cyrillic too) and Shift
+    var c = ""
+    if (!ctrl && text && text.charCodeAt(0) >= 0x20 && text !== "\u007f") c = text
+    else if (key > 0x20 && key < 0x01000000) {
+      c = String.fromCharCode(key)
+      c = shift ? c.toUpperCase() : c.toLowerCase()
+    }
+    if (Array.from(c).length !== 1) return null
+    base = latin(c)
+  }
+  return ctrl ? "ctrl+" + base : base
+}
+
+// The bindings the window uses, per mode: the agenda's `keys` (or the
+// defaults, when it has none) plus WINDOW_KEYS where their key is free.
+// Specs come out canonical; ones that can't be read are dropped.
+function windowKeys(keys) {
+  var out = {}
+  var modes = ["day", "event"]
+  for (var m = 0; m < modes.length; m++) {
+    var mode = modes[m]
+    var from = keys && keys[mode] ? keys[mode] : DEFAULT_KEYS[mode]
+    var table = {}, taken = {}
+    for (var action in from) {
+      var specs = []
+      for (var i = 0; i < from[action].length; i++) {
+        var k = canonicalKey(from[action][i])
+        if (k !== null && !taken[k]) { specs.push(k); taken[k] = true }
+      }
+      if (specs.length) table[action] = specs
+    }
+    var extra = WINDOW_KEYS[mode]
+    for (var a in extra)
+      for (var j = 0; j < extra[a].length; j++)
+        if (!taken[extra[a][j]]) { taken[extra[a][j]] = true; (table[a] = table[a] || []).push(extra[a][j]) }
+    out[mode] = table
+  }
+  return out
+}
+
+// windowKeys turned around: per mode, canonical spec → action
+function keyIndex(tables) {
+  var out = {}
+  for (var mode in tables) {
+    var index = {}
+    for (var action in tables[mode])
+      for (var i = 0; i < tables[mode][action].length; i++) index[tables[mode][action][i]] = action
+    out[mode] = index
+  }
+  return out
+}
+
+// What a pressed key does in `mode`: an action name, or null
+function actionFor(index, mode, key, text, modifiers) {
+  var k = pressedKey(key, text, modifiers)
+  var table = index[mode] || {}
+  return k !== null && table.hasOwnProperty(k) ? table[k] : null
+}
+
+// Key::label: "l", "^d", "←", "Enter", "S-Tab", "Space", "F5"
+var KEY_LABELS = {
+  space: "Space", left: "←", right: "→", up: "↑", down: "↓", enter: "Enter", esc: "Esc",
+  tab: "Tab", "shift+tab": "S-Tab", backspace: "Bksp", home: "Home", end: "End",
+  pageup: "PgUp", pagedown: "PgDn"
+}
+function specLabel(spec) {
+  if (spec.indexOf("ctrl+") === 0 && spec.length > 5) return "^" + specLabel(spec.slice(5))
+  if (KEY_LABELS.hasOwnProperty(spec)) return KEY_LABELS[spec]
+  if (/^f\d+$/.test(spec)) return "F" + spec.slice(1)
+  return spec
+}
+
+// The first key of an action in one mode's table, as a label ("" if none)
+function keyLabel(table, action) { return table[action] && table[action].length ? specLabel(table[action][0]) : "" }
+
+// Keymap::keys_for: an action's keys across both modes, day mode's first
+function keysFor(tables, action) {
+  var out = []
+  var modes = ["day", "event"]
+  for (var m = 0; m < modes.length; m++) {
+    var list = (tables[modes[m]] || {})[action] || []
+    for (var i = 0; i < list.length; i++) if (out.indexOf(list[i]) < 0) out.push(list[i])
+  }
+  return out
+}
+
+// Keymap::label_for: a group of related actions' keys side by side, "h/l ←/→"
+// for [prev_day, next_day], or each action's keys in turn when they don't
+// pair up (skipping actions left without a key)
+function labelFor(tables, actions) {
+  var keys = actions.map(function(a) { return keysFor(tables, a) })
+  var n = keys[0].length
+  if (keys.every(function(k) { return k.length === n })) {
+    var cols = []
+    for (var i = 0; i < n; i++) cols.push(keys.map(function(k) { return specLabel(k[i]) }).join("/"))
+    return cols.join(" ")
+  }
+  return keys.filter(function(k) { return k.length }).map(function(k) { return k.map(specLabel).join(" ") }).join(" / ")
+}
+
+// The help overlay, as the TUI's (ui.rs render_help_modal) with the window's
+// differences: [actions, description], a section with no actions
+var HELP = [
+  ["Navigate"],
+  [["prev_day", "next_day"], "previous / next day"],
+  [["prev_week", "next_week"], "previous / next week"],
+  [["prev_month", "next_month"], "previous / next month"],
+  [["enter_events", "exit_events"], "browse events / back"],
+  [["today", "now"], "go to today / current event"],
+  ["Events"],
+  [["prev_event", "next_event"], "previous / next event"],
+  [["jump_events_back", "jump_events_forward"], "jump 10 events"],
+  [["switch_panel"], "other panel"],
+  [["join"], "join meeting & close"],
+  [["accept", "decline", "delete"], "accept / decline / delete"],
+  ["Search & misc"],
+  [["search"], "search titles & people, in the TUI"],
+  [["refresh", "toggle_logs", "setup"], "refresh / logs, setup in the TUI"],
+  [["connect_google", "connect_icloud"], "connect Google / iCloud, in the TUI"],
+  [["open_google_web", "open_icloud_web"], "open Google / iCloud in browser"],
+  [["quit"], "close"]
+]
+
+// The help overlay's rows from the bindings in use: { keys, text, section };
+// a row whose actions have no key at all is left out
+function helpRows(tables) {
+  var rows = []
+  for (var i = 0; i < HELP.length; i++) {
+    var h = HELP[i]
+    if (h.length === 1) { rows.push({ keys: h[0], text: "", section: true }); continue }
+    var label = labelFor(tables, h[0])
+    if (label) rows.push({ keys: label, text: h[1], section: false })
+  }
+  rows.push({ keys: "", text: "Bulgarian phonetic keys work too · any key closes", section: false })
+  return rows
+}

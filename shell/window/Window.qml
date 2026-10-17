@@ -9,7 +9,8 @@ import "Layout.js" as L
 // shell's theme. Left, the month and the selected week's busy heatmap; in the
 // middle, the selected day with Work above Personal, the free gaps between
 // them, and Coming up; on the right, in event mode, the event's details. The
-// footer says what's next and which keys do what. The keys are the TUI's.
+// footer says what's next and which keys do what. The keys are the TUI's,
+// config overrides included: the agenda says what's bound to what.
 //
 // Data comes from calendarchy itself: `--agenda` for the visible six weeks,
 // `--refresh --month` for months nobody else keeps fresh, and `--event` for
@@ -19,8 +20,6 @@ Item {
   id: root
 
   property var shell: null
-  property var manifest: null
-  property string omarchyPath: ""
 
   readonly property string pluginId: "local.calendarchy.window"
   readonly property string command: "calendarchy"
@@ -36,10 +35,7 @@ Item {
 
   // ------------------------------------------------------------ lifecycle
 
-  property bool closingFromHost: false
-
   function open(payloadJson) {
-    closingFromHost = false
     var date = ""
     try {
       var p = JSON.parse(String(payloadJson || "{}"))
@@ -50,15 +46,13 @@ Item {
     Qt.callLater(function() { keys.forceActiveFocus() })
   }
 
+  // The host's hide() calls close(); closing here calls hide() (from
+  // onVisibleChanged), whose close() then finds the window already hidden
   function close() {
-    closingFromHost = true
     window.visible = false
-    closingFromHost = false
   }
 
-  function requestClose() {
-    window.visible = false
-  }
+  function requestClose() { close() }
 
   // ------------------------------------------------------------ state
 
@@ -74,31 +68,29 @@ Item {
   property string status: ""
   property bool statusError: false
 
-  property var agenda: null                // the visible six weeks (and a bit)
+  property var agenda: null                // the visible six weeks (and a bit), and next
   property var byDate: ({})
-  property var todayAgenda: null           // for the footer's Next
   property var refreshedMonths: ({})
 
   readonly property bool twelveHour: agenda ? agenda.twelveHour : false
   readonly property bool sundayFirst: agenda ? agenda.sundayFirst : false
   readonly property bool weekNumbers: agenda ? agenda.weekNumbers : false
   readonly property var workingHours: agenda ? agenda.workingHours : null
-  readonly property var labels: {
-    var out = { google: "Work", icloud: "Personal" }
+  // { label, configured } by source key
+  readonly property var sources: {
+    var out = { google: { label: "Work", configured: true }, icloud: { label: "Personal", configured: true } }
     var s = agenda ? agenda.sources : []
-    for (var i = 0; i < s.length; i++) out[s[i].key] = s[i].label
-    return out
-  }
-  readonly property var configured: {
-    var out = { google: true, icloud: true }
-    var s = agenda ? agenda.sources : []
-    for (var i = 0; i < s.length; i++) out[s[i].key] = s[i].configured
+    for (var i = 0; i < s.length; i++) out[s[i].key] = { label: s[i].label, configured: s[i].configured }
     return out
   }
 
   property color googleColor: Color.accent
   property color icloudColor: Color.urgent
   function sourceColor(s) { return s === "icloud" ? icloudColor : googleColor }
+
+  // The bindings per mode (action → key specs), and the other way round
+  readonly property var keyTables: L.windowKeys(agenda ? agenda.keys : null)
+  readonly property var keyIndex: L.keyIndex(keyTables)
 
   readonly property var day: L.dayOf(byDate, selected)
   readonly property bool isToday: selected === today
@@ -121,10 +113,6 @@ Item {
     if (agendaProc.running) { reloadAgain = true; return }
     agendaProc.command = [command, "--agenda", "--from", rangeFrom(), "--days", "57"]
     agendaProc.running = true
-    if (!todayProc.running) {
-      todayProc.command = [command, "--agenda", "--days", "8"]
-      todayProc.running = true
-    }
   }
   property bool reloadAgain: false
 
@@ -156,20 +144,13 @@ Item {
     refreshProc.running = true
   }
 
-  onMonthChanged: { load(); ensureMonth() }
+  function monthShown() { load(); ensureMonth() }
+  onMonthChanged: monthShown()
 
   Process {
     id: agendaProc
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.absorb(text) }
     onExited: if (root.reloadAgain) { root.reloadAgain = false; root.load() }
-  }
-
-  Process {
-    id: todayProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: { try { root.todayAgenda = JSON.parse(text) } catch (e) {} }
-    }
   }
 
   Process {
@@ -194,18 +175,24 @@ Item {
     }
   }
 
+  function tick() {
+    var d = new Date()
+    today = L.fromDate(d)
+    now = d.getHours() * 60 + d.getMinutes()
+  }
+  // Just after the minute turns
+  function untilNextMinute() { return 60000 - (Date.now() % 60000) + 500 }
+
   // The minute ticks: countdowns, "free now", fading, and a reload (the
-  // plugin's service refreshes the cache every few minutes)
+  // plugin's service refreshes the cache every few minutes). startOn() does
+  // the first tick and load.
   Timer {
     id: minuteTimer
     running: window.visible
-    triggeredOnStart: true
     onTriggered: {
-      var d = new Date()
-      root.today = L.fromDate(d)
-      root.now = d.getHours() * 60 + d.getMinutes()
+      root.tick()
       root.load()
-      interval = 60000 - (Date.now() % 60000) + 500
+      interval = root.untilNextMinute()
       restart()
     }
   }
@@ -237,16 +224,17 @@ Item {
   // ------------------------------------------------------------ navigation (app.rs)
 
   function startOn(date) {
-    var d = new Date()
-    today = L.fromDate(d)
-    now = d.getHours() * 60 + d.getMinutes()
+    tick()
     status = ""
     pending = null
     showHelp = false
     mode = "day"
-    selectDate(date)
     pendingEnter = true
-    load()
+    var shown = month
+    selectDate(date)
+    if (month === shown) monthShown() // else onMonthChanged has
+    minuteTimer.interval = untilNextMinute()
+    minuteTimer.restart()
   }
   // Enter event mode once the first agenda arrives, as the TUI starts
   property bool pendingEnter: false
@@ -255,77 +243,40 @@ Item {
     selected = date
     if (!L.sameMonth(date, month)) month = L.firstOfMonth(date)
   }
+  function selectDay(date) { selectDate(date); mode = "day" }
+  function selectEvent(source, index) { mode = "event"; selSource = source; selIndex = index }
+  // Follow a selection { date, source, index } from the L.* navigation
+  function follow(s) {
+    if (s.date !== selected) selectDate(s.date)
+    selectEvent(s.source, s.index)
+  }
 
   function clampSelection() {
     if (mode !== "event") return
-    var list = events(selSource)
-    if (list.length === 0) {
-      var other = selSource === "google" ? "icloud" : "google"
-      if (events(other).length) { selSource = other; selIndex = 0 }
-      else mode = "day"
-    } else if (selIndex >= list.length) selIndex = list.length - 1
+    var s = L.clampSelection(byDate, selected, selSource, selIndex)
+    if (s) follow(s)
+    else mode = "day"
   }
 
   function enterEvents(quiet) {
-    var g = events("google"), i = events("icloud")
-    if (g.length === 0 && i.length === 0) {
-      if (!quiet) setStatus("No events on this day")
-      mode = "day"
-      return
-    }
-    mode = "event"
-    if (isToday) {
-      var gc = L.currentNext(g, true, now), ic = L.currentNext(i, true, now)
-      if (gc.current >= 0) { selSource = "google"; selIndex = gc.current; return }
-      if (ic.current >= 0) { selSource = "icloud"; selIndex = ic.current; return }
-      if (gc.next >= 0 && (ic.next < 0 || g[gc.next].start <= i[ic.next].start)) { selSource = "google"; selIndex = gc.next; return }
-      if (ic.next >= 0) { selSource = "icloud"; selIndex = ic.next; return }
-    }
-    if (g.length) { selSource = "google"; selIndex = 0 } else { selSource = "icloud"; selIndex = 0 }
+    var s = L.enterEvents(byDate, selected, today, now)
+    if (s) { follow(s); return }
+    if (!quiet) setStatus("No events on this day")
+    mode = "day"
   }
 
   function exitEvents() { mode = "day"; selSource = "google"; selIndex = 0 }
 
-  function hasEvents(date) {
-    var d = byDate[date]
-    return !!d && ((d.google || []).length + (d.icloud || []).length) > 0
-  }
-
-  // j: down the panel, on to Personal, then to the next day with events
   function nextEvent() {
-    var g = events("google"), i = events("icloud")
-    if (selSource === "google" && selIndex + 1 < g.length) { selIndex++; return true }
-    if (selSource === "google" && i.length) { selSource = "icloud"; selIndex = 0; return true }
-    if (selSource === "icloud" && selIndex + 1 < i.length) { selIndex++; return true }
-    for (var d = 1; d <= 90; d++) {
-      var date = L.addDays(selected, d)
-      if (!byDate[date]) break // past what's loaded
-      if (hasEvents(date)) {
-        selectDate(date)
-        var dg = (byDate[date].google || []).length
-        selSource = dg ? "google" : "icloud"; selIndex = 0
-        return true
-      }
-    }
-    return false
+    var s = L.nextEvent(byDate, selected, selSource, selIndex)
+    if (s) follow(s)
+    return !!s
   }
 
   function prevEvent() {
-    var g = events("google")
-    if (selIndex > 0) { selIndex--; return true }
-    if (selSource === "icloud" && g.length) { selSource = "google"; selIndex = g.length - 1; return true }
-    for (var d = 1; d <= 90; d++) {
-      var date = L.addDays(selected, -d)
-      if (!byDate[date]) break
-      if (hasEvents(date)) {
-        selectDate(date)
-        var di = (byDate[date].icloud || []).length
-        if (di) { selSource = "icloud"; selIndex = di - 1 }
-        else { selSource = "google"; selIndex = (byDate[date].google || []).length - 1 }
-        return true
-      }
-    }
-    return false
+    var s = L.prevEvent(byDate, selected, selSource, selIndex)
+    if (s) follow(s)
+    return !!s
   }
 
   function jumpEvents(n) {
@@ -333,21 +284,14 @@ Item {
     setStatus("Jumped to " + L.dayTitle(selected))
   }
 
-  // Tab: the other panel's first event at or after this one, else its last
   function switchPanel() {
-    var other = selSource === "google" ? "icloud" : "google"
-    var list = events(other)
-    if (list.length === 0) { setStatus("Nothing in " + labels[other] + " on this day"); return }
-    var cur = selectedEvent ? selectedEvent.event : null
-    var key = function(e) { return e.allDay ? -1 : e.start }
-    var target = list.length - 1
-    if (cur) for (var j = 0; j < list.length; j++) if (key(list[j]) >= key(cur)) { target = j; break }
-    selSource = other
-    selIndex = target
+    var s = L.switchPanel(byDate, selected, selSource, selIndex)
+    if (s) follow(s)
+    else setStatus("Nothing in " + sources[L.otherSource(selSource)].label + " on this day")
   }
 
   function moveDays(n) { selectDate(L.addDays(selected, n)) }
-  function moveMonths(n) { selectDate(L.addMonths(selected, n)); mode = "day" }
+  function moveMonths(n) { selectDay(L.addMonths(selected, n)) }
   function gotoToday() { selectDate(L.fromDate(new Date())) }
 
   // ------------------------------------------------------------ actions
@@ -364,23 +308,20 @@ Item {
     if (!e) return
     var google = e.source === "google"
     if ((verb === "accept" || verb === "decline") && !google) {
-      setStatus((verb === "accept" ? "Accept" : "Decline") + " not supported for iCloud"); return
+      setStatus(L.VERBS[verb].name + " not supported for iCloud"); return
     }
-    if (google && !configured.google) { setStatus("Not signed in to Google — press S for setup"); return }
-    if (!google && !configured.icloud) { setStatus("iCloud not configured — press S for setup"); return }
-    var prompts = { accept: "Accept this event?", decline: "Decline this event?", "delete": "Delete this event?" }
-    pending = { verb: verb, id: e.event.id, prompt: prompts[verb] }
+    if (google && !sources.google.configured) { setStatus("Not signed in to Google — press S for setup"); return }
+    if (!google && !sources.icloud.configured) { setStatus("iCloud not configured — press S for setup"); return }
+    pending = { verb: verb, id: e.event.id, prompt: L.VERBS[verb].prompt }
   }
 
   function confirmAction() {
     var p = pending
     pending = null
     if (!p || actionProc.running) return
-    var doing = { accept: "Accepting event...", decline: "Declining event...", "delete": "Deleting event..." }
-    var done = { accept: "Event accepted", decline: "Event declined", "delete": "Event deleted" }
-    setStatus(doing[p.verb])
+    setStatus(L.VERBS[p.verb].doing)
     statusTimer.stop()
-    actionProc.done = done[p.verb]
+    actionProc.done = L.VERBS[p.verb].done
     actionProc.command = [command, "--event", p.verb, p.id]
     actionProc.running = true
   }
@@ -390,61 +331,54 @@ Item {
     Quickshell.execDetached(argv)
   }
 
-  // ------------------------------------------------------------ keys (keymap.rs defaults)
+  // ------------------------------------------------------------ keys (keymap.rs)
 
   function handleKey(event) {
-    var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
-    var t = L.latin(event.text || "")
-    var key = event.key
-
     if (showHelp) { showHelp = false; return true }
+    // The confirm prompt's keys are fixed, as the TUI's
     if (pending) {
+      var t = L.latin(event.text || "")
+      var key = event.key
       if (t === "y" || t === "Y" || key === Qt.Key_Return || key === Qt.Key_Enter) confirmAction()
       else if (t === "n" || t === "N" || key === Qt.Key_Escape) { pending = null; setStatus("Cancelled") }
       return true
     }
     if (statusError) { status = ""; statusError = false }
+    var action = L.actionFor(keyIndex, mode, event.key, event.text, event.modifiers)
+    return !!action && perform(action)
+  }
 
-    var down = key === Qt.Key_Down || t === "j", up = key === Qt.Key_Up || t === "k"
-    var right = key === Qt.Key_Right || t === "l", left = key === Qt.Key_Left || t === "h"
-
-    if (ctrl && (key === Qt.Key_D || key === Qt.Key_U)) {
-      var fwd = key === Qt.Key_D
-      if (mode === "event") jumpEvents(fwd ? 10 : -10)
-      else moveMonths(fwd ? 1 : -1)
-      return true
+  // An action, by its config name (as update.rs's apply); the ones the
+  // window can't do itself open the TUI on the selected day. False if it
+  // isn't one
+  function perform(action) {
+    switch (action) {
+    case "next_day": moveDays(1); break
+    case "prev_day": moveDays(-1); break
+    case "next_week": moveDays(7); break
+    case "prev_week": moveDays(-7); break
+    case "next_month": moveMonths(1); break
+    case "prev_month": moveMonths(-1); break
+    case "enter_events": enterEvents(false); break
+    case "next_event": if (mode === "event") nextEvent(); break
+    case "prev_event": if (mode === "event") prevEvent(); break
+    case "jump_events_forward": if (mode === "event") jumpEvents(10); break
+    case "jump_events_back": if (mode === "event") jumpEvents(-10); break
+    case "exit_events": exitEvents(); break
+    case "switch_panel": if (mode === "event") switchPanel(); break
+    case "join": join(); break
+    case "accept": case "decline": case "delete": requestAction(action); break
+    case "today": gotoToday(); break
+    case "now": gotoToday(); mode = "day"; enterEvents(false); break
+    case "refresh": setStatus("Refreshing..."); refreshMonth(month); break
+    case "help": showHelp = true; break
+    case "quit": requestClose(); break
+    case "open_google_web": Quickshell.execDetached(["xdg-open", "https://calendar.google.com"]); break
+    case "open_icloud_web": Quickshell.execDetached(["xdg-open", "https://www.icloud.com/calendar"]); break
+    case "search": case "setup": case "toggle_logs": case "connect_google": case "connect_icloud": openTui(); break
+    default: return false // an action this window doesn't know (a newer binary's)
     }
-
-    if (mode === "event") {
-      if (down) { nextEvent(); return true }
-      if (up) { prevEvent(); return true }
-      if (key === Qt.Key_Escape) { exitEvents(); return true }
-      if (key === Qt.Key_Tab || key === Qt.Key_Backtab) { switchPanel(); return true }
-      if (t === "J" || key === Qt.Key_Return || key === Qt.Key_Enter) { join(); return true }
-      if (t === "a") { requestAction("accept"); return true }
-      if (t === "d") { requestAction("decline"); return true }
-      if (t === "x") { requestAction("delete"); return true }
-    } else {
-      if (right) { moveDays(1); return true }
-      if (left) { moveDays(-1); return true }
-      if (down) { moveDays(7); return true }
-      if (up) { moveDays(-7); return true }
-      if (key === Qt.Key_Return || key === Qt.Key_Enter) { enterEvents(false); return true }
-      if (key === Qt.Key_Escape) { requestClose(); return true }
-      if (t === "g" || t === "i") { openTui(); return true }
-    }
-
-    if (t === "L") { moveMonths(1); return true }
-    if (t === "H") { moveMonths(-1); return true }
-    if (t === "t") { gotoToday(); return true }
-    if (t === "n") { gotoToday(); mode = "day"; enterEvents(false); return true }
-    if (t === "r") { setStatus("Refreshing..."); refreshMonth(month); return true }
-    if (t === "?") { showHelp = true; return true }
-    if (t === "q") { requestClose(); return true }
-    if (t === "1") { Quickshell.execDetached(["xdg-open", "https://calendar.google.com"]); return true }
-    if (t === "2") { Quickshell.execDetached(["xdg-open", "https://www.icloud.com/calendar"]); return true }
-    if (t === "f" || t === "S" || t === "D") { openTui(); return true }
-    return false
+    return true
   }
 
   // ------------------------------------------------------------ window
@@ -458,7 +392,7 @@ Item {
     minimumSize: Qt.size(900, 560)
 
     onVisibleChanged: {
-      if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function")
+      if (!visible && root.shell && typeof root.shell.hide === "function")
         root.shell.hide(root.pluginId)
     }
 
@@ -487,15 +421,21 @@ Item {
           anchors.leftMargin: Style.space(14)
           anchors.verticalCenter: parent.verticalCenter
           spacing: 0
-          readonly property var next: L.footerNext(root.todayAgenda ? root.todayAgenda.next : null, root.today, root.now)
           T {
             visible: root.status !== ""
             text: root.status
             color: root.statusError ? Color.urgent : Color.accent
           }
-          T { visible: root.status === "" && !!footerRow.next; text: footerRow.next ? footerRow.next.label : ""; color: footerRow.next && footerRow.next.soon ? Color.accent : root.dim }
-          T { visible: root.status === "" && !!footerRow.next; text: footerRow.next ? footerRow.next.title : ""; color: footerRow.next && footerRow.next.soon ? Color.accent : root.fg; font.bold: true }
-          T { visible: root.status === "" && !!footerRow.next; text: footerRow.next ? footerRow.next.rest : ""; color: footerRow.next && footerRow.next.soon ? Color.accent : root.dim }
+          Row {
+            id: nextRow
+            readonly property var next: L.footerNext(root.agenda ? root.agenda.next : null, root.today, root.now)
+            readonly property bool soon: !!next && next.soon
+            readonly property color nextColor: soon ? Color.accent : root.dim
+            visible: root.status === "" && !!next
+            T { text: nextRow.next ? nextRow.next.label : ""; color: nextRow.nextColor }
+            T { text: nextRow.next ? nextRow.next.title : ""; color: nextRow.soon ? Color.accent : root.fg; font.bold: true }
+            T { text: nextRow.next ? nextRow.next.rest : ""; color: nextRow.nextColor }
+          }
         }
 
         T {
@@ -505,7 +445,7 @@ Item {
           color: root.dim
           font.pixelSize: root.caption
           text: root.pending ? "y/Enter confirm · n/Esc cancel"
-            : L.hints(root.mode, root.selectedEvent, root.labels, root.configured)
+            : L.hints(root.mode, root.selectedEvent, root.sources, root.keyTables)
         }
       }
 
@@ -565,11 +505,7 @@ Item {
               T {
                 anchors.centerIn: parent
                 visible: cellItem.col < 0
-                text: {
-                  var monday = root.sundayFirst ? L.addDays(L.addDays(monthGrid.first, cellItem.row * 7), 1) : L.addDays(monthGrid.first, cellItem.row * 7)
-                  var anyInMonth = L.sameMonth(L.addDays(monthGrid.first, cellItem.row * 7), root.month) || L.sameMonth(L.addDays(monthGrid.first, cellItem.row * 7 + 6), root.month)
-                  return anyInMonth ? String(L.isoWeek(monday)) : ""
-                }
+                text: L.weekLabel(L.addDays(monthGrid.first, cellItem.row * 7), root.month, root.sundayFirst)
                 color: root.dim
                 font.pixelSize: root.caption
               }
@@ -584,8 +520,8 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 enabled: cellItem.col >= 0 && cellItem.inMonth
-                onClicked: { root.selectDate(cellItem.date); root.mode = "day" }
-                onDoubleClicked: { root.selectDate(cellItem.date); root.mode = "day"; root.enterEvents(false) }
+                onClicked: root.selectDay(cellItem.date)
+                onDoubleClicked: { root.selectDay(cellItem.date); root.enterEvents(false) }
               }
             }
           }
@@ -748,7 +684,7 @@ Item {
             Row {
               visible: !!det.e
               T {
-                text: det.e ? (det.e.allDay ? "All day" : L.hm(det.e.start, root.twelveHour) + (det.e.end !== null ? " – " + L.hm(det.e.end, root.twelveHour) : "")) : ""
+                text: det.e ? L.timeRange(det.e, root.twelveHour) : ""
               }
               T {
                 color: root.dim
@@ -760,7 +696,11 @@ Item {
             T { visible: !!(det.e && det.e.location); width: parent.width; text: det.e && det.e.location ? det.e.location : ""; color: root.dim; elide: Text.ElideRight }
             T {
               visible: !!(det.e && det.e.meetingUrl)
-              text: det.e && det.e.meetingUrl ? "J join · " + L.meetingKind(det.e.meetingUrl) : ""
+              text: {
+                if (!det.e || !det.e.meetingUrl) return ""
+                var k = L.keyLabel(root.keyTables.event, "join")
+                return (k ? k + " join · " : "") + L.meetingKind(det.e.meetingUrl)
+              }
               color: Color.accent
               font.pixelSize: root.small
             }
@@ -839,7 +779,7 @@ Item {
               Row {
                 spacing: Style.space(6)
                 Rectangle { width: Style.space(3); height: hdr.height - Style.space(4); anchors.verticalCenter: parent.verticalCenter; radius: 1; color: root.sourceColor(panel.source) }
-                T { id: hdr; text: root.labels[panel.source]; color: root.sourceColor(panel.source); font.bold: true }
+                T { id: hdr; text: root.sources[panel.source].label; color: root.sourceColor(panel.source); font.bold: true }
               }
               T {
                 visible: panel.list.length === 0
@@ -926,18 +866,11 @@ Item {
             T { text: "Help"; font.bold: true; font.pixelSize: Style.font.title }
             Item { width: 1; height: Style.space(6) }
             Repeater {
-              model: [
-                ["Days", ""], ["h l  ← →", "previous / next day"], ["j k  ↓ ↑", "previous / next week"], ["Enter", "events of the day"],
-                ["^d ^u  H L", "next / previous month"], ["t  n", "today · now"],
-                ["Events", ""], ["j k", "next / previous event"], ["^d ^u", "jump 10 events"], ["Tab", "other panel"],
-                ["J  Enter", "join the meeting"], ["a d x", "accept · decline · delete"], ["Esc", "back to days"],
-                ["Anywhere", ""], ["r", "refresh this month"], ["1 2", "open Google / iCloud on the web"],
-                ["f S g i", "search, setup, connect: in the TUI"], ["q  Esc", "close"], ["", "any key closes this"]
-              ]
+              model: L.helpRows(root.keyTables)
               Row {
                 required property var modelData
-                T { width: 16 * window.ch; text: modelData[0]; color: modelData[1] === "" ? root.dim : Color.accent; font.bold: modelData[1] === "" }
-                T { text: modelData[1]; color: root.fg }
+                T { width: 16 * window.ch; text: modelData.keys; color: modelData.section ? root.dim : Color.accent; font.bold: modelData.section }
+                T { text: modelData.text; color: modelData.section ? root.dim : root.fg }
               }
             }
           }
@@ -982,8 +915,8 @@ Item {
         id: mouse
         anchors.fill: parent
         hoverEnabled: true
-        onClicked: { root.mode = "event"; root.selSource = er.source; root.selIndex = er.row.index }
-        onDoubleClicked: { root.mode = "event"; root.selSource = er.source; root.selIndex = er.row.index; root.join() }
+        onClicked: root.selectEvent(er.source, er.row.index)
+        onDoubleClicked: { root.selectEvent(er.source, er.row.index); root.join() }
       }
 
       readonly property color timeColor: selectedRow ? Color.accent

@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "Model.js" as Model
+import "Layout.js" as L
 
 // Runs once for the shell, with no UI of its own. `calendarchy --refresh`
 // every few minutes keeps the cache fresh (for the window, the TUI's first
@@ -14,12 +14,6 @@ Item {
   width: 0
   height: 0
   visible: false
-
-  property var shell: null
-  property var manifest: null
-  property var pluginRegistry: null
-  property var barWidgetRegistry: null
-  property string omarchyPath: ""
 
   property string command: "calendarchy"
   property int refreshMinutes: 5
@@ -57,7 +51,7 @@ Item {
   }
 
   function sendAlerts() {
-    var due = Model.dueAlerts(root.agenda, root.alertMinutes)
+    var due = L.dueAlerts(root.agenda, root.alertMinutes)
     if (due.length === 0) return
     var seen = {}
     var today = "@" + root.agenda.today + "@"
@@ -68,9 +62,9 @@ Item {
       seen[due[i].key] = true
       sent = true
       var e = due[i].event
-      var headline = e.title + (due[i].until > 0 ? " in " + Model.countdown(due[i].until) : " now")
-      var parts = [Model.timeRange(e, root.agenda.twelveHour)]
-      var kind = Model.meetingKind(e.meetingUrl)
+      var headline = e.title + (due[i].until > 0 ? " in " + L.countdown(due[i].until) : " now")
+      var parts = [L.timeRange(e, root.agenda.twelveHour)]
+      var kind = L.meetingKind(e.meetingUrl)
       if (kind) parts.push(kind)
       else if (e.location) parts.push(e.location)
       var exec = e.joinUrl
