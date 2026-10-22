@@ -53,6 +53,13 @@ pub struct CalendarEvent {
     pub attendees: Option<Vec<Attendee>>,
     pub conference_data: Option<ConferenceData>,
     pub hangout_link: Option<String>,
+    /// "confirmed", "tentative" or "cancelled"
+    pub status: Option<String>,
+    pub organizer: Option<Organizer>,
+    /// Set on an occurrence of a recurring event: the series' id
+    pub recurring_event_id: Option<String>,
+    /// "default", "outOfOffice", "focusTime", "workingLocation", ...
+    pub event_type: Option<String>,
 }
 
 /// Conference/meeting data
@@ -68,6 +75,12 @@ pub struct ConferenceData {
 pub struct EntryPoint {
     pub entry_point_type: Option<String>,
     pub uri: Option<String>,
+}
+
+/// Who organises an event
+#[derive(Debug, Clone, Deserialize)]
+pub struct Organizer {
+    pub email: Option<String>,
 }
 
 /// Event attendee
@@ -110,7 +123,7 @@ impl CalendarEvent {
     }
 
     /// Your own entry on the guest list, if you're on it
-    fn me(&self) -> Option<&Attendee> {
+    pub fn me(&self) -> Option<&Attendee> {
         self.attendees.as_ref()?.iter().find(|a| a.is_self == Some(true))
     }
 
@@ -173,6 +186,10 @@ mod tests {
             attendees: None,
             conference_data: None,
             hangout_link: None,
+            status: None,
+            organizer: None,
+            recurring_event_id: None,
+            event_type: None,
         }
     }
 
@@ -194,6 +211,10 @@ mod tests {
             attendees: None,
             conference_data: None,
             hangout_link: None,
+            status: None,
+            organizer: None,
+            recurring_event_id: None,
+            event_type: None,
         }
     }
 

@@ -151,6 +151,10 @@ mod tests {
             attendees: None,
             conference_data: None,
             hangout_link: None,
+            status: None,
+            organizer: None,
+            recurring_event_id: None,
+            event_type: None,
         }
     }
 

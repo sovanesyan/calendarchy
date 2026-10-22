@@ -87,6 +87,7 @@ These run without the TUI and exit:
 - `calendarchy --refresh [--month YYYY-MM]`: fetch this month and the next (or just the given month) from both sources into the disk cache (`~/.cache/calendarchy/events.json`).
 - `calendarchy --agenda [--from YYYY-MM-DD] [--days N]`: print days as JSON from the disk cache only, no network (`--from` defaults to today, `--days` to 2). Includes event details, display prefs, the key bindings in effect and the next meeting. The shape is documented at the top of `src/agenda.rs`.
 - `calendarchy --event accept|decline|delete <id>`: act on one event by the id `--agenda` prints, then refetch its month. Accept and decline are Google only.
+- `calendarchy events [--since DATE] [--until DATE] [--json]`: the Google (work) calendar's events for agents and scripts, fetched live with the saved login, any range (`--since` defaults to today, `--until`, exclusive, to a week later; DATE is `YYYY-MM-DD`, `today` or `yesterday`). One event a line, or with `--json` one object a line with ISO times, your response, the organizer, attendees, `recurring_event_id` and `event_type`; the shape is documented at the top of `src/events.rs`. It doesn't read or write the cache. Dossier's `/stress` and `/grade` use it.
 
 ## Omarchy shell
 

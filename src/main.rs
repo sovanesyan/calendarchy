@@ -5,6 +5,7 @@ mod cache;
 mod config;
 mod conversion;
 mod error;
+mod events;
 mod google;
 mod headless;
 mod icloud;
@@ -42,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("calendarchy {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("events") {
+        std::process::exit(events::print(&args[2..]).await);
     }
 
     let date_arg = |name: &str| arg_value(name).and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());
