@@ -82,6 +82,14 @@ UI ← EventCache.get(date) ←────────────────�
 - Hot reload doesn't always pick up a changed service; `omarchy-restart-shell` does. Logs: `journalctl --user | grep calendarchy`
 - The agenda JSON (shape documented at the top of `agenda.rs`) is the contract between the Rust side and the plugins: keep `agenda.rs`, the QML and `Layout.js` in step
 
+## Committing
+
+A local, personal project: commit without asking first, and push where there's a remote. The
+history is the undo: if something isn't right, it's gone back to from there. Uncommitted work
+found here is an earlier session's: look at it, then commit it as its own commit.
+`~/.local/bin/calendarchy` links to `target/release`, so a release build goes live; copying
+the plugins (`shell/install.sh`) is still its own step.
+
 ## Releases
 
 Personal use, Linux only (Omarchy / Hyprland): build from source with `cargo build --release`.
