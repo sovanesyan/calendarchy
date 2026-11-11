@@ -38,10 +38,24 @@ use term_bg::TermBg;
 use update::{Effect, Msg};
 use utils::open_url;
 
+const USAGE: &str = "\
+usage: calendarchy [--date YYYY-MM-DD]          the calendar (a TUI: needs a terminal)
+       calendarchy events [--since DATE] [--until DATE] [--json]
+                                                the Google calendar's events, fetched live (for agents)
+       calendarchy --agenda [--from YYYY-MM-DD] [--days N]
+                                                days as JSON from the cache (no network)
+       calendarchy --refresh [--month YYYY-MM]  fetch into the cache, no TUI
+       calendarchy --event accept|decline|delete <id>
+       calendarchy --version | --help";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("calendarchy {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if std::env::args().nth(1).is_some_and(|a| a == "--help" || a == "-h" || a == "help") {
+        println!("{USAGE}");
         return Ok(());
     }
 
@@ -71,6 +85,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
         return Ok(());
+    }
+
+    // The TUI needs a terminal: without one (an agent, a scheduled job) say how
+    // to get the same thing headless rather than fail with ENXIO
+    {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            eprintln!("calendarchy: no terminal, so no TUI; for events use `calendarchy events --json`\n{USAGE}");
+            std::process::exit(2);
+        }
     }
 
     let mut app = App::new();

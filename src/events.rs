@@ -28,11 +28,17 @@ use crate::sources::{self, GoogleSession};
 
 const SOURCE: &str = "calendarchy";
 
+const USAGE: &str = "usage: calendarchy events [--since DATE] [--until DATE] [--json]";
+
 pub async fn print(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return 0;
+    }
     let (since, until, json) = match parse(args, Local::now().date_naive()) {
         Ok(parsed) => parsed,
         Err(e) => {
-            eprintln!("calendarchy events: {e}\nusage: calendarchy events [--since DATE] [--until DATE] [--json]");
+            eprintln!("calendarchy events: {e}\n{USAGE}");
             return 2;
         }
     };

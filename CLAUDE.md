@@ -25,7 +25,7 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 
 ### Module Structure
 
-- **`main.rs`** - CLI dispatch (`--version`, `events`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open") and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
+- **`main.rs`** - CLI dispatch (`--version`, `--help`, `events`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open"; with no terminal it prints the usage and exits 2 instead of starting the TUI) and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
 - **`app.rs`** - `App` state and navigation
 - **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
 - **`keymap.rs`** - Bindings table: keys → `Action` per mode (Bulgarian phonetic keys normalised); also generates the help overlay and applies `"keys"` overrides from config
