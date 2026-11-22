@@ -275,14 +275,13 @@ function timeline(m, rows, sel, isToday) {
     var cls = "blk " + r.source + (srcs.length > 1 ? " both" : "") + (past && i !== cn.current ? " past" : "") +
       (i === cn.current ? " current" : "") + (i === cn.next ? " next" : "") + (e.accepted ? "" : " unaccepted") + (e.free ? " freeev" : "") +
       (hgt < 34 ? " short" : "")
-    var when = L.hm(e.start, twelve()) + (len ? " · " + len : "") + (kind ? " · " + kind : "")
+    // the block's place and size say when; the time is only for a screen reader
+    var when = L.timeRange(e, twelve()) + (len ? " · " + len : "") + (kind ? " · " + kind : "")
     area.appendChild(h("button", {
       "class": cls, type: "button",
       style: "top:" + top + "px;height:" + hgt + "px;left:calc(" + (c.col / c.cols * 100) + "% + 2px);width:calc(" + (100 / c.cols) + "% - 4px)",
       "aria-label": e.title + ", " + when, onclick: function() { details(e, sel, r.source, r.also) }
-    }, hgt < 34
-      ? [h("span", { "class": "t" }, [dots(srcs), e.title || "(no title)"]), h("span", { "class": "m" }, " " + L.hm(e.start, twelve()))]
-      : [h("span", { "class": "t" }, [dots(srcs), e.title || "(no title)"]), h("span", { "class": "m" }, when)]))
+    }, h("span", { "class": "t" }, [dots(srcs), e.title || "(no title)"])))
   })
   tl.appendChild(area)
 
