@@ -35,7 +35,7 @@
      line, a "next" tag, faded past, dashed not-accepted. Green is for now and Join */
   :root{--work:#2f6fdc;--personal:#d4731f}
   :root[data-scheme=dark]{--work:#6f9cf2;--personal:#f0a058}
-  body{min-height:100vh;min-height:100dvh;padding-bottom:var(--safe-b)}
+  body{timeline-scope:--days;min-height:100vh;min-height:100dvh;padding-bottom:var(--safe-b)}
   @media (hover:hover){a:hover{text-decoration:underline}}
 
   /* the sticky bar: the day, Today, refetch, and the week strip */
@@ -62,16 +62,28 @@
   .wd i span{display:block;height:100%;background:var(--muted)}
   .wd i span.heavy{background:var(--warn)}
   .wd.today b{color:var(--accent)}
-  .wd.sel{background:var(--accent);color:var(--on-accent)}
-  .wd.sel b,.wd.sel small{color:var(--on-accent)}
-  .wd.sel i{background:color-mix(in srgb,var(--on-accent) 25%,transparent)}
-  .wd.sel i span{background:var(--on-accent)}
+  /* the selected day is a pill over the strip that the days' scroll moves (app.js header):
+     driven by the scroll itself (.days's scroll timeline), so it keeps up 1:1. Its --i is the
+     day it rests on, --back/--fwd how many days a screen's scroll each way moves it */
+  .week{position:relative;overflow:hidden}
+  .selpill{position:absolute;top:0;bottom:0;left:calc(var(--i) * ((100% - 12px) / 7 + 2px));width:calc((100% - 12px) / 7);
+    border-radius:10px;background:var(--accent);overflow:hidden;pointer-events:none;
+    animation:pill-go linear both;animation-timeline:--days}
+  .selpill .in{position:absolute;top:0;bottom:0;left:calc(var(--i) * -1 * (100% + 2px));width:calc(700% + 12px);
+    display:grid;grid-template-columns:repeat(7,1fr);gap:2px;animation:pill-back linear both;animation-timeline:--days}
+  .selpill .wd,.selpill .wd b,.selpill .wd small{color:var(--on-accent)}
+  .selpill .wd i{background:color-mix(in srgb,var(--on-accent) 25%,transparent)}
+  .selpill .wd i span{background:var(--on-accent)}
+  @keyframes pill-go{
+    from{transform:translateX(calc(var(--back,1) * -1 * (100% + 2px)))} 50%{transform:none} to{transform:translateX(calc(var(--fwd,1) * (100% + 2px)))}}
+  @keyframes pill-back{
+    from{transform:translateX(calc(var(--back,1) * ((100% - 12px) / 7 + 2px)))} 50%{transform:none} to{transform:translateX(calc(var(--fwd,1) * -1 * ((100% - 12px) / 7 + 2px)))}}
   .wd.weekend small{color:var(--dim)}
 
   /* the day before, the day and the day after, a screen each, in the browser's own sideways
      scroller (app.js go/settled): it follows the finger at the screen's rate and snaps a day at
      a time. Its height is set to the day's (centre), and vertical scrolling stays the page's */
-  .days{display:flex;align-items:flex-start;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
+  .days{scroll-timeline:--days x;display:flex;align-items:flex-start;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
     overscroll-behavior-x:contain;scrollbar-width:none}
   .days::-webkit-scrollbar{display:none}
   .pane{flex:0 0 100%;min-width:0;scroll-snap-align:start;scroll-snap-stop:always}
@@ -194,6 +206,6 @@
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=13"></script>
+<script src="/app.js?v=14"></script>
 </body>
 </html>

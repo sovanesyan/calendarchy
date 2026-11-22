@@ -180,12 +180,14 @@ function go(date) {
     side.textContent = ""
     day(side, date, true)
     panes[1 + dir] = date
+    pillSpan()
   }
   going = date
   days.scrollTo({ left: days.clientWidth * (1 + dir), behavior: "smooth" })
 }
 
 function scrolled() {
+  pillFollow()
   clearTimeout(settleTimer)
   settleTimer = setTimeout(settled, 120)
 }
@@ -210,6 +212,7 @@ function centre() {
   var days = $("days"), head = document.querySelector("header")
   days.style.height = Math.max($("main").offsetHeight, window.innerHeight - (head ? head.offsetHeight : 0)) + "px"
   days.scrollLeft = days.clientWidth
+  pillFollow()
 }
 
 // ------------------------------------------------------------------ drawing
@@ -222,6 +225,7 @@ function render() {
   var main = $("main"), before = $("before"), after = $("after")
   main.textContent = before.textContent = after.textContent = ""
   panes = [L.addDays(S.selected, -1), S.selected, L.addDays(S.selected, 1)]
+  pillSpan()
   if (!S.agenda) {
     main.appendChild(S.error ? h("div", { "class": "err" }, "Couldn't load the calendar: " + S.error) : h("div", { "class": "empty" }, "Loading…"))
     return centre()
@@ -249,15 +253,46 @@ function header() {
   $("refresh").classList.toggle("spin", S.refreshing)
 
   var first = L.weekStart(sel, sundayFirst()), letters = L.weekdayLetters(sundayFirst())
-  var week = $("week")
+  var week = $("week"), copies = []
   week.textContent = ""
   for (var i = 0; i < 7; i++) {
     var date = L.addDays(first, i)
+    var face = function() { return [h("small", null, letters[i]), h("b", null, String(Number(date.slice(8)))), heavyBar(date)] }
     week.appendChild(h("button", {
       "class": "wd" + (date === S.today ? " today" : "") + (date === sel ? " sel" : "") + (L.isWeekend(date) ? " weekend" : ""),
       type: "button", "aria-label": L.dayTitle(date), "aria-pressed": String(date === sel), onclick: go.bind(null, date)
-    }, [h("small", null, letters[i]), h("b", null, String(Number(date.slice(8)))), heavyBar(date)]))
+    }, face()))
+    copies.push(h("span", { "class": "wd" }, face()))
   }
+  // the selected day's pill, over the strip: it moves with the days as they scroll (one day's
+  // width for a day's scroll), and the copy of the strip inside it, in the pill's colours,
+  // moves back the same, so the days under it read inverted wherever it is
+  var at = (L.toDate(sel).getDay() - (sundayFirst() ? 0 : 1) + 7) % 7
+  week.appendChild(h("div", { "class": "selpill", id: "selpill", "aria-hidden": "true", style: "--i:" + at },
+    h("div", { "class": "in" }, copies)))
+  pillSpan()
+}
+
+// How many days the pill goes for a whole screen's scroll each way: one, or the distance to
+// a tapped day drawn in a side pane (go)
+function pillSpan() {
+  var pill = $("selpill")
+  if (!pill || panes.length !== 3) return
+  pill.style.setProperty("--back", String(dayGap(panes[0], panes[1])))
+  pill.style.setProperty("--fwd", String(dayGap(panes[1], panes[2])))
+}
+function dayGap(a, b) { return Math.round((L.toDate(b).getTime() - L.toDate(a).getTime()) / 86400000) }
+
+// Without scroll-driven animations (an older Safari) the pill follows from the scroll events
+var CSS_PILL = !!(window.CSS && CSS.supports && CSS.supports("animation-timeline: --days"))
+function pillFollow() {
+  var pill = $("selpill"), days = $("days")
+  if (CSS_PILL || !pill) return
+  var w = days.clientWidth || 1, p = days.scrollLeft / w - 1
+  var n = p * Number(pill.style.getPropertyValue(p < 0 ? "--back" : "--fwd") || 1)
+  pill.style.transform = n ? "translateX(calc(" + n + " * (100% + 2px)))" : ""
+  var inner = /** @type {HTMLElement} */ (pill.firstChild)
+  inner.style.transform = n ? "translateX(calc(" + (-n) + " * ((100% - 12px) / 7 + 2px)))" : ""
 }
 
 function heavyBar(date) {

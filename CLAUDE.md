@@ -109,7 +109,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   swipe runs at the screen's rate with native momentum, not as a JS transform; at rest on a
   neighbour it becomes the day (`settled`), drawn again in the middle, at the same time of day.
   Taps and keys draw the target in the side pane and smooth-scroll to it (`go`); a redraw waits
-  while the days move; none with Reduce Motion). The page asks for the week before too, for the drag back from a Monday. Under it: today's Now/Next card, all-day chips,
+  while the days move; none with Reduce Motion). The week strip's selected day is a pill
+  (`.selpill`) the days' scroll moves 1:1, through a CSS scroll timeline (`--days`; scroll
+  events where there's none), with an inverted copy of the strip inside it. The page asks for the week before too, for the drag back from a Monday. Under it: today's Now/Next card, all-day chips,
   and the day as a timeline at 72 px an hour (a half hour is a tap target): blocks by their
   times, side by side where they overlap, free time left empty with a grey label, a line at now,
   a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once
