@@ -104,7 +104,8 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
 - One view, the day (no month or Coming up on the phone, on purpose). A sticky bar holds the
   day, Today (always scrolls back to now), refetch and the week strip (‹ › or a swipe on it moves
-  a week; a swipe on the timeline moves a day). Under it: today's Now/Next card, all-day chips,
+  a week; a swipe on the timeline moves a day: the day follows the finger and the next slides in
+  from the side time goes, `slideTo`; taps get a short slide; none with Reduce Motion). Under it: today's Now/Next card, all-day chips,
   and the day as a timeline at 72 px an hour (a half hour is a tap target): blocks by their
   times, side by side where they overlap, free time left empty with a grey label, a line at now,
   a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once

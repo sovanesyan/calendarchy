@@ -68,7 +68,10 @@
   .wd.sel i span{background:var(--on-accent)}
   .wd.weekend small{color:var(--dim)}
 
-  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l)}
+  /* the day slides sideways between days (app.js slideTo): vertical scrolling stays the
+     browser's, and nothing that slides out widens the page */
+  body{overflow-x:clip}
+  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l);touch-action:pan-y;will-change:transform}
 
   .toast{position:fixed;z-index:20;left:50%;bottom:calc(var(--safe-b) + 14px);transform:translate(-50%,20px);opacity:0;pointer-events:none;
     max-width:calc(100% - 2rem);padding:.45rem .9rem;border-radius:999px;background:var(--fg);color:var(--bg);font-size:12.5px;
@@ -180,6 +183,6 @@
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=7"></script>
+<script src="/app.js?v=8"></script>
 </body>
 </html>
