@@ -200,36 +200,78 @@ function day(main) {
   var next = S.agenda.next
   if (isToday && next) main.appendChild(nextCard(next))
 
-  var dayData = L.dayOf(S.byDate, sel)
-  var gaps = L.gaps(dayData, sel, S.today, S.now, workingHours())
-  var clash = L.overlapping(dayData)
-  var list = sources()
-  var panels = h("div", { "class": "panels", style: "--cols:" + list.length })
-  list.forEach(function(src) {
-    var events = dayData[src.key] || []
-    var cn = L.currentNext(events, isToday, S.now)
-    var panel = h("section", { "class": "panel " + src.key }, h("div", { "class": "sect" }, src.label))
-    if (!events.length) {
-      var nu = L.nextUp(S.byDate, src.key, sel, S.today, twelve())
-      panel.appendChild(h("div", { "class": "none" }, ["Nothing scheduled", nu ? h("small", null, "next " + nu) : null]))
+  var m = merge(L.dayOf(S.byDate, sel))
+  // gaps and overlaps from the day with each duplicate once, so a copy never "overlaps" itself
+  var g = L.gaps(m.day, sel, S.today, S.now, workingHours())
+  var gaps = g.google.concat(g.icloud).sort(function(a, b) { return a.from - b.from })
+  var clash = L.overlapping(m.day)
+  var events = m.rows.map(function(r) { return r.e })
+  var cn = L.currentNext(events, isToday, S.now)
+  var list = h("section", { "class": "list" })
+  if (!events.length) {
+    var nu = nextUp(sel)
+    list.appendChild(h("div", { "class": "none" }, ["Nothing scheduled", nu ? h("small", null, "next " + nu) : null]))
+  }
+  L.panelRows(events, gaps).forEach(function(row) {
+    if (row.kind === "gap") {
+      var gp = row.gap
+      list.appendChild(h("div", { "class": "gap" + (gp.now ? " now" : "") },
+        (gp.now ? "free now · " : "free " + L.hm(gp.from, twelve()) + " · ") + L.formatDuration(gp.minutes)))
+      return
     }
-    L.panelRows(events, gaps[src.key]).forEach(function(row) {
-      if (row.kind === "gap") {
-        var g = row.gap
-        panel.appendChild(h("div", { "class": "gap" + (g.now ? " now" : "") },
-          (g.now ? "free now · " : "free " + L.hm(g.from, twelve()) + " · ") + L.formatDuration(g.minutes)))
-        return
-      }
-      var e = row.event, i = row.index
-      var past = !e.allDay && (sel < S.today || (isToday && endOf(e) <= S.now))
-      panel.appendChild(eventRow(e, sel, src.key, {
-        past: past && i !== cn.current, current: i === cn.current, next: i === cn.next,
-        clash: !!clash[e.id + "@" + e.start]
-      }))
-    })
-    panels.appendChild(panel)
+    var r = m.rows[row.index], e = r.e, i = row.index
+    var past = !e.allDay && (sel < S.today || (isToday && endOf(e) <= S.now))
+    list.appendChild(eventRow(r, sel, {
+      past: past && i !== cn.current, current: i === cn.current, next: i === cn.next,
+      clash: !!clash[e.id + "@" + e.start]
+    }))
   })
-  main.appendChild(panels)
+  main.appendChild(list)
+}
+
+// ---- One list from both calendars
+
+// A title as compared for duplicates: case, punctuation and emoji don't count
+function norm(t) { return (t || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim() }
+
+// The same event in both calendars (an invite copied to the other, a shared calendar):
+// same start and end (or both all day), and the same title, or one inside the other
+function sameEvent(a, b) {
+  if (a.allDay !== b.allDay || a.spansDays !== b.spansDays) return false
+  if (!a.allDay && (a.start !== b.start || endOf(a) !== endOf(b))) return false
+  var x = norm(a.title), y = norm(b.title)
+  if (!x || !y) return false
+  return x === y || (Math.min(x.length, y.length) >= 4 && (x.indexOf(y) >= 0 || y.indexOf(x) >= 0))
+}
+
+// Both calendars as one list: rows {e, source, also: [{e, source}]}, all day first, then by
+// start (Work first on a tie); a Personal event that duplicates a Work one goes in its `also`
+// (the Work copy leads: it has the invite, the people and the link). `day` is the day with
+// each duplicate once, for gaps and overlaps
+function merge(dayData) {
+  var rows = (dayData.google || []).map(function(e) { return { e: e, source: "google", also: [] } })
+  var kept = []
+  ;(dayData.icloud || []).forEach(function(e) {
+    var twin = rows.filter(function(r) { return r.source === "google" && !r.also.length && sameEvent(r.e, e) })[0]
+    if (twin) twin.also.push({ e: e, source: "icloud" })
+    else { rows.push({ e: e, source: "icloud", also: [] }); kept.push(e) }
+  })
+  var key = function(r) { return r.e.allDay ? -1 : r.e.start }
+  rows.forEach(function(r, n) { r.n = n })
+  rows.sort(function(a, b) { return key(a) - key(b) || a.n - b.n })
+  return { rows: rows, day: { date: dayData.date, google: dayData.google || [], icloud: kept } }
+}
+
+// "tmrw 09:00 Title": the first accepted timed event after `date` in either calendar, 14 days ahead
+function nextUp(date) {
+  for (var d = 1; d <= 14; d++) {
+    var day = L.addDays(date, d), m = merge(L.dayOf(S.byDate, day))
+    for (var i = 0; i < m.rows.length; i++) {
+      var e = m.rows[i].e
+      if (e.accepted && !e.allDay) return L.smartWhen(day, e.start, S.today, twelve()) + " " + e.title
+    }
+  }
+  return ""
 }
 
 function endOf(e) { return e.end === null || e.end === undefined ? e.start + 60 : e.end }
@@ -257,14 +299,17 @@ function nextCard(next) {
 
 function sourceOf(e) { return e.id.indexOf("icloud:") === 0 ? "icloud" : "google" }
 
-function eventRow(e, date, source, o) {
-  var cls = "ev" + (e.allDay ? " allday" : "") + (o.past ? " past" : "") + (o.current ? " current" : "") + (o.next ? " next" : "") +
+function eventRow(r, date, o) {
+  var e = r.e, both = r.also.length > 0
+  var cls = "ev " + r.source + (both ? " both" : "") + (e.allDay ? " allday" : "") + (o.past ? " past" : "") + (o.current ? " current" : "") + (o.next ? " next" : "") +
     (!e.accepted ? " unaccepted" : "") + (e.free ? " free" : "")
-  var kind = L.meetingKind(e.meetingUrl)
+  var url = e.meetingUrl || r.also.map(function(a) { return a.e.meetingUrl }).filter(Boolean)[0] || null
+  var kind = L.meetingKind(url)
   var len = L.formatLength(e)
-  return h("button", { "class": cls, type: "button", onclick: function() { details(e, date, source) } }, [
+  var srcs = [r.source].concat(r.also.map(function(a) { return a.source }))
+  return h("button", { "class": cls, type: "button", onclick: function() { details(e, date, r.source, r.also) } }, [
     h("div", { "class": "tm" }, [
-      o.when ? h("b", null, o.when) : null,
+      h("span", { "class": "srcs", title: srcs.map(label).join(" · ") }, srcs.map(function(k) { return h("i", { "class": k }) })),
       h("span", { "class": "at" }, e.allDay ? (e.spansDays ? "All day · several days" : "All day") : L.hm(e.start, twelve()) + (len ? " · " + len : "")),
       kind ? h("span", { "class": "kind" }, kind) : null,
       o.clash ? h("span", { "class": "clash" }, "overlaps") : null
@@ -275,7 +320,8 @@ function eventRow(e, date, source, o) {
 
 // ------------------------------------------------------------------ the event
 
-function details(e, date, source) {
+function details(e, date, source, also) {
+  also = also || []
   var dlg = h("dialog", { "class": "kit-sheet" })
   var closed = false
   function close() {
@@ -286,7 +332,10 @@ function details(e, date, source) {
   }
   var len = L.formatLength(e)
   var when = L.dayTitle(date) + " · " + L.timeRange(e, twelve()) + (len ? " (" + len + ")" : "")
-  var cal = e.calendarName && e.calendarName !== label(source) ? label(source) + " · " + e.calendarName : label(source)
+  var calOf = function(ev, src) { return ev.calendarName && ev.calendarName !== label(src) ? label(src) + " · " + ev.calendarName : label(src) }
+  var cal = [calOf(e, source)].concat(also.map(function(a) { return calOf(a.e, a.source) })).join(" + ")
+  // a duplicate's own link when the leading copy has none
+  if (!e.joinUrl) also.forEach(function(a) { if (!e.joinUrl && a.e.joinUrl) e = Object.assign({}, e, { joinUrl: a.e.joinUrl, meetingUrl: a.e.meetingUrl }) })
 
   var acts = h("div", { "class": "acts" })
   if (e.joinUrl) acts.appendChild(h("a", { "class": "join", href: e.joinUrl, onclick: function() { Kit.tick() } }, "Join " + (L.meetingKind(e.meetingUrl) === "link" ? "" : L.meetingKind(e.meetingUrl))))
@@ -301,7 +350,8 @@ function details(e, date, source) {
     h("div", { "class": "kit-sheet-grip", "aria-hidden": "true" }),
     h("div", { "class": "dt" }, [
       h("div", { "class": "kit-sheet-title" }, e.title || "(no title)"),
-      h("div", { "class": "when" }, [h("span", { "class": "src" + (source === "icloud" ? " p" : "") }), when, " · ", cal]),
+      h("div", { "class": "when" }, [h("span", { "class": "srcs" }, [source].concat(also.map(function(a) { return a.source })).map(function(k) { return h("i", { "class": k }) })), when, " · ", cal]),
+      also.length ? h("div", { "class": "same" }, "In both calendars: shown once") : null,
       !e.accepted ? h("div", { "class": "note" }, "Not accepted (declined, maybe or no reply yet)") : null,
       e.free ? h("div", { "class": "note" }, "Marked free: it doesn't block time") : null,
       acts.childNodes.length ? acts : null,

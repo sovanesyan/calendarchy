@@ -20,7 +20,8 @@
   kit (kit.css, theme.js from ~/Work/rb/ghostwheel/kit). Plain JS, no network but
   our own /api.
 
-  One view, the day: the week strip, now/next, Work | Personal with free gaps.
+  One view, the day: the week strip, now/next, then Work and Personal as one
+  list with free gaps (an event in both calendars once, a dot for each).
   Tap an event for its details, Join, Accept or Decline. Swipe sideways for the
   next day; pull down to refetch from Google and iCloud.
 -->
@@ -69,15 +70,14 @@
   a.join:hover{text-decoration:none}
 
   /* Work | Personal */
-  .panels{display:grid;grid-template-columns:repeat(var(--cols,2),minmax(0,1fr));gap:0;margin-top:.3rem}
-  .panel{min-width:0}
-  .panel + .panel{border-left:1px solid var(--line)}
-  .panel .sect{padding:.7rem .8rem .3rem}
-  .panel .sect::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--work);align-self:center}
-  .panel.icloud .sect::before{background:var(--personal)}
+  .list{margin-top:.3rem}
   .ev{display:block;width:100%;text-align:left;appearance:none;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;
     padding:.4rem .7rem .45rem .65rem;border-left:3px solid color-mix(in srgb,var(--work) 70%,transparent)}
-  .icloud .ev{border-left-color:color-mix(in srgb,var(--personal) 70%,transparent)}
+  .ev.icloud{border-left-color:color-mix(in srgb,var(--personal) 70%,transparent)}
+  .ev.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1}
+  .srcs{display:inline-flex;gap:3px;align-self:center}
+  .srcs i{width:7px;height:7px;border-radius:50%;background:var(--work)}
+  .srcs i.icloud{background:var(--personal)}
   .ev .tm{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;display:flex;flex-wrap:wrap;column-gap:.4rem;align-items:baseline}
   .ev .tm .at{white-space:nowrap}
   .ev .tm .kind{margin-left:auto;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -95,7 +95,6 @@
   .gap.now{color:var(--good);font-weight:600;font-style:normal}
   .none{padding:.4rem .8rem;color:var(--muted);font-size:12.5px}
   .none small{display:block;margin-top:.15rem;color:var(--dim);font-family:var(--sans);font-size:12.5px}
-  @media (max-width:330px){.panels{--cols:1}.panel + .panel{border-left:0;border-top:1px solid var(--line)}}
 
   .msg{margin:.6rem 1rem;padding:.5rem .7rem;border-radius:9px;font-size:12.5px;background:var(--chip);color:var(--dim)}
   .msg.bad{color:var(--urgent);background:color-mix(in srgb,var(--urgent) 10%,transparent)}
@@ -104,8 +103,8 @@
   .kit-sheet-box{max-height:85vh;max-height:85dvh;overflow-y:auto}
   .dt{padding:0 .2rem}
   .dt .when{color:var(--dim);font-size:12.5px;margin:.1rem 0 .5rem}
-  .dt .when .src{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--work);margin-right:.35rem}
-  .dt .when .src.p{background:var(--personal)}
+  .dt .when .srcs{margin-right:.4rem;vertical-align:1px}
+  .dt .same{color:var(--muted);font-size:12px;margin:-.3rem 0 .5rem}
   .dt .acts{display:flex;flex-wrap:wrap;gap:.4rem;margin:.2rem 0 .6rem}
   .dt .acts .btn,.dt .acts .join{height:40px;padding:0 .9rem;font-size:13.5px}
   .dt .acts .btn.ok{color:var(--good)}
@@ -137,6 +136,6 @@
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=2"></script>
+<script src="/app.js?v=3"></script>
 </body>
 </html>

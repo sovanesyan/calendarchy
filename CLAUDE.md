@@ -103,7 +103,10 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   `~/Work/rb/ghostwheel/kit/sync.sh`: change them there, never here
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
 - One view, the day (no month or Coming up on the phone, on purpose): the week strip, now/next,
-  Work | Personal with free gaps. Swipe for the next day, pull down to refetch. Alerts on the
+  then Work and Personal as one list with free gaps. An event in both calendars shows once
+  (`merge`/`sameEvent` in `web/app.js`: same start and end, or both all day, and the same title
+  ignoring case, punctuation and emoji, or one inside the other); the Work copy leads, so its
+  Accept/Decline and link are the ones offered. Swipe for the next day, pull down to refetch. Alerts on the
   phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
 
 ## Committing
