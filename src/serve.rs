@@ -18,7 +18,7 @@
 //! Origin and `X-Calendarchy: 1`, so no other site can act through a browser on the tailnet.
 //!
 //! ```text
-//! GET  /  /app.js  /theme.js  /sw.js  /icon.svg  /apple-touch-icon.png  /manifest.webmanifest
+//! GET  /  /app.js  /theme.js  /sw.js  /icon.svg  /apple-touch-icon.png  /icon-192.png  /icon-512.png  /manifest.webmanifest
 //! GET  /layout.js                          shell/window/Layout.js, the window's display rules
 //! GET  /api/agenda?from=YYYY-MM-DD&days=N  agenda::build from the disk cache (--agenda's JSON), with an
 //!                                          ETag that ignores `now`: If-None-Match gets a 304 until it changes
@@ -48,6 +48,8 @@ const FILES: &server::Files = &[
     ("/sw.js", "sw.js", "text/javascript; charset=utf-8"),
     ("/icon.svg", "icon.svg", "image/svg+xml"),
     ("/apple-touch-icon.png", "apple-touch-icon.png", "image/png"),
+    ("/icon-192.png", "icon-192.png", "image/png"),
+    ("/icon-512.png", "icon-512.png", "image/png"),
     ("/manifest.webmanifest", "manifest.webmanifest", "application/manifest+json"),
 ];
 
@@ -357,7 +359,7 @@ mod tests {
     #[test]
     fn the_page_and_its_files_are_served() {
         let w = web();
-        for path in ["/", "/app.js", "/theme.js", "/sw.js", "/manifest.webmanifest", "/icon.svg", "/apple-touch-icon.png"] {
+        for path in ["/", "/app.js", "/theme.js", "/sw.js", "/manifest.webmanifest", "/icon.svg", "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"] {
             assert_eq!(handle(&w, &req("GET", path, &[])).status, 200, "{path}");
         }
         let page = String::from_utf8(handle(&w, &req("GET", "/", &[])).body).unwrap();

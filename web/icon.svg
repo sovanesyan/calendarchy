@@ -1,13 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <rect x="3" y="6" width="26" height="23" rx="3" fill="#24283b" stroke="#3b3d57" stroke-width="1"/>
-  <rect x="3" y="6" width="26" height="7" rx="3" fill="#7aa2f7"/>
-  <rect x="3" y="10" width="26" height="3" fill="#7aa2f7"/>
-  <rect x="9.5" y="3" width="2" height="6" rx="1" fill="#bb9af7"/>
-  <rect x="20.5" y="3" width="2" height="6" rx="1" fill="#bb9af7"/>
-  <rect x="7" y="16" width="4" height="3" rx="1" fill="#3b3d57"/>
-  <rect x="14" y="16" width="4" height="3" rx="1" fill="#bb9af7"/>
-  <rect x="21" y="16" width="4" height="3" rx="1" fill="#3b3d57"/>
-  <rect x="7" y="22" width="4" height="3" rx="1" fill="#7aa2f7"/>
-  <rect x="14" y="22" width="4" height="3" rx="1" fill="#3b3d57"/>
-  <rect x="21" y="22" width="4" height="3" rx="1" fill="#3b3d57"/>
+<!-- Calendarchy: a slice of the day as the phone page draws it: Work blue, Personal orange, the now line. Full bleed: iOS rounds the corners -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+  <defs>
+    <clipPath id="a"><rect x="32" y="36" width="60" height="76" rx="10"/></clipPath>
+    <clipPath id="b"><rect x="32" y="118" width="60" height="28" rx="10"/></clipPath>
+    <clipPath id="c"><rect x="98" y="58" width="52" height="88" rx="10"/></clipPath>
+  </defs>
+  <rect width="180" height="180" fill="#17181d"/>
+  <path d="M28 36H154M28 72H154M28 108H154M28 144H154" stroke="#272a33" stroke-width="2"/>
+  <!-- Work: a long block, then a short one -->
+  <g clip-path="url(#a)"><rect x="32" y="36" width="60" height="76" fill="#3a5287"/><rect x="32" y="36" width="9" height="76" fill="#78a3f5"/></g>
+  <rect x="50" y="47" width="32" height="7" rx="3.5" fill="#eef2fb"/>
+  <rect x="50" y="59" width="20" height="5" rx="2.5" fill="#eef2fb" opacity=".5"/>
+  <g clip-path="url(#b)"><rect x="32" y="118" width="60" height="28" fill="#3a5287"/><rect x="32" y="118" width="9" height="28" fill="#78a3f5"/></g>
+  <rect x="50" y="128.5" width="26" height="7" rx="3.5" fill="#eef2fb"/>
+  <!-- Personal: beside them -->
+  <g clip-path="url(#c)"><rect x="98" y="58" width="52" height="88" fill="#7a5233"/><rect x="98" y="58" width="9" height="88" fill="#f4a65e"/></g>
+  <rect x="115" y="69" width="26" height="7" rx="3.5" fill="#fbf1e7"/>
+  <rect x="115" y="81" width="16" height="5" rx="2.5" fill="#fbf1e7" opacity=".5"/>
+  <!-- now -->
+  <path d="M30 100H154" stroke="#f0566a" stroke-width="4.5" stroke-linecap="round"/>
+  <circle cx="29" cy="100" r="7.5" fill="#f0566a"/>
 </svg>
