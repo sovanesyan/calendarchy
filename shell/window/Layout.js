@@ -640,10 +640,41 @@ function pressedKey(key, text, modifiers) {
   return ctrl ? "ctrl+" + base : base
 }
 
+// A browser KeyboardEvent (its key, shiftKey, ctrlKey) as a canonical spec,
+// pressedKey's twin for the phone page: Ctrl is kept, Shift is in the
+// character, Bulgarian phonetic letters become Latin. Null for a key with
+// nothing to match (a bare modifier, a dead key)
+var DOM_KEYS = {
+  Enter: "enter", Escape: "esc", Esc: "esc", Tab: "tab", Backspace: "backspace",
+  ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down",
+  Left: "left", Right: "right", Up: "up", Down: "down",
+  Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown", " ": "space", Spacebar: "space"
+}
+function domKey(key, shift, ctrl) {
+  if (typeof key !== "string") return null
+  var base = DOM_KEYS.hasOwnProperty(key) ? DOM_KEYS[key] : null
+  if (base === "tab" && shift) base = "shift+tab"
+  if (!base && /^F([1-9]|1[0-2])$/.test(key)) base = key.toLowerCase()
+  if (!base) {
+    if (Array.from(key).length !== 1) return null
+    base = latin(ctrl ? (shift ? key.toUpperCase() : key.toLowerCase()) : key)
+  }
+  return ctrl ? "ctrl+" + base : base
+}
+
+// The phone page's own keys on top of the TUI's, as WINDOW_KEYS: Enter joins
+// from an event (the page has nothing to close on Esc from the days)
+var PAGE_KEYS = { event: { join: ["enter"] } }
+
 // The bindings the window uses, per mode: the agenda's `keys` (or the
 // defaults, when it has none) plus WINDOW_KEYS where their key is free.
 // Specs come out canonical; ones that can't be read are dropped.
-function windowKeys(keys) {
+function windowKeys(keys) { return keyTables(keys, WINDOW_KEYS) }
+
+// The phone page's: the same with PAGE_KEYS
+function pageKeys(keys) { return keyTables(keys, PAGE_KEYS) }
+
+function keyTables(keys, extras) {
   var out = {}
   var modes = ["day", "event"]
   for (var m = 0; m < modes.length; m++) {
@@ -658,7 +689,7 @@ function windowKeys(keys) {
       }
       if (specs.length) table[action] = specs
     }
-    var extra = WINDOW_KEYS[mode]
+    var extra = extras[mode] || {}
     for (var a in extra)
       for (var j = 0; j < extra[a].length; j++)
         if (!taken[extra[a][j]]) { taken[extra[a][j]] = true; (table[a] = table[a] || []).push(extra[a][j]) }
@@ -680,10 +711,12 @@ function keyIndex(tables) {
 }
 
 // What a pressed key does in `mode`: an action name, or null
-function actionFor(index, mode, key, text, modifiers) {
-  var k = pressedKey(key, text, modifiers)
+function actionFor(index, mode, key, text, modifiers) { return actionOf(index, mode, pressedKey(key, text, modifiers)) }
+
+// What a canonical spec (domKey's) does in `mode`: an action name, or null
+function actionOf(index, mode, spec) {
   var table = index[mode] || {}
-  return k !== null && table.hasOwnProperty(k) ? table[k] : null
+  return spec !== null && table.hasOwnProperty(spec) ? table[spec] : null
 }
 
 // Key::label: "l", "^d", "←", "Enter", "S-Tab", "Space", "F5"

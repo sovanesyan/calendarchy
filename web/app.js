@@ -31,7 +31,10 @@ var S = {
   /** @type {Record<string, boolean>} */ refreshed: {},
   seq: 0,
   /** @type {string|null} */ scrolledFor: null,
-  /** @type {Record<string, string>} */ etags: {}
+  /** @type {Record<string, string>} */ etags: {},
+  /** @type {any} */ open: null,    // the event whose details are open: {date, id, e, source, also, el, pop}
+  /** @type {{from: number, to: number}|null} */ range: null, // the hours the iPad's columns share
+  px: 72 // and how tall one is there
 }
 var toastTimer = 0
 
@@ -107,10 +110,13 @@ function load() {
 // Months the sync job doesn't keep fresh (it does this one and the next) are fetched once
 // when you look at them, as the window does
 function ensureMonth() {
-  var month = L.firstOfMonth(S.selected), thisMonth = L.firstOfMonth(S.today)
-  if (month === thisMonth || month === L.addMonths(thisMonth, 1) || S.refreshed[month]) return
-  S.refreshed[month] = true
-  refetch(month, true)
+  var thisMonth = L.firstOfMonth(S.today)
+  ;[S.selected, L.addDays(S.selected, N - 1)].forEach(function(date) {
+    var month = L.firstOfMonth(date)
+    if (month === thisMonth || month === L.addMonths(thisMonth, 1) || S.refreshed[month]) return
+    S.refreshed[month] = true
+    refetch(month, true)
+  })
 }
 
 // Fetch a month from Google and iCloud into the cache, then read it again
@@ -129,6 +135,11 @@ function refetch(month, quiet) {
   })
 }
 
+// ↻ (and r): a newer page first (then it reloads), as a pull to refresh does
+function refreshNow() {
+  Kit.updateNow().then(function(reloading) { if (!reloading) refetch(L.firstOfMonth(S.selected), false) })
+}
+
 // A short message in a pill on the bottom edge
 function say(text, bad) {
   var t = $("toast")
@@ -141,14 +152,14 @@ function say(text, bad) {
 // ------------------------------------------------------------------ navigation
 
 function select(date) {
-  var week = rangeFrom(), month = L.firstOfMonth(S.selected)
+  var week = rangeFrom(), month = L.firstOfMonth(S.selected), last = L.firstOfMonth(L.addDays(S.selected, N - 1))
   // choosing the day you're on (Today, mostly) scrolls back to now or its first event
   if (date === S.selected) S.scrolledFor = null
   S.selected = date
   try { history.replaceState(null, "", "#" + (date === S.today ? "" : date)) } catch (_) {}
   render()
   if (rangeFrom() !== week) load()
-  if (L.firstOfMonth(date) !== month) ensureMonth()
+  if (L.firstOfMonth(date) !== month || L.firstOfMonth(L.addDays(date, N - 1)) !== last) ensureMonth()
 }
 
 function step(n) { go(L.addDays(S.selected, n)) }
@@ -164,6 +175,18 @@ function step(n) { go(L.addDays(S.selected, n)) }
 // so SPAN is the room for quick swipes one after another before it does (with one a side, a
 // second swipe that started while the first was settling hit the end and went nowhere)
 var SPAN = 3, MID = SPAN
+
+// The iPad (its Split View halves and Stage Manager too) is at least 560 px wide and 500 tall,
+// so not a phone, even one turned sideways, nor Slide Over. There the days are columns side by
+// side (html.wide), as many as fit at COLUMN px after the hours' gutter, 2 to 7: N of them,
+// the selected day the first. They're the same panes in the same scroller, each 1/N wide, so a
+// swipe still moves a day. On the phone N is 1 and nothing here changes a thing
+var WIDE = window.matchMedia("(min-width:560px) and (min-height:500px)")
+var GUTTER = 56, COLUMN = 220
+var N = 1
+function wide() { return N > 1 }
+function fit() { return WIDE.matches ? Math.max(2, Math.min(7, Math.floor((window.innerWidth - GUTTER) / COLUMN))) : 1 }
+function paneWidth() { return $("days").clientWidth / N }
 /** @type {string[]} */
 var panes = []          // the dates drawn in the panes, MID the selected one
 var touching = false    // a finger is on the days
@@ -180,7 +203,10 @@ function sides() { return /** @type {HTMLElement[]} */ (Array.prototype.slice.ca
 function go(date) {
   if (date === S.selected || !panes.length || !S.agenda || stillMotion()) { select(date); return }
   var k = panes.indexOf(date), days = $("days")
-  if (k < 0) {
+  if (wide()) {
+    // the columns: scrolled to where it's drawn, or drawn there at once when it's further
+    if (k < 0 || k > panes.length - N) { select(date); return }
+  } else if (k < 0) {
     k = MID + (date > S.selected ? 1 : -1)
     var pane = sides()[k]
     pane.textContent = ""
@@ -189,7 +215,7 @@ function go(date) {
     pillSpan()
   }
   going = date
-  days.scrollTo({ left: days.clientWidth * k, behavior: "smooth" })
+  days.scrollTo({ left: paneWidth() * k, behavior: "smooth" })
 }
 
 function scrolled() {
@@ -202,7 +228,7 @@ function settled() {
   clearTimeout(settleTimer)
   settleTimer = 0
   if (touching) return
-  var days = $("days"), w = days.clientWidth, i = Math.round(days.scrollLeft / w)
+  var days = $("days"), w = paneWidth(), i = Math.round(days.scrollLeft / w)
   if (Math.abs(days.scrollLeft - i * w) > 2) return // still on its way to a day
   var date = panes[i]
   if (i === MID || !date) { if (renderLater) render(); return }
@@ -217,18 +243,40 @@ function settled() {
 function centre() {
   var days = $("days"), head = document.querySelector("header")
   days.style.height = Math.max($("main").offsetHeight, window.innerHeight - (head ? head.offsetHeight : 0)) + "px"
-  days.scrollLeft = days.clientWidth * MID
+  days.scrollLeft = paneWidth() * MID
   pillFollow()
 }
+
+// The panes for the width: N in view and SPAN each side (on the phone index.html's seven, left
+// as they are). True when they changed
+function layoutPanes() {
+  var n = fit(), days = $("days"), want = n + 2 * SPAN, root = document.documentElement
+  if (n === N && days.children.length === want) return false
+  N = n
+  root.classList.toggle("wide", N > 1)
+  if (N > 1) root.style.setProperty("--n", String(N)); else root.style.removeProperty("--n")
+  if (days.children.length !== want) {
+    days.textContent = ""
+    for (var k = 0; k < want; k++) days.appendChild(h("div", { "class": "pane" }, h("main", k === MID ? { id: "main" } : null)))
+  }
+  sides().forEach(function(el, k) { if (k >= MID && k < MID + N) el.removeAttribute("inert"); else el.setAttribute("inert", "") })
+  panes = []
+  if (observer) { observer.disconnect(); observer.observe($("main")) }
+  return true
+}
+/** @type {ResizeObserver|null} */
+var observer = null
 
 // ------------------------------------------------------------------ drawing
 
 function render() {
+  reg = {}
   header()
   // a swipe is under way: the days wait for it to come to rest
   if (moving()) { renderLater = true; return }
   renderLater = false
-  var all = sides(), main = $("main")
+  var all = sides(), main = $("main"), keep = wide() ? topMinute() : null
+  if (wide()) S.px = hourPx()
   all.forEach(function(el) { el.textContent = "" })
   panes = all.map(function(_, k) { return L.addDays(S.selected, k - MID) })
   pillSpan()
@@ -236,9 +284,73 @@ function render() {
     main.appendChild(S.error ? h("div", { "class": "err" }, "Couldn't load the calendar: " + S.error) : h("div", { "class": "empty" }, "Loading…"))
     return centre()
   }
+  if (wide()) return columnsView(all, keep)
   if (S.error) main.appendChild(h("div", { "class": "msg bad" }, S.error))
   all.forEach(function(el, k) { if (k === MID) day(el); else day(el, panes[k], true) })
   centre()
+}
+
+// ---- the iPad's columns
+
+// Every pane a timeline on the same hours (8:00 to 19:00 at least, stretched to the earliest
+// and latest event drawn), the hours once in the gutter, the all-day events in the bar
+// (header). A new day opens at now (today in view) or the first event in view; a swipe keeps
+// the time of day at the top (`keep`)
+var saidError = ""
+function columnsView(all, keep) {
+  if (S.error && S.error !== saidError) say(S.error, true)
+  saidError = S.error || ""
+  var first = 8 * 60, last = 19 * 60
+  var days = panes.map(function(date) { return merge(L.dayOf(S.byDate, date)) })
+  days.forEach(function(m) { m.rows.forEach(function(r) { if (!r.e.allDay) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) } }) })
+  var range = S.range = { from: Math.floor(first / 60) * 60, to: Math.min(L.DAY_MINUTES, Math.ceil(last / 60) * 60) }
+  all.forEach(function(el, k) {
+    var date = panes[k], pane = /** @type {HTMLElement} */ (el.parentNode)
+    pane.classList.toggle("today", date === S.today)
+    el.appendChild(timeline(days[k], days[k].rows.filter(function(r) { return !r.e.allDay }), date, date === S.today, true, range))
+  })
+  gutter(range)
+  centre()
+  var inView = panes.slice(MID, MID + N)
+  if (S.scrolledFor !== S.selected) {
+    S.scrolledFor = S.selected
+    var starts = inView.map(function(d, k) { return days[MID + k].rows.filter(function(r) { return !r.e.allDay })[0] }).filter(Boolean).map(function(r) { return r.e.start })
+    toMinute(inView.indexOf(S.today) >= 0 ? S.now - 60 : starts.length ? Math.min.apply(null, starts) - 30 : 8 * 60)
+  } else if (keep !== null) toMinute(keep)
+}
+
+// An hour on the iPad: the phone's 72 px, less where that keeps 08:00–19:00 off the screen
+// (landscape), 48 at the least
+function hourPx() {
+  var head = document.querySelector("header")
+  var room = window.innerHeight - (head ? head.offsetHeight : 0) - 40
+  return Math.max(48, Math.min(HOUR_PX, Math.floor(room / 11)))
+}
+
+// The hours down the side, and the time now beside the now line
+function gutter(range) {
+  var g = $("gutter"), px = S.px / 60
+  var y = function(min) { return Math.round((min - range.from) * px) }
+  var tl = h("section", { "class": "tl", style: "height:" + y(range.to) + "px" })
+  for (var t = range.from; t < range.to; t += 60) tl.appendChild(h("div", { "class": "hr", style: "top:" + y(t) + "px" }, h("span", null, hourLabel(t / 60))))
+  var shown = panes.slice(MID, MID + N).indexOf(S.today) >= 0
+  if (shown && S.now >= range.from && S.now <= range.to) tl.appendChild(h("div", { "class": "nowlabel", style: "top:" + y(S.now) + "px" }, L.hm(S.now, twelve())))
+  g.textContent = ""
+  g.appendChild(tl)
+}
+
+// The minute at the top of the screen, under the bar; and the page scrolled to put one there
+function topMinute() {
+  var tl = /** @type {HTMLElement|null} */ ($("main").querySelector(".tl")), head = document.querySelector("header")
+  if (!tl || !S.range) return null
+  return S.range.from + ((head ? head.getBoundingClientRect().bottom : 0) - tl.getBoundingClientRect().top) / (S.px / 60)
+}
+function toMinute(min) {
+  var tl = /** @type {HTMLElement|null} */ ($("main").querySelector(".tl")), head = document.querySelector("header")
+  if (!tl || !S.range) return
+  var at = Math.max(S.range.from, Math.min(S.range.to, min))
+  var top = tl.getBoundingClientRect().top + window.scrollY + (at - S.range.from) * (S.px / 60) - (head ? head.getBoundingClientRect().bottom : 0)
+  window.scrollTo({ top: Math.max(0, Math.round(top)), behavior: "instant" })
 }
 
 var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
@@ -255,6 +367,7 @@ function header() {
   title.appendChild(h("small", null, S.refreshing ? "Refreshing…" : isToday ? "Today" : relative(sel)))
   $("today").hidden = isToday
   $("refresh").classList.toggle("spin", S.refreshing)
+  if (wide()) columnsBar()
 
   var first = L.weekStart(sel, sundayFirst()), letters = L.weekdayLetters(sundayFirst())
   var week = $("week"), copies = []
@@ -277,6 +390,47 @@ function header() {
   pillSpan()
 }
 
+// The bar on the iPad: the months in view and the days' span for a title, the Now (or Next)
+// chip, and over the columns each day's head and all-day events. Those are as many as the
+// panes and move with them (.heads-in, driven by the days' scroll as the pill is)
+function columnsBar() {
+  var sel = S.selected, end = L.addDays(sel, N - 1), a = L.toDate(sel), b = L.toDate(end)
+  var title = $("title")
+  title.textContent = ""
+  title.appendChild(h("b", null, a.getMonth() === b.getMonth() ? L.monthTitle(sel)
+    : MONTHS[a.getMonth()].slice(0, 3) + (a.getFullYear() !== b.getFullYear() ? " " + a.getFullYear() : "") + " – " + MONTHS[b.getMonth()].slice(0, 3) + " " + b.getFullYear()))
+  title.appendChild(h("small", null, S.refreshing ? "Refreshing…" : L.shortDay(sel) + " – " + L.shortDay(end) +
+    (S.agenda && S.agenda.weekNumbers ? " · week " + L.isoWeek(L.weekStart(sel, false)) : "")))
+
+  var chip = $("nowchip"), next = S.agenda && S.agenda.next
+  chip.textContent = ""
+  chip.hidden = !next
+  if (next) {
+    var f = L.footerNext(next, S.today, S.now)
+    chip.appendChild(h("span", { "class": "k" }, next.current ? "Now" : "Next"))
+    chip.appendChild(h("span", { "class": "t" }, next.title))
+    chip.appendChild(h("span", { "class": "w" }, next.current ? "until " + (next.end != null ? L.hm(next.end, twelve()) : "") : L.smartWhen(next.date, next.start, S.today, twelve()) + (f ? f.rest : "")))
+    if (next.joinUrl) chip.appendChild(h("a", { "class": "join", href: next.joinUrl, onclick: function(ev) { ev.stopPropagation(); Kit.tick() } }, "Join"))
+    chip.classList.toggle("now", !!next.current)
+  }
+
+  var dates = []
+  for (var k = 0; k < N + 2 * SPAN; k++) dates.push(L.addDays(sel, k - MID))
+  var heads = $("heads")
+  heads.textContent = ""
+  heads.appendChild(h("div", { "class": "heads-in", style: "--panes:" + dates.length + ";--slide:" + (2 * SPAN / dates.length) }, [
+    dates.map(function(date) {
+      return h("button", { "class": "hd" + (date === S.today ? " today" : "") + (L.isWeekend(date) ? " weekend" : ""), type: "button",
+        "aria-label": L.dayTitle(date), onclick: go.bind(null, date) }, [h("small", null, L.DAY_NAMES[L.weekday(date)]), h("b", null, String(Number(date.slice(8)))), heavyBar(date)])
+    }),
+    dates.map(function(date) {
+      var m = merge(L.dayOf(S.byDate, date))
+      return h("div", { "class": "ad" }, m.rows.filter(function(r) { return r.e.allDay }).map(function(r) { return chipFor(r, date, m.rows.indexOf(r)) }))
+    })
+  ]))
+  pillFollow()
+}
+
 // Where the pill is with each pane in view, in days from the selected one (--o0…): k - MID,
 // but for a tapped day drawn next to it (go)
 function pillSpan() {
@@ -290,7 +444,10 @@ function dayGap(a, b) { return Math.round((L.toDate(b).getTime() - L.toDate(a).g
 var CSS_PILL = !!(window.CSS && CSS.supports && CSS.supports("animation-timeline: --days"))
 function pillFollow() {
   var pill = $("selpill"), days = $("days")
-  if (CSS_PILL || !pill || !panes.length) return
+  if (CSS_PILL) return
+  var heads = /** @type {HTMLElement|null} */ (document.querySelector(".heads-in"))
+  if (heads) heads.style.transform = "translateX(" + (-days.scrollLeft) + "px)"
+  if (!pill || !panes.length) return
   var at = Math.max(0, Math.min(panes.length - 1, days.scrollLeft / (days.clientWidth || 1)))
   var k = Math.min(panes.length - 2, Math.floor(at)), f = at - k
   var off = function(j) { return Number(pill.style.getPropertyValue("--o" + j)) || 0 }
@@ -318,11 +475,7 @@ function day(main, date, ghost) {
   var m = merge(L.dayOf(S.byDate, sel))
   var allDay = m.rows.filter(function(r) { return r.e.allDay })
   var timed = m.rows.filter(function(r) { return !r.e.allDay })
-  if (allDay.length) main.appendChild(h("div", { "class": "chips" }, allDay.map(function(r) {
-    var srcs = sourcesOf(r)
-    return h("button", { "class": "chip " + r.source + (srcs.length > 1 ? " both" : "") + (r.e.accepted ? "" : " unaccepted"), type: "button",
-      onclick: function() { details(r.e, sel, r.source, r.also) } }, [srcs.length > 1 ? dots(srcs) : null, r.e.title || "(no title)", r.e.spansDays ? h("small", null, " · several days") : null])
-  })))
+  if (allDay.length) main.appendChild(h("div", { "class": "chips" }, allDay.map(function(r) { return chipFor(r, sel, m.rows.indexOf(r)) })))
   // an empty day is a line, not an empty grid
   if (!timed.length) {
     var nu = nextUp(sel)
@@ -331,6 +484,15 @@ function day(main, date, ghost) {
     return
   }
   main.appendChild(timeline(m, timed, sel, isToday, ghost))
+}
+
+// An all-day event, the `i`th row of its day
+function chipFor(r, date, i) {
+  var srcs = sourcesOf(r)
+  var el = h("button", { "class": "chip " + r.source + (srcs.length > 1 ? " both" : "") + (r.e.accepted ? "" : " unaccepted"), type: "button",
+    onclick: function() { details(r.e, date, r.source, r.also, el) } }, [srcs.length > 1 ? dots(srcs) : null, r.e.title || "(no title)", r.e.spansDays ? h("small", null, " · several days") : null])
+  enrol(date, i, r, el)
+  return el
 }
 
 // ---- The day as a timeline: hours down the side, events as blocks by their times
@@ -357,12 +519,14 @@ function columns(rows) {
   return out
 }
 
-function timeline(m, rows, sel, isToday, ghost) {
-  // 8:00 to 19:00 at least, stretched to the day's first and last events
+function timeline(m, rows, sel, isToday, ghost, range) {
+  // 8:00 to 19:00 at least, stretched to the day's first and last events (on the iPad, the
+  // hours all the columns share)
   var first = 8 * 60, last = 19 * 60
   rows.forEach(function(r) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) })
   var from = Math.floor(first / 60) * 60, to = Math.min(L.DAY_MINUTES, Math.ceil(last / 60) * 60)
-  var px = HOUR_PX / 60
+  if (range) { from = range.from; to = range.to }
+  var px = (range ? S.px : HOUR_PX) / 60
   var y = function(min) { return Math.round((min - from) * px) }
   var tl = h("section", { "class": "tl", style: "height:" + y(to) + "px" })
 
@@ -394,15 +558,19 @@ function timeline(m, rows, sel, isToday, ghost) {
       (hgt < 30 ? " short" : "") + (c.cols >= 3 ? " narrow" : "")
     // the block's place and size say when; the time is only for a screen reader
     var when = L.timeRange(e, twelve()) + (len ? " · " + len : "") + (kind ? " · " + kind : "")
-    area.appendChild(h("button", {
+    var el = h("button", {
       "class": cls, type: "button",
       style: "top:" + top + "px;height:" + hgt + "px;left:calc(" + (c.col / c.cols * 100) + "% + 2px);width:calc(" + (100 / c.cols) + "% - 4px)",
-      "aria-label": e.title + ", " + when, onclick: function() { details(e, sel, r.source, r.also) }
-    }, h("span", { "class": "t" }, [i === cn.next ? h("span", { "class": "nx" }, "next") : null, srcs.length > 1 ? dots(srcs) : null, e.title || "(no title)"])))
+      "aria-label": e.title + ", " + when, onclick: function() { details(e, sel, r.source, r.also, el) }
+    }, h("span", { "class": "t" }, [i === cn.next ? h("span", { "class": "nx" }, "next") : null, srcs.length > 1 ? dots(srcs) : null, e.title || "(no title)"]))
+    area.appendChild(el)
+    enrol(sel, m.rows.indexOf(r), r, el)
   })
   tl.appendChild(area)
 
   if (isToday && S.now >= from && S.now <= to) tl.appendChild(h("div", { "class": "nowline", style: "top:" + y(S.now) + "px" }))
+  // the iPad's columns: now across the other days too, faint
+  else if (range && S.now >= from && S.now <= to) tl.appendChild(h("div", { "class": "nowline faint", style: "top:" + y(S.now) + "px" }))
 
   // a new day opens at now (today) or its first event, not at 08:00 every time
   if (!ghost && S.scrolledFor !== sel) {
@@ -496,7 +664,7 @@ function relative(date) {
 function nextCard(next) {
   var f = L.footerNext(next, S.today, S.now)
   var when = next.current ? "until " + (next.end != null ? L.hm(next.end, twelve()) : "") : L.smartWhen(next.date, next.start, S.today, twelve()) + (f ? f.rest : "")
-  var card = h("div", { "class": "upnext" + (next.current ? " now" : ""), role: "button", tabindex: "0", onclick: function() { details(next, next.date, sourceOf(next)) } }, [
+  var card = h("div", { "class": "upnext" + (next.current ? " now" : ""), role: "button", tabindex: "0", onclick: function() { details(next, next.date, sourceOf(next), [], card) } }, [
     h("div", { "class": "grow" }, [
       h("div", { "class": "k" }, next.current ? "Now" : "Next"),
       h("div", { "class": "t" }, next.title),
@@ -511,16 +679,16 @@ function sourceOf(e) { return e.id.indexOf("icloud:") === 0 || fromPersonal(e) ?
 
 // ------------------------------------------------------------------ the event
 
-function details(e, date, source, also) {
+// The event's details: beside it in a popover on the iPad, a bottom sheet on the phone
+// (Kit.popover), dragged down or tapped outside to close (Esc on a keyboard). While open, it's
+// S.open and its block is marked; the keys move it to the next event (keys below)
+function details(e, date, source, also, anchor) {
   also = also || []
-  var dlg = h("dialog", { "class": "kit-sheet" })
-  var closed = false
-  function close() {
-    if (closed) return
-    closed = true
-    dlg.classList.add("kit-closing")
-    setTimeout(function() { if (dlg.open) dlg.close(); dlg.remove() }, 180)
-  }
+  closeOpen()
+  /** @type {{close(): void, dialog: HTMLDialogElement}|null} */
+  var pop = null
+  function close() { if (pop) pop.close() }
+  var shown = e
   var len = L.formatLength(e)
   var when = L.dayTitle(date) + " · " + L.timeRange(e, twelve()) + (len ? " (" + len + ")" : "")
   var calOf = function(ev, src) { return ev.calendarName && ev.calendarName !== label(src) ? label(src) + " · " + ev.calendarName : label(src) }
@@ -537,9 +705,7 @@ function details(e, date, source, also) {
     acts.appendChild(h("button", { "class": "btn danger", type: "button", onclick: function() { act("decline", e, close) } }, "Decline"))
   }
 
-  var body = [
-    h("div", { "class": "kit-sheet-grip", "aria-hidden": "true" }),
-    h("div", { "class": "dt" }, [
+  var body = h("div", { "class": "dt" }, [
       h("div", { "class": "kit-sheet-title" }, e.title || "(no title)"),
       h("div", { "class": "when" }, [h("span", { "class": "srcs" }, [source].concat(also.map(function(a) { return a.source })).map(function(k) { return h("i", { "class": k }) })), when, " · ", cal]),
       also.length ? h("div", { "class": "same" }, "In both calendars: shown once") : null,
@@ -550,15 +716,154 @@ function details(e, date, source, also) {
       e.attendees.length ? attendees(e.attendees) : null,
       e.description ? [h("div", { "class": "lab" }, "Notes"), h("div", { "class": "txt" }, linkify(L.descriptionText(e.description)))] : null
     ])
-    // no Close: it's dragged down, or a tap above it (Esc on a keyboard)
-  ]
-  var box = h("div", { "class": "kit-sheet-box" }, body)
-  dlg.appendChild(box)
-  Kit.sheetDrag(box, close) // dragged down, it goes
-  dlg.addEventListener("click", function(ev) { if (ev.target === dlg) close() })
-  dlg.addEventListener("cancel", function(ev) { ev.preventDefault(); close() })
-  document.body.appendChild(dlg)
-  Kit.sheetOpen(dlg)
+    // no Close: it's dragged down, or a tap outside it (Esc on a keyboard)
+  var open = { date: date, id: shown.id, e: e, source: source, also: also, el: anchor || null, pop: /** @type {any} */ (null) }
+  pop = Kit.popover(anchor || null, body, { onClose: function() {
+    if (open.el) open.el.classList.remove("focus")
+    if (S.open === open) S.open = null
+  } })
+  pop.dialog.classList.add("ev")
+  open.pop = pop
+  S.open = open
+  if (anchor) anchor.classList.add("focus")
+}
+
+// Close the open event's details, if any
+function closeOpen() { if (S.open && S.open.pop) S.open.pop.close() }
+
+// ------------------------------------------------------------------ keys
+
+// A keyboard (an iPad's, mostly) has the TUI's keys, the config's "keys" overrides included:
+// the agenda says what's bound, and Layout.js reads a key as the window does. "day" mode moves
+// the days; with an event's details open it's "event" mode, and they move between events
+/** @type {Record<string, any>} */
+var reg = {}   // per date, its rows as drawn: [{date, r, el}] by the row's place in the day
+function enrol(date, i, r, el) {
+  (reg[date] = reg[date] || [])[i] = { date: date, r: r, el: el }
+  if (S.open && S.open.date === date && S.open.id === r.e.id) { el.classList.add("focus"); S.open.el = el }
+}
+/** @type {any} */
+var keyIndex = null, keysOf = null
+/** @type {{close(): void, dialog: HTMLDialogElement}|null} */
+var helpOpen = null
+
+function pressed(ev) {
+  if (ev.metaKey || ev.altKey) return
+  // the help: any key closes it
+  if (helpOpen) { ev.preventDefault(); helpOpen.close(); return }
+  // a confirmation (Accept? Decline?) has its own keys
+  if (document.querySelector("dialog[open]:not(.ev)")) return
+  if (!keyIndex || keysOf !== S.agenda) { keysOf = S.agenda; keyIndex = L.keyIndex(L.pageKeys(S.agenda && S.agenda.keys)) }
+  var action = L.actionOf(keyIndex, S.open ? "event" : "day", L.domKey(ev.key, ev.shiftKey, ev.ctrlKey))
+  if (action && run(action) !== false) ev.preventDefault()
+}
+
+function run(action) {
+  switch (action) {
+    case "prev_day": return step(-1)
+    case "next_day": return step(1)
+    case "prev_week": return step(-7)
+    case "next_week": return step(7)
+    case "prev_month": closeOpen(); return go(monthOn(-1))
+    case "next_month": closeOpen(); return go(monthOn(1))
+    case "today": closeOpen(); return go(S.today)
+    case "now": closeOpen(); S.scrolledFor = null; select(S.today); return enter()
+    case "refresh": closeOpen(); return refreshNow()
+    case "enter_events": return enter()
+    case "exit_events": return closeOpen()
+    case "next_event": return move(1)
+    case "prev_event": return move(-1)
+    case "jump_events_forward": return move(10)
+    case "jump_events_back": return move(-10)
+    case "join": return join()
+    case "accept": case "decline": return answer(action)
+    case "delete": say("Delete is on the desktop"); return
+    case "help": return help()
+    case "open_google_web": window.open("https://calendar.google.com/calendar/r/day/" + S.selected.replace(/-/g, "/"), "_blank", "noopener"); return
+    case "open_icloud_web": window.open("https://www.icloud.com/calendar/", "_blank", "noopener"); return
+  }
+  return false // the TUI's own (search, setup, logs, connect, quit)
+}
+
+// The same day of the month `n` months on (the last day, for a shorter month)
+function monthOn(n) {
+  var first = L.addMonths(S.selected, n), last = L.addDays(L.addMonths(first, 1), -1)
+  return L.addDays(first, Math.min(Number(S.selected.slice(8)), Number(last.slice(8))) - 1)
+}
+
+// The events of the days in view, in order
+function inView() {
+  var out = []
+  for (var k = 0; k < N; k++) (reg[L.addDays(S.selected, k)] || []).forEach(function(x) { if (x) out.push(x) })
+  return out
+}
+
+// Into the events: today's under way or next, else the first in view
+function enter() {
+  var list = inView()
+  if (!list.length) return
+  var pick = list[0], timed = list.filter(function(x) { return x.date === S.today && !x.r.e.allDay })
+  var cn = L.currentNext(timed.map(function(x) { return x.r.e }), true, S.now)
+  if (cn.current >= 0) pick = timed[cn.current]
+  else if (cn.next >= 0) pick = timed[cn.next]
+  openRow(pick)
+}
+
+// `n` events on from the open one; past the days in view, the next (or previous) day with any,
+// brought into view (as the last column going forward)
+function move(n) {
+  var list = inView(), open = S.open
+  var at = open ? list.findIndex(function(x) { return x.date === open.date && x.r.e.id === open.id }) : -1
+  if (at < 0) return enter()
+  var to = at + n
+  if (to >= 0 && to < list.length) return openRow(list[to])
+  var dir = n > 0 ? 1 : -1, from = dir > 0 ? L.addDays(S.selected, N - 1) : S.selected
+  for (var d = 1; d <= 60; d++) {
+    var date = L.addDays(from, dir * d)
+    if (!S.byDate[date]) return
+    if (!merge(L.dayOf(S.byDate, date)).rows.length) continue
+    closeOpen()
+    select(dir > 0 ? L.addDays(date, 1 - N) : date)
+    var there = inView().filter(function(x) { return x.date === date })
+    if (there.length) openRow(there[dir > 0 ? 0 : there.length - 1])
+    return
+  }
+}
+
+function openRow(x) {
+  reveal(x.el)
+  details(x.r.e, x.date, x.r.source, x.r.also, x.el)
+}
+
+// Scrolled so an event that's off screen is on it, a little below the bar
+function reveal(el) {
+  if (!el || el.closest("header")) return
+  var r = el.getBoundingClientRect(), head = document.querySelector("header"), top = head ? head.getBoundingClientRect().bottom : 0
+  if (r.top >= top + 8 && r.top <= window.innerHeight - 60) return
+  window.scrollTo({ top: Math.max(0, Math.round(window.scrollY + r.top - top - 80)), behavior: "instant" })
+}
+
+function join() {
+  var o = S.open, url = o && (o.e.joinUrl || o.also.map(function(a) { return a.e.joinUrl }).filter(Boolean)[0])
+  if (!url) { say("No meeting link"); return }
+  Kit.tick()
+  closeOpen()
+  location.href = url
+}
+
+// Accept or decline, as the details' buttons offer them: invitations in Work
+function answer(verb) {
+  var o = S.open
+  if (!o || o.source !== "google" || !o.e.attendees.length || (verb === "accept" && o.e.accepted)) { say(verb === "accept" ? "Nothing to accept" : "Not an invitation"); return }
+  act(verb, o.e, closeOpen)
+}
+
+// The keys in use, as the TUI's help lists them
+function help() {
+  var rows = L.helpRows(L.pageKeys(S.agenda && S.agenda.keys))
+  helpOpen = Kit.popover(null, h("div", { "class": "keys" }, [h("div", { "class": "kit-sheet-title" }, "Keys"),
+    rows.map(function(r) { return r.section ? h("div", { "class": "lab" }, r.keys) : h("div", { "class": "kr" }, [h("b", null, r.keys), h("span", null, r.text)]) })]),
+    { onClose: function() { helpOpen = null } })
 }
 
 function attendees(list) {
@@ -620,8 +925,11 @@ function holdDays() {
   var up = function() { touching = false; scrolled() }
   days.addEventListener("touchend", up, { passive: true })
   days.addEventListener("touchcancel", up, { passive: true })
-  if (window.ResizeObserver) new ResizeObserver(function() { if (!moving()) centre() }).observe($("main"))
-  window.addEventListener("resize", function() { if (!moving()) centre() })
+  if (window.ResizeObserver) (observer = new ResizeObserver(function() { if (!moving()) centre() })).observe($("main"))
+  // the iPad turned, Split View or Stage Manager resized: as many columns as fit now
+  var refit = function() { if (moving()) return; if (layoutPanes()) { closeOpen(); render() } else centre() }
+  window.addEventListener("resize", refit)
+  if (WIDE.addEventListener) WIDE.addEventListener("change", refit)
 }
 
 // A flick sideways on the week strip moves a week
@@ -684,21 +992,19 @@ function start() {
   var hash = location.hash.slice(1)
   S.selected = /^\d{4}-\d{2}-\d{2}$/.test(hash) ? hash : S.today
   // a newer page first (then it reloads), as a pull to refresh does
-  $("refresh").addEventListener("click", function() {
-    Kit.updateNow().then(function(reloading) { if (!reloading) refetch(L.firstOfMonth(S.selected), false) })
-  })
+  $("refresh").addEventListener("click", refreshNow)
   $("today").addEventListener("click", function() { go(S.today) })
   $("prevwk").addEventListener("click", function() { step(-7) })
   $("nextwk").addEventListener("click", function() { step(7) })
+  $("prevday").addEventListener("click", function() { step(-1) })
+  $("nextday").addEventListener("click", function() { step(1) })
+  $("nowchip").addEventListener("click", function() { var n = S.agenda && S.agenda.next; if (n) details(n, n.date, sourceOf(n), [], $("nowchip")) })
   flick($("strip"), 7)
+  flick($("heads"), 1)
+  layoutPanes()
   Kit.pullToRefresh(function() { return refetch(L.firstOfMonth(S.selected), false) })
   holdDays()
-  document.addEventListener("keydown", function(ev) {
-    if (document.querySelector("dialog[open]") || ev.ctrlKey || ev.metaKey || ev.altKey) return
-    if (ev.key === "ArrowLeft" || ev.key === "h") step(-1)
-    else if (ev.key === "ArrowRight" || ev.key === "l") step(1)
-    else if (ev.key === "t") go(S.today)
-  })
+  document.addEventListener("keydown", pressed)
   // the minute turns: the clock, and the cache read again (the sync job refreshes it)
   ;(function tick() {
     setTimeout(function() {

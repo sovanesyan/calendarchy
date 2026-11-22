@@ -122,6 +122,29 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   Accept/Decline and link are the ones offered. Except an invitation from the Personal calendar
   (a Work event whose organizer is iCloud's relay `imip.me.com` or an iCloud address,
   `fromPersonal`): that's Personal, drawn and acted on as Personal only
+- The iPad: the same page and URL, switched on by size. At least 560 × 500 (`WIDE` in `app.js`;
+  not a phone, even turned sideways, nor Slide Over) `html.wide` shows the days as columns side
+  by side, `N` of them (`fit`: as many as fit at 220 px after a 56 px gutter, 2 to 7: two in a
+  half Split View, three in portrait, five in landscape), the selected day the first. They are
+  the phone's panes in the same scroller, each `1/N` wide (`layoutPanes`: `N` plus three each
+  side), so a swipe or ‹ › still moves one day; a further jump is drawn at once. All columns share
+  one hour range and the hours sit once in `#gutter` (`columnsView`), an hour shrinks from 72 px
+  so 08:00–19:00 fits on screen in landscape (48 at least, `hourPx`), and a redraw keeps the time
+  at the top (`topMinute`). The bar (`columnsBar`) has the months in view, the Now/Next chip, ‹ ›,
+  and over the columns each day's head and all-day events (`.heads-in`: as many as the panes,
+  moved 1:1 by the same `--days` scroll timeline as the pill). The week strip, the Now card and
+  the empty-day line are the phone's only. Turning it, Split View and Stage Manager refit live.
+  Checked by pixel-diffing the phone's screens before and after: nothing under the breakpoint
+  may change
+- Event details go through the kit's `Kit.popover(anchor, …)`: a card beside the event with an
+  arrow on the iPad, the bottom sheet on the phone. The open one is `S.open` and its block is
+  outlined (iPad only)
+- A keyboard has the TUI's keys, `"keys"` overrides included: `Layout.js` `domKey` reads a
+  browser key as `pressedKey` does a Qt one, `pageKeys` is `windowKeys` with the page's extras
+  (Enter joins), `actionOf` looks it up (`pressed`/`run` in `app.js`). Day mode moves the days
+  (h/l day, j/k week, H/L month, t, n, r, Enter into the events); with details open it's event
+  mode: j/k the next or previous event in view and on to the next day with any, J or Enter
+  join, a/d accept/decline, Esc back; ? lists them (`L.helpRows`). The TUI-only ones do nothing
 - Colour roles: Work blue and Personal orange (`--work`/`--personal`, set in the page, a lighter
   pair under `data-scheme=dark`) and nothing else uses them; state is shape (the now line, the
   "next" tag, faded past, dashed not accepted). Events are soft islands: a light fill of their

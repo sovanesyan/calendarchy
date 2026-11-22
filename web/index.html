@@ -28,6 +28,12 @@
   dot for each. Light or dark follows the phone.
   Tap an event for its details, Join, Accept or Decline. Swipe sideways for the
   next day; pull down to refetch from Google and iCloud.
+
+  On an iPad (at least 560 × 500: not a phone, even turned sideways, nor Slide
+  Over) the days are columns side by side, as many as fit (html.wide, app.js
+  fit), a day's swipe apart; the hours in a gutter, each day's head and all-day
+  events in the bar, the Now chip beside the title, details in a popover beside
+  the event (Kit.popover). A keyboard has the TUI's keys (? lists them).
 -->
 <link rel="stylesheet" href="/kit.css">
 <style>
@@ -182,13 +188,83 @@
   @media (min-width:700px){
     body{font-size:15px}
   }
+
+  /* the keys (?): the TUI's help, as the page binds them */
+  .keys .kit-sheet-title{margin-bottom:.3rem}
+  .keys .lab{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:.7rem 0 .2rem}
+  .keys .kr{display:flex;gap:.8rem;font-size:12.5px;padding:.08rem 0}
+  .keys .kr b{flex:0 0 8.5rem;color:var(--accent);font-weight:700}
+  .keys .kr span{color:var(--dim)}
+
+  /* ---- the iPad (html.wide, app.js): the days as --n columns, the hours in a 56 px gutter.
+     None of it shows on the phone */
+  .nowchip,.dayarrow,.heads,.gutter{display:none}
+  .cal{display:contents}
+  .wide .strip{display:none}
+  .wide header{padding:calc(.5rem + env(safe-area-inset-top,0px)) 0 0}
+  .wide header .row{max-width:none;padding:0 calc(1rem + var(--safe-r)) .5rem calc(1rem + var(--safe-l))}
+  .wide header .title{flex:none}
+  .wide header .title small{white-space:nowrap}
+  .wide .dayarrow{display:grid;font-size:17px;line-height:1}
+  .wide .nowchip:not([hidden]){display:flex;align-items:center;gap:.55rem;margin:0 auto;min-width:0;max-width:440px;cursor:pointer;
+    border-radius:999px;padding:.2rem .25rem .2rem .8rem;border:1px solid var(--line);background:var(--surface)}
+  .nowchip.now{border-color:color-mix(in srgb,var(--good) 55%,transparent);background:color-mix(in srgb,var(--good) 10%,transparent)}
+  .nowchip .k{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:700;flex:none}
+  .nowchip.now .k{color:var(--good)}
+  .nowchip .t{font-family:var(--sans);font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .nowchip .w{font-size:12px;color:var(--dim);white-space:nowrap;flex:none}
+  .nowchip .join{height:28px;border-radius:999px;padding:0 .8rem;font-size:12px}
+  .nowchip:not(:has(.join)){padding-right:.8rem}
+  @media (max-width:760px){.nowchip .w{display:none}}
+  /* each pane's head and all-day events, over its column: as many as the panes, moved with them
+     by the days' scroll (as the pill is; app.js pillFollow where there's no scroll timeline) */
+  .wide .heads{display:block;overflow:hidden;margin:0 var(--safe-r) 0 calc(56px + var(--safe-l));border-top:1px solid var(--line)}
+  .heads-in{display:grid;grid-template-columns:repeat(var(--panes),minmax(0,1fr));width:calc(100% * var(--panes) / var(--n));
+    animation:heads-go linear both;animation-timeline:--days}
+  @keyframes heads-go{from{transform:translateX(0)}to{transform:translateX(calc(-100% * var(--slide)))}}
+  .hd{appearance:none;border:0;border-left:1px solid var(--line);background:transparent;color:var(--fg);display:flex;align-items:center;gap:.4rem;
+    padding:.4rem .6rem .3rem;min-width:0;cursor:pointer;text-align:left}
+  .hd small{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .hd b{font-size:17px;font-variant-numeric:tabular-nums;line-height:1.35}
+  .hd.today small{color:var(--accent);font-weight:700}
+  .hd.today b{background:var(--accent);color:var(--on-accent);border-radius:8px;padding:0 .35rem}
+  .hd.weekend small{color:var(--dim)}
+  .hd i{display:block;width:44px;max-width:30%;height:3px;border-radius:2px;background:var(--chip);overflow:hidden;margin-left:auto}
+  .hd i span{display:block;height:100%;background:var(--muted)}
+  .hd i span.heavy{background:var(--warn)}
+  .ad{display:flex;flex-direction:column;gap:3px;padding:2px 4px 5px;border-left:1px solid var(--line);min-width:0}
+  .ad .chip{min-height:26px;padding:.2rem .55rem;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:8px}
+  @media (hover:hover){.hd:hover{background:var(--chip)}}
+  /* the gutter and the columns */
+  .wide .cal{display:flex;align-items:flex-start;padding:0 var(--safe-r) 0 var(--safe-l)}
+  .wide .gutter{display:block;flex:0 0 56px;position:relative}
+  .wide .days{flex:1;min-width:0}
+  .wide .pane{flex-basis:calc(100% / var(--n));border-left:1px solid var(--line)}
+  .wide .pane.today{background:color-mix(in srgb,var(--accent) 4%,transparent)}
+  .wide main{max-width:none;padding:0}
+  .wide .tl{margin:.75rem 0 1.5rem}
+  .wide .tl .hr,.wide .tl .work,.wide .tl .area{left:0}
+  .wide .tl .hr span{display:none}
+  .wide .tl .nowline{left:0}
+  .wide .tl .nowline.faint{border-top:1px solid color-mix(in srgb,var(--urgent) 40%,transparent)}
+  .wide .tl .nowline.faint::before{display:none}
+  .wide .gutter .tl .hr{border:0}
+  .wide .gutter .tl .hr span{display:block;left:0;width:48px}
+  .gutter .nowlabel{position:absolute;right:6px;transform:translateY(-50%);z-index:3;padding:0 .2rem;border-radius:4px;background:var(--bg);
+    color:var(--urgent);font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
+  /* the event whose details are open */
+  .wide .blk.focus,.wide .chip.focus{outline:2px solid var(--accent);outline-offset:1px}
+  .wide .nowchip.focus{outline:2px solid var(--accent);outline-offset:1px}
 </style>
 </head>
 <body>
 <header>
   <div class="row">
     <div class="title" id="title"></div>
+    <div class="nowchip" id="nowchip" role="button" tabindex="0" hidden></div>
     <button class="pill" id="today" type="button" hidden>Today</button>
+    <button class="refresh dayarrow" id="prevday" type="button" aria-label="Previous day">‹</button>
+    <button class="refresh dayarrow" id="nextday" type="button" aria-label="Next day">›</button>
     <button class="refresh" id="refresh" type="button" aria-label="Refetch from Google and iCloud" title="Refetch from Google and iCloud"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
   </div>
   <div class="strip" id="strip">
@@ -196,8 +272,11 @@
     <div class="week" id="week"></div>
     <button class="wk" id="nextwk" type="button" aria-label="Next week">›</button>
   </div>
+  <div class="heads" id="heads"></div>
 </header>
 
+<div class="cal" id="cal">
+<div class="gutter" id="gutter" aria-hidden="true"></div>
 <div class="days" id="days">
   <div class="pane"><main inert></main></div>
   <div class="pane"><main inert></main></div>
@@ -207,10 +286,11 @@
   <div class="pane"><main inert></main></div>
   <div class="pane"><main inert></main></div>
 </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=18"></script>
+<script src="/app.js?v=19"></script>
 </body>
 </html>

@@ -794,6 +794,72 @@ function sheet(o) {
   })
 }
 
+// A popover: `content` in a card beside `anchor`, with an arrow to it, on whichever side has
+// room (right, left, below, above; centred on the screen without an anchor). On a screen under
+// 560 px wide or 500 tall (a phone, Slide Over) it's the bottom sheet instead, rising and
+// dragged down to close, so one call serves both. A tap outside or Esc closes it, as does the
+// returned close(); opts.onClose runs once when it does. Returns {close, dialog}
+var POP_WIDE = "(min-width:560px) and (min-height:500px)"
+var POP_GAP = 10, POP_EDGE = 8, POP_ARROW = 18
+function popover(anchor, content, opts) {
+  opts = opts || {}
+  var doc = root.document
+  var wide = !!(root.matchMedia && root.matchMedia(POP_WIDE).matches)
+  var dlg = /** @type {HTMLDialogElement} */ (h("dialog", { "class": wide ? "kit-popover" : "kit-sheet" }))
+  var box = h("div", { "class": wide ? "kit-popover-box" : "kit-sheet-box" },
+    wide ? content : [h("div", { "class": "kit-sheet-grip", "aria-hidden": "true" }), content])
+  var closed = false
+  function close() {
+    if (closed) return
+    closed = true
+    dlg.classList.add("kit-closing")
+    setTimeout(function() { if (dlg.open) dlg.close(); dlg.remove() }, wide ? 120 : 180)
+    if (opts && opts.onClose) opts.onClose()
+  }
+  dlg.appendChild(box)
+  dlg.addEventListener("click", function(e) { if (e.target === dlg) close() })
+  dlg.addEventListener("cancel", function(e) { e.preventDefault(); close() })
+  doc.body.appendChild(dlg)
+  if (!wide) {
+    sheetDrag(box, close)
+    sheetOpen(dlg)
+    return { close: close, dialog: dlg }
+  }
+  dlg.showModal()
+  var a = anchor ? anchor.getBoundingClientRect() : null
+  var at = popoverPlace(a && { left: a.left, top: a.top, right: a.right, bottom: a.bottom },
+    box.offsetWidth, box.offsetHeight, root.innerWidth, root.innerHeight)
+  dlg.style.left = at.left + "px"
+  dlg.style.top = at.top + "px"
+  dlg.setAttribute("data-side", at.side)
+  dlg.style.setProperty("--kit-arrow", at.arrow + "px")
+  return { close: close, dialog: dlg }
+}
+
+// Where a popover w × ht goes for an anchor rect {left, top, right, bottom} on a vw × vh
+// screen: {left, top, side, arrow}, `side` being where it sits ("right", "left", "below",
+// "above", or "none": centred) and `arrow` how far along its edge the arrow points (down the
+// side for right/left, across for below/above), at the middle of the anchor's first 60 px
+// on screen. Pure, for the tests
+/** @returns {KitPlace} */
+function popoverPlace(a, w, ht, vw, vh) {
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+  if (!a) return { left: Math.round(Math.max(POP_EDGE, (vw - w) / 2)), top: Math.round(Math.max(POP_EDGE, (vh - ht) / 2)), side: "none", arrow: 0 }
+  var top = clamp(a.top, 0, vh), bottom = clamp(a.bottom, top, vh)
+  var ay = top + Math.min(bottom - top, 60) / 2
+  if (a.right + POP_GAP + w + POP_EDGE <= vw || a.left - POP_GAP - w >= POP_EDGE) {
+    var right = a.right + POP_GAP + w + POP_EDGE <= vw
+    var y = clamp(ay - 36, POP_EDGE, Math.max(POP_EDGE, vh - ht - POP_EDGE))
+    return { left: Math.round(right ? a.right + POP_GAP : a.left - POP_GAP - w), top: Math.round(y), side: right ? "right" : "left",
+      arrow: Math.round(clamp(ay - y, POP_ARROW, ht - POP_ARROW)) }
+  }
+  var x = clamp((a.left + a.right) / 2 - w / 2, POP_EDGE, Math.max(POP_EDGE, vw - w - POP_EDGE))
+  var arrow = Math.round(clamp((a.left + a.right) / 2 - x, POP_ARROW, w - POP_ARROW))
+  if (a.bottom + POP_GAP + ht + POP_EDGE <= vh) return { left: Math.round(x), top: Math.round(a.bottom + POP_GAP), side: "below", arrow: arrow }
+  if (a.top - POP_GAP - ht >= POP_EDGE) return { left: Math.round(x), top: Math.round(a.top - POP_GAP - ht), side: "above", arrow: arrow }
+  return { left: Math.round(x), top: Math.round(Math.max(POP_EDGE, (vh - ht) / 2)), side: "none", arrow: 0 }
+}
+
 // Blur the page while the app is in the background, so the app switcher's picture of it
 // shows nothing (net worth, a message). Best effort: iOS may take the picture first
 function privacy() {
@@ -866,7 +932,7 @@ root.Kit = {
   rgbOf: rgbOf, hex: hex, mix: mix, luminance: luminance, contrast: contrast, isGreen: isGreen, isAmber: isAmber, h: h,
   offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
-  fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, choice: choice, autogrow: autogrow,
+  fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, popover: popover, popoverPlace: popoverPlace, choice: choice, autogrow: autogrow,
   privacy: privacy, lock: lock, standalone: standalone
 }
 })(typeof window !== "undefined" ? window : this)

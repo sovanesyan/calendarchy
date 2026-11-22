@@ -29,6 +29,8 @@ type KitPushState = "unsupported" | "install" | "denied" | "off" | "on"
 interface KitSwipeAction { label: string; color?: string; run(row: HTMLElement): void }
 interface KitFlingAction { label: string; color?: string; run(card: HTMLElement): void }
 interface KitSheetAction { label: string; danger?: boolean; run?(): unknown }
+interface KitRect { left: number; top: number; right: number; bottom: number }
+interface KitPlace { left: number; top: number; side: "right" | "left" | "below" | "above" | "none"; arrow: number }
 
 interface KitApi {
   pullToRefresh(onRefresh: () => unknown): HTMLElement | null
@@ -84,6 +86,8 @@ interface KitApi {
   choice(o: { options: { value: string; label: string; hint?: string }[]; value: string; onChange?(value: string): void }): { el: HTMLElement; set(value: string): void; readonly value: string }
   autogrow(ta: HTMLTextAreaElement, max?: number): () => void
   sheet(o: { title?: string; text?: string; actions?: KitSheetAction[] }): Promise<string | null>
+  popover(anchor: Element | null, content: KitKid, opts?: { onClose?(): void }): { close(): void; dialog: HTMLDialogElement }
+  popoverPlace(a: KitRect | null, w: number, ht: number, vw: number, vh: number): KitPlace
   privacy(): void
   lock(opts?: { app?: string; after?: number }): Promise<boolean>
   standalone(): boolean

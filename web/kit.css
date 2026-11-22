@@ -131,6 +131,21 @@
   .kit-sheet-act{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:12px;min-height:46px;padding:0 1rem;text-align:left;cursor:pointer}
   .kit-sheet-act.danger{color:var(--urgent)}
   .kit-sheet-act.cancel{text-align:center;color:var(--dim);margin-top:.2rem}
+  /* Kit.popover(): a card beside what was tapped, with an arrow to it (a sheet on the phone) */
+  .kit-popover{position:fixed;inset:auto;margin:0;padding:0;border:0;background:transparent;color:var(--fg);overflow:visible;max-width:none;max-height:none;
+    animation:kit-pop .14s ease}
+  .kit-popover::backdrop{background:transparent}
+  .kit-popover:focus,.kit-popover:focus-visible{outline:none}
+  .kit-popover.kit-closing{opacity:0;transition:opacity .12s ease}
+  .kit-popover-box{position:relative;width:min(360px,calc(100vw - 16px));max-height:min(560px,calc(100vh - 16px));max-height:min(560px,calc(100dvh - 16px));overflow-y:auto;
+    background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:.8rem .8rem .7rem;box-shadow:0 12px 40px rgba(0,0,0,.22),0 2px 8px rgba(0,0,0,.08)}
+  .kit-popover::before{content:"";position:absolute;z-index:1;width:14px;height:14px;background:var(--bg);border:1px solid var(--line);transform:rotate(45deg)}
+  .kit-popover[data-side=right]::before{left:-7px;top:calc(var(--kit-arrow) - 7px);border-right:0;border-top:0}
+  .kit-popover[data-side=left]::before{right:-7px;top:calc(var(--kit-arrow) - 7px);border-left:0;border-bottom:0}
+  .kit-popover[data-side=below]::before{top:-7px;left:calc(var(--kit-arrow) - 7px);border-right:0;border-bottom:0}
+  .kit-popover[data-side=above]::before{bottom:-7px;left:calc(var(--kit-arrow) - 7px);border-left:0;border-top:0}
+  .kit-popover[data-side=none]::before{display:none}
+  @keyframes kit-pop{from{opacity:0;transform:scale(.97)}}
   @keyframes kit-fade{from{opacity:0}}
   /* Kit.privacy() and Kit.lock(): nothing to read in the app switcher or behind the curtain */
   .kit-veil body>*,.kit-locked body>:not(.kit-lock){filter:blur(18px)}
@@ -139,5 +154,5 @@
   .kit-lock .btn{height:40px;padding:0 1.2rem;font-size:14px}
   /* Kit.transition(): a quick cross-fade unless motion is reduced */
   ::view-transition-old(root),::view-transition-new(root){animation-duration:.18s}
-  @media (prefers-reduced-motion:reduce){.kit-swipe>:not(.kit-swipe-under),.kit-dock,.kit-fling{transition:none}}
+  @media (prefers-reduced-motion:reduce){.kit-swipe>:not(.kit-swipe-under),.kit-dock,.kit-fling{transition:none}.kit-popover{animation:none}}
 }
