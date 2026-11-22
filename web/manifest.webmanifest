@@ -1,0 +1,13 @@
+{
+  "name": "Calendarchy",
+  "short_name": "Calendarchy",
+  "description": "Work and Personal calendars side by side, with free gaps and what's next",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1b26",
+  "theme_color": "#1a1b26",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

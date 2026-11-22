@@ -18,6 +18,7 @@ unicode-width = "0.2"
 termbg = "0.6"
 chrono-tz = "0.10.4"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+omarchy = { path = "../../rb/ghostwheel/kit/crate", features = ["server"] }  # the family's crate: the tailnet gate and the page's server (`serve`)
 
 [profile.release]
 # Whole-program optimisation for a small, fast binary. panic stays "unwind" on

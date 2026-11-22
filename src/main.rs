@@ -11,6 +11,7 @@ mod headless;
 mod icloud;
 mod keymap;
 mod logging;
+mod serve;
 mod setup;
 mod sources;
 mod term_bg;
@@ -50,6 +51,8 @@ usage: calendarchy [--date YYYY-MM-DD]          the calendar (a TUI: needs a ter
        calendarchy put --calendar NAME --uid UID --start WHEN --end WHEN --title TEXT [--notes TEXT] [--alarm MINUTES]
                                                 create or replace an iCloud event we own (by uid)
        calendarchy remove --calendar NAME --uid UID
+       calendarchy serve --allow LOGIN... [--port 8795]
+                                                the phone page (web/), for tailscale serve
        calendarchy --version | --help";
 
 #[tokio::main]
@@ -69,6 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(verb @ ("put" | "remove")) = args.get(1).map(String::as_str) {
         std::process::exit(write::run(verb, &args[2..]).await);
+    }
+    if args.get(1).map(String::as_str) == Some("serve") {
+        let args = args[2..].to_vec();
+        // the server's own threads answer; this one just waits on them
+        std::process::exit(tokio::task::spawn_blocking(move || serve::serve(&args)).await.unwrap_or(1));
     }
 
     let date_arg = |name: &str| arg_value(name).and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());

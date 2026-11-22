@@ -25,7 +25,7 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 
 ### Module Structure
 
-- **`main.rs`** - CLI dispatch (`--version`, `--help`, `events`, `put`, `remove`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open"; with no terminal it prints the usage and exits 2 instead of starting the TUI) and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
+- **`main.rs`** - CLI dispatch (`--version`, `--help`, `events`, `put`, `remove`, `serve`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open"; with no terminal it prints the usage and exits 2 instead of starting the TUI) and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
 - **`app.rs`** - `App` state and navigation
 - **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
 - **`keymap.rs`** - Bindings table: keys → `Action` per mode (Bulgarian phonetic keys normalised); also generates the help overlay and applies `"keys"` overrides from config
@@ -34,6 +34,7 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 - **`agenda.rs`** - `--agenda [--from YYYY-MM-DD] [--days N]`: days as JSON from the disk cache only (no network): events with details, attendees and busy ranges, display prefs, the effective key bindings (after `"keys"` overrides), and the event that's on now or next (always from now, 8 days ahead; `find_next`, which the TUI's status bar shares); read by the shell plugins. The JSON shape is documented at the top of the file
 - **`events.rs`** - `events [--since DATE] [--until DATE] [--json]`: the Google calendar's events for agents (Dossier's `/stress`, `/grade`), fetched live with the saved login, never via the cache (the TUI rewrites the cache whole, so it can't hold history). Its JSON follows the connector contract's record shape (`~/Work/my/connectors/README.md`); documented at the top of the file
 - **`write.rs`** - `put --calendar NAME --uid UID --start --end --title [--notes] [--alarm MIN]` and `remove --calendar NAME --uid UID`: create, replace or delete an iCloud event we own at `<calendar>/<uid>.ics` (CalDAV `PUT`/`DELETE`), for jobs such as the eBag deliveries on Family (`~/Work/my/deliveries/deliveries-calendar`). Never touches an event it didn't name; test it on `Home`, not the shared `Family`
+- **`serve.rs`** - `serve --allow LOGIN... [--port 8795]`: the phone page (`web/`) and its API on 127.0.0.1, behind the kit crate's tailnet gate (`omarchy::web::server`, a path dependency on `~/Work/rb/ghostwheel/kit/crate`). See "Phone page" below
 - **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals, setup wizard; palette follows the Omarchy theme's `colors.toml`
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence), `CacheWriter` (writes the cache on its own thread)
 - **`term_bg.rs`** - The terminal's background colour (OSC 11), remembered per terminal across runs so terminals that never answer aren't asked again
@@ -82,6 +83,28 @@ UI ← EventCache.get(date) ←────────────────�
 - Install / update both with `shell/install.sh` (copies into `~/.config/omarchy/plugins/<id>/`, then enables them the first time; a symlink would break hot reload and `omarchy plugin validate`)
 - Hot reload doesn't always pick up a changed service; `omarchy-restart-shell` does. Logs: `journalctl --user | grep calendarchy`
 - The agenda JSON (shape documented at the top of `agenda.rs`) is the contract between the Rust side and the plugins: keep `agenda.rs`, the QML and `Layout.js` in step
+
+## Phone page
+
+`calendarchy serve` (`src/serve.rs`, page in `web/`) is the calendar on the iPhone: a
+home-screen web app at https://omarchy.tail00a1a0.ts.net:8795 (tailnet only; `tailscale serve
+--bg --https=8795 http://127.0.0.1:8795`). `systemd/calendarchy-web.service` runs it, installed
+as a symlink in `~/.config/systemd/user/`; `systemctl --user restart calendarchy-web` after a
+release build. Only the `--allow` Tailscale login (and this machine) gets an answer.
+
+- `GET /api/agenda?from&days` is `agenda::build`, the same JSON as `--agenda`; `GET /layout.js`
+  is `shell/window/Layout.js` with its `.pragma library` line dropped, so the page uses the
+  window's display rules directly (keep Layout.js plain JS with no Qt in it)
+- `POST /api/refresh?month=YYYY-MM` and `POST /api/event?verb=accept|decline&id=` run this
+  binary's `--refresh --month` and `--event`, as the window does. The phone can't delete.
+  A POST needs the page's Origin and `X-Calendarchy: 1`
+- `web/` is read from this checkout on every request, so an edit to the page is live on the next
+  load. `kit.css`, `theme.js`, `sw.js` and `kit.d.ts` are copies of the kit, put there by
+  `~/Work/rb/ghostwheel/kit/sync.sh`: change them there, never here
+- Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
+- Views: Day (week strip, now/next, Work | Personal with free gaps), Month (six weeks plus the
+  selected week's heatmap), Coming up (two weeks). Swipe for the next day or month, pull down to
+  refetch. Alerts on the phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
 
 ## Committing
 

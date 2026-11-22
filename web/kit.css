@@ -1,0 +1,140 @@
+/* The family's look (Ghostwheel's, which Lumon, Spanreed and Macrodata wear; Ironforge
+   keeps its own on the same token names): the tokens, the page, the header, section labels, buttons, tabs and messages.
+   A base layer: an app's own rules win over it whatever their specificity, and
+   theme.js sets the tokens from the Omarchy theme (/api/theme). The server puts it
+   inline where the page has <link rel="stylesheet" href="/kit.css"> (CSP: inline
+   styles only).
+
+   The kit's (~/Work/rb/ghostwheel/kit/web/kit.css), copied into each app by
+   kit/sync.sh: change it there, not in a copy. */
+@layer kit {
+  :root{
+    --bg:#fafafa;--fg:#212121;--muted:#8c8c8c;--dim:#6e6e6e;--accent:#3264eb;--urgent:#c0392b;--good:#2f9e44;--warn:#c27a12;
+    --surface:rgba(0,0,0,.03);--line:rgba(0,0,0,.09);--chip:rgba(0,0,0,.05);--sel:rgba(50,100,235,.10);--on-accent:#fff;
+    --mono:"JetBrainsMono Nerd Font","JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --safe-b:env(safe-area-inset-bottom,0px);--safe-l:env(safe-area-inset-left,0px);--safe-r:env(safe-area-inset-right,0px);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg)}
+  body{font-family:var(--mono);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
+  a{color:var(--accent);text-decoration:none}
+  button,input,select{font:inherit;color:inherit}
+
+  /* the top bar: the brand, the tally (what's wrong, in a line), the stamp */
+  header{display:flex;align-items:center;gap:.7rem;padding:.55rem 1rem;background:var(--bg);border-bottom:1px solid var(--line)}
+  header .brand{font-weight:700;letter-spacing:.02em;display:flex;align-items:center;gap:.45rem}
+  header .brand svg{width:18px;height:18px}
+  header .tally{color:var(--dim);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+  header .tally .ok{color:var(--good);font-weight:600}
+  header .tally .warn{color:var(--warn);font-weight:600}
+  header .tally .bad{color:var(--urgent);font-weight:600}
+  header .stamp{color:var(--muted);font-size:12px;white-space:nowrap}
+
+  /* a section's label (what's in it goes on the right, as each app has it) */
+  .sect{padding:.9rem 1rem .3rem;font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);display:flex;gap:.6rem;align-items:baseline}
+
+  /* nothing to show, and something went wrong */
+  .empty{color:var(--muted);padding:2rem 1.2rem;text-align:center}
+  .err{color:var(--urgent);padding:1rem 1.2rem}
+
+  /* buttons: a quiet outline, the primary filled, an icon-only square */
+  .btn{appearance:none;border:1px solid var(--line);background:transparent;border-radius:8px;height:30px;padding:0 .65rem;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:.35rem;font-size:12.5px}
+  .btn:hover{background:var(--chip)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+  .btn.danger{color:var(--urgent)}
+  .btn:disabled{opacity:.4;cursor:default}
+  .btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  .btn.icon{width:30px;padding:0;justify-content:center}
+
+  /* tabs: a row of links or buttons, the open one on a chip (Macrodata's views, Spanreed's
+     lists, Lumon's breastfeeding page); .on or aria-selected="true" marks it */
+  .tabs{display:flex;gap:.25rem}
+  .tabs>a,.tabs>button{appearance:none;border:0;background:transparent;font:inherit;font-size:12.5px;padding:.25rem .6rem;border-radius:7px;color:var(--dim);cursor:pointer;text-decoration:none;white-space:nowrap}
+  .tabs>a:hover,.tabs>button:hover{color:var(--fg)}
+  .tabs>.on,.tabs>[aria-selected="true"]{background:var(--chip);color:var(--fg);font-weight:700}
+  @media (pointer:coarse){.tabs>a,.tabs>button{padding:.45rem .8rem;font-size:13.5px}}
+  /* .tabs.kit-tabbar: the phone's tabs on the bottom edge, in thumb reach (a direct child of
+     body: a header's backdrop or transform would hold a fixed bar). Gone while the keyboard's
+     up (Kit.keyboard()); --kit-tabbar is its height, for what has to clear it (a toast, the
+     page's end) */
+  body:has(>.kit-tabbar){--kit-tabbar:calc(57px + var(--safe-b))}
+  .kit-kb body:has(>.kit-tabbar){--kit-tabbar:0px}
+  .tabs.kit-tabbar{position:fixed;z-index:15;left:0;right:0;bottom:0;gap:.3rem;padding:6px calc(.6rem + var(--safe-r)) calc(6px + var(--safe-b)) calc(.6rem + var(--safe-l));
+    background:var(--bg);border-top:1px solid var(--line)}
+  .tabs.kit-tabbar>a,.tabs.kit-tabbar>button{flex:1;height:44px;padding:0 .4rem;display:flex;align-items:center;justify-content:center;font-size:13.5px;border-radius:10px}
+  .kit-kb .tabs.kit-tabbar{display:none}
+
+  /* .kit-choice (Kit.choice): a row of chips, one picked (aria-pressed="true"): a due date, a
+     section. A hint in <small> after the label (Tomorrow Mon) */
+  .kit-choice{display:flex;flex-wrap:wrap;gap:.3rem}
+  .kit-choice>button{appearance:none;border:1px solid var(--line);background:transparent;border-radius:999px;height:28px;padding:0 .7rem;font:inherit;font-size:12.5px;color:var(--dim);cursor:pointer;white-space:nowrap}
+  .kit-choice>button:hover{color:var(--fg);background:var(--chip)}
+  .kit-choice>button[aria-pressed="true"]{background:var(--sel);border-color:var(--accent);color:var(--fg);font-weight:700}
+  .kit-choice>button small{color:var(--muted);font-size:inherit;font-weight:400;margin-left:.35rem}
+  @media (pointer:coarse){.kit-choice>button{height:36px;padding:0 .85rem;font-size:13.5px}}
+
+  /* pull-to-refresh (theme.js's Kit.pullToRefresh): a ring under the safe area that
+     follows the finger, turns with the pull, fills at the threshold, spins while busy */
+  .kit-ptr{position:fixed;z-index:2147483000;top:env(safe-area-inset-top,0px);left:50%;width:36px;height:36px;border-radius:50%;
+    display:grid;place-items:center;background:var(--bg);border:1px solid var(--line);box-shadow:0 2px 10px rgba(0,0,0,.18);
+    pointer-events:none;opacity:0;transform:translate(-50%,-48px);transition:transform .2s ease,opacity .2s ease}
+  .kit-ptr.drag{transition:none}
+  .kit-ptr i{width:16px;height:16px;border-radius:50%;border:2px solid var(--muted);border-top-color:transparent;box-sizing:border-box}
+  .kit-ptr.ready i,.kit-ptr.busy i{border-color:var(--accent);border-top-color:transparent}
+  .kit-ptr.busy i{animation:kit-ptr-spin .7s linear infinite}
+  @keyframes kit-ptr-spin{to{transform:rotate(360deg)}}
+
+  /* the phone (theme.js) -------------------------------------------------------------- */
+  /* Kit.offline(): what the page shows came from the snapshot. On the bottom edge, clear of
+     the header's tabs, and above a .kit-dock (and the keyboard) when there is one */
+  .kit-offline{display:none;position:fixed;z-index:2147482000;left:50%;transform:translateX(-50%);bottom:calc(var(--safe-b) + 12px);
+    padding:.2rem .7rem;border-radius:999px;font-size:11.5px;white-space:nowrap;color:var(--on-accent);background:var(--warn);box-shadow:0 2px 8px rgba(0,0,0,.18);pointer-events:none}
+  .kit-is-offline .kit-offline{display:block}
+  body:has(.kit-dock) .kit-offline{bottom:calc(var(--kb,0px) + var(--safe-b) + 64px)}
+  body:has(>.kit-tabbar) .kit-offline{bottom:calc(var(--kit-tabbar) + 12px)}
+  /* Kit.pushButton(): off is dimmer */
+  .kit-push[data-state=off],.kit-push[data-state=install],.kit-push[data-state=denied]{color:var(--muted)}
+  /* Kit.tick()'s switch: there to be toggled, never seen */
+  .kit-tick{position:fixed;left:-100px;top:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
+  /* Kit.keyboard(): a bar on the bottom edge, above the keyboard while it's up */
+  .kit-dock{position:fixed;left:0;right:0;bottom:var(--kb,0px);padding-bottom:var(--safe-b);background:var(--bg);border-top:1px solid var(--line);transition:bottom .12s ease}
+  .kit-kb .kit-dock{padding-bottom:0}
+  /* Kit.swipe(): the row slides by --kit-dx over the action it uncovers */
+  .kit-swipe{position:relative;overflow:hidden;touch-action:pan-y}
+  .kit-swipe>:not(.kit-swipe-under){transform:translateX(var(--kit-dx,0px));transition:transform .22s ease}
+  .kit-swipe.kit-swiping>:not(.kit-swipe-under){transition:none}
+  .kit-swipe-under{position:absolute;top:0;bottom:0;left:0;width:max(0px,var(--kit-dx,0px));display:flex;align-items:center;padding:0 1rem;
+    color:var(--on-accent);font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;opacity:.55;transition:opacity .15s ease}
+  .kit-swipe-under[data-side=left]{left:auto;right:0;width:max(0px,calc(-1 * var(--kit-dx,0px)));justify-content:flex-end}
+  .kit-swipe-armed .kit-swipe-under{opacity:1}
+  /* Kit.fling(): a card that follows the pointer, tilts, and flies off; a stamp for each side */
+  .kit-fling{position:relative;touch-action:pan-y;user-select:none;-webkit-user-select:none;cursor:grab;transition:transform .26s ease,opacity .26s ease;will-change:transform}
+  .kit-fling.kit-flinging{transition:none;cursor:grabbing}
+  .kit-fling-stamp{position:absolute;top:1rem;padding:.1rem .55rem;border:2.5px solid currentColor;border-radius:8px;color:var(--accent);background:var(--bg);
+    font-weight:800;font-size:15px;letter-spacing:.08em;text-transform:uppercase;opacity:0;pointer-events:none}
+  .kit-fling-stamp[data-side=right]{left:1rem;transform:rotate(-12deg)}
+  .kit-fling-stamp[data-side=left]{right:1rem;transform:rotate(12deg)}
+  /* Kit.sheet(): actions in thumb reach */
+  .kit-sheet{position:fixed;inset:auto 0 0 0;margin:0 auto;width:100%;max-width:520px;max-height:none;padding:0;border:0;background:transparent;color:var(--fg)}
+  .kit-sheet::backdrop{background:rgba(0,0,0,.35);animation:kit-fade .18s ease}
+  .kit-sheet-box{background:var(--bg);border:1px solid var(--line);border-bottom:0;border-radius:16px 16px 0 0;padding:.4rem .8rem calc(.8rem + var(--safe-b));
+    display:flex;flex-direction:column;gap:.4rem;animation:kit-rise .2s ease}
+  .kit-sheet.kit-closing .kit-sheet-box{transform:translateY(100%);transition:transform .18s ease}
+  .kit-sheet-grip{width:36px;height:4px;border-radius:2px;background:var(--line);margin:.2rem auto .4rem}
+  .kit-sheet-title{font-weight:700;padding:0 .2rem}
+  .kit-sheet-text{color:var(--dim);font-size:12.5px;padding:0 .2rem .3rem}
+  .kit-sheet-act{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:12px;min-height:46px;padding:0 1rem;text-align:left;cursor:pointer}
+  .kit-sheet-act.danger{color:var(--urgent)}
+  .kit-sheet-act.cancel{text-align:center;color:var(--dim);margin-top:.2rem}
+  @keyframes kit-rise{from{transform:translateY(100%)}}
+  @keyframes kit-fade{from{opacity:0}}
+  /* Kit.privacy() and Kit.lock(): nothing to read in the app switcher or behind the curtain */
+  .kit-veil body>*,.kit-locked body>:not(.kit-lock){filter:blur(18px)}
+  .kit-lock{position:fixed;inset:0;z-index:2147483600;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;background:color-mix(in srgb,var(--bg) 80%,transparent)}
+  .kit-lock-name{font-weight:700;letter-spacing:.02em}
+  .kit-lock .btn{height:40px;padding:0 1.2rem;font-size:14px}
+  /* Kit.transition(): a quick cross-fade unless motion is reduced */
+  ::view-transition-old(root),::view-transition-new(root){animation-duration:.18s}
+  @media (prefers-reduced-motion:reduce){.kit-swipe>:not(.kit-swipe-under),.kit-dock,.kit-fling{transition:none}.kit-sheet-box{animation:none}}
+}

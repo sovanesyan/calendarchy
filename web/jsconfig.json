@@ -1,0 +1,18 @@
+{
+  // The page's type check (no build: tsc only reads):
+  // ~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json
+  // Plain scripts, as the page loads them; the kit's theme.js and window.Kit with them.
+  // /layout.js (shell/window/Layout.js) is reached through an untyped L.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2023",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "types": [],
+    "strict": false,
+    "strictNullChecks": true,
+    "skipLibCheck": true
+  },
+  "files": ["kit.d.ts", "theme.js", "app.js"]
+}

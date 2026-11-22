@@ -1,0 +1,13 @@
+# Calendarchy on the phone (calendarchy serve), for tailscale serve :8795.
+# Installed as a symlink: ~/.config/systemd/user/calendarchy-web.service
+[Unit]
+Description=Calendarchy: the calendar on the phone (calendarchy serve; tailscale serve :8795)
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/calendarchy serve --allow sovanesyan@gmail.com --port 8795
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
