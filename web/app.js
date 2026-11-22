@@ -26,7 +26,8 @@ var S = {
   /** @type {string|null} */ error: null,
   /** @type {{text: string, bad?: boolean}|null} */ status: null,
   /** @type {Record<string, boolean>} */ refreshed: {},
-  seq: 0
+  seq: 0,
+  /** @type {string|null} */ scrolledFor: null
 }
 var statusTimer = 0
 
@@ -201,35 +202,109 @@ function day(main) {
   if (isToday && next) main.appendChild(nextCard(next))
 
   var m = merge(L.dayOf(S.byDate, sel))
-  // gaps and overlaps from the day with each duplicate once, so a copy never "overlaps" itself
-  var g = L.gaps(m.day, sel, S.today, S.now, workingHours())
-  var gaps = g.google.concat(g.icloud).sort(function(a, b) { return a.from - b.from })
-  var clash = L.overlapping(m.day)
-  var events = m.rows.map(function(r) { return r.e })
-  var cn = L.currentNext(events, isToday, S.now)
-  var list = h("section", { "class": "list" })
-  if (!events.length) {
+  var allDay = m.rows.filter(function(r) { return r.e.allDay })
+  var timed = m.rows.filter(function(r) { return !r.e.allDay })
+  if (allDay.length) main.appendChild(h("div", { "class": "chips" }, allDay.map(function(r) {
+    var srcs = sourcesOf(r)
+    return h("button", { "class": "chip " + r.source + (srcs.length > 1 ? " both" : "") + (r.e.accepted ? "" : " unaccepted"), type: "button",
+      onclick: function() { details(r.e, sel, r.source, r.also) } }, [dots(srcs), r.e.title || "(no title)", r.e.spansDays ? h("small", null, " · several days") : null])
+  })))
+  if (!timed.length) {
     var nu = nextUp(sel)
-    list.appendChild(h("div", { "class": "none" }, ["Nothing scheduled", nu ? h("small", null, "next " + nu) : null]))
+    main.appendChild(h("div", { "class": "none" }, [allDay.length ? "Nothing at a set time" : "Nothing scheduled", nu ? h("small", null, "next " + nu) : null]))
   }
-  L.panelRows(events, gaps).forEach(function(row) {
-    if (row.kind === "gap") {
-      var gp = row.gap
-      list.appendChild(h("div", { "class": "gap" + (gp.now ? " now" : "") },
-        (gp.now ? "free now · " : "free " + L.hm(gp.from, twelve()) + " · ") + L.formatDuration(gp.minutes)))
-      return
-    }
-    var r = m.rows[row.index], e = r.e, i = row.index
-    var past = !e.allDay && (sel < S.today || (isToday && endOf(e) <= S.now))
-    list.appendChild(eventRow(r, sel, {
-      past: past && i !== cn.current, current: i === cn.current, next: i === cn.next,
-      clash: !!clash[e.id + "@" + e.start]
-    }))
-  })
-  main.appendChild(list)
+  main.appendChild(timeline(m, timed, sel, isToday))
 }
 
-// ---- One list from both calendars
+// ---- The day as a timeline: hours down the side, events as blocks by their times
+
+var HOUR_PX = 56
+
+function blockEnd(e) { return Math.min(L.DAY_MINUTES, Math.max(endOf(e), e.start + 15)) }
+
+// Side by side where they overlap: each block's column and how many share its cluster
+function columns(rows) {
+  var sorted = rows.slice().sort(function(a, b) { return a.e.start - b.e.start || blockEnd(b.e) - blockEnd(a.e) })
+  var out = [], cluster = [], ends = [], clusterEnd = -1
+  function close() { cluster.forEach(function(c) { c.cols = ends.length }); cluster = []; ends = [] }
+  sorted.forEach(function(r) {
+    if (r.e.start >= clusterEnd) { close(); clusterEnd = -1 }
+    var col = ends.findIndex(function(end) { return end <= r.e.start })
+    if (col < 0) { col = ends.length; ends.push(0) }
+    ends[col] = blockEnd(r.e)
+    var item = { r: r, col: col, cols: 1 }
+    cluster.push(item); out.push(item)
+    clusterEnd = Math.max(clusterEnd, blockEnd(r.e))
+  })
+  close()
+  return out
+}
+
+function timeline(m, rows, sel, isToday) {
+  // 8:00 to 19:00 at least, stretched to the day's first and last events
+  var first = 8 * 60, last = 19 * 60
+  rows.forEach(function(r) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) })
+  var from = Math.floor(first / 60) * 60, to = Math.min(L.DAY_MINUTES, Math.ceil(last / 60) * 60)
+  var px = HOUR_PX / 60
+  var y = function(min) { return Math.round((min - from) * px) }
+  var tl = h("section", { "class": "tl", style: "height:" + y(to) + "px" })
+
+  var wh = workingHours()
+  if (wh) tl.appendChild(h("div", { "class": "work", style: "top:" + y(Math.max(wh[0], from)) + "px;height:" + Math.max(0, y(Math.min(wh[1], to)) - y(Math.max(wh[0], from))) + "px" }))
+  for (var t = from; t <= to; t += 60) {
+    tl.appendChild(h("div", { "class": "hr", style: "top:" + y(t) + "px" }, t < L.DAY_MINUTES ? h("span", null, L.hm(t, twelve()).replace(":00", twelve() ? "" : ":00")) : null))
+    if (t < to) tl.appendChild(h("div", { "class": "hr half", style: "top:" + y(t + 30) + "px" }))
+  }
+
+  var area = h("div", { "class": "area" })
+  // free gaps (the window's rule), drawn under the blocks
+  var g = L.gaps(m.day, sel, S.today, S.now, wh)
+  g.google.concat(g.icloud).forEach(function(gp) {
+    var hgt = Math.max(16, y(gp.from + gp.minutes) - y(gp.from))
+    area.appendChild(h("div", { "class": "free" + (gp.now ? " now" : ""), style: "top:" + y(gp.from) + "px;height:" + hgt + "px" },
+      (gp.now ? "free now · " : "free · ") + L.formatDuration(gp.minutes)))
+  })
+
+  var cn = L.currentNext(rows.map(function(r) { return r.e }), isToday, S.now)
+  columns(rows).forEach(function(c) {
+    var r = c.r, e = r.e, i = rows.indexOf(r), srcs = sourcesOf(r)
+    var top = y(e.start), hgt = Math.max(18, y(blockEnd(e)) - top - 2)
+    var past = sel < S.today || (isToday && endOf(e) <= S.now)
+    var url = e.meetingUrl || r.also.map(function(a) { return a.e.meetingUrl }).filter(Boolean)[0] || null
+    var kind = L.meetingKind(url), len = L.formatLength(e)
+    var cls = "blk " + r.source + (srcs.length > 1 ? " both" : "") + (past && i !== cn.current ? " past" : "") +
+      (i === cn.current ? " current" : "") + (i === cn.next ? " next" : "") + (e.accepted ? "" : " unaccepted") + (e.free ? " freeev" : "") +
+      (hgt < 34 ? " short" : "")
+    var when = L.hm(e.start, twelve()) + (len ? " · " + len : "") + (kind ? " · " + kind : "")
+    area.appendChild(h("button", {
+      "class": cls, type: "button",
+      style: "top:" + top + "px;height:" + hgt + "px;left:calc(" + (c.col / c.cols * 100) + "% + 2px);width:calc(" + (100 / c.cols) + "% - 4px)",
+      "aria-label": e.title + ", " + when, onclick: function() { details(e, sel, r.source, r.also) }
+    }, hgt < 34
+      ? [h("span", { "class": "t" }, [dots(srcs), e.title || "(no title)"]), h("span", { "class": "m" }, " " + L.hm(e.start, twelve()))]
+      : [h("span", { "class": "t" }, [dots(srcs), e.title || "(no title)"]), h("span", { "class": "m" }, when)]))
+  })
+  tl.appendChild(area)
+
+  if (isToday && S.now >= from && S.now <= to) tl.appendChild(h("div", { "class": "nowline", style: "top:" + y(S.now) + "px" }))
+
+  // a new day opens at now (today) or its first event, not at 08:00 every time
+  if (S.scrolledFor !== sel) {
+    S.scrolledFor = sel
+    var at = isToday ? S.now - 60 : rows.length ? rows[0].e.start - 30 : 8 * 60
+    requestAnimationFrame(function() {
+      var head = document.querySelector("header")
+      var top = tl.getBoundingClientRect().top + window.scrollY + y(Math.max(from, at)) - (head ? head.offsetHeight : 0) - 8
+      window.scrollTo({ top: Math.max(0, top), behavior: "instant" })
+    })
+  }
+  return tl
+}
+
+function sourcesOf(r) { return [r.source].concat(r.also.map(function(a) { return a.source })) }
+function dots(srcs) { return h("span", { "class": "srcs", title: srcs.map(label).join(" · ") }, srcs.map(function(k) { return h("i", { "class": k }) })) }
+
+// ---- Both calendars as one day
 
 // A title as compared for duplicates: case, punctuation and emoji don't count
 function norm(t) { return (t || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim() }
@@ -298,25 +373,6 @@ function nextCard(next) {
 }
 
 function sourceOf(e) { return e.id.indexOf("icloud:") === 0 ? "icloud" : "google" }
-
-function eventRow(r, date, o) {
-  var e = r.e, both = r.also.length > 0
-  var cls = "ev " + r.source + (both ? " both" : "") + (e.allDay ? " allday" : "") + (o.past ? " past" : "") + (o.current ? " current" : "") + (o.next ? " next" : "") +
-    (!e.accepted ? " unaccepted" : "") + (e.free ? " free" : "")
-  var url = e.meetingUrl || r.also.map(function(a) { return a.e.meetingUrl }).filter(Boolean)[0] || null
-  var kind = L.meetingKind(url)
-  var len = L.formatLength(e)
-  var srcs = [r.source].concat(r.also.map(function(a) { return a.source }))
-  return h("button", { "class": cls, type: "button", onclick: function() { details(e, date, r.source, r.also) } }, [
-    h("div", { "class": "tm" }, [
-      h("span", { "class": "srcs", title: srcs.map(label).join(" · ") }, srcs.map(function(k) { return h("i", { "class": k }) })),
-      h("span", { "class": "at" }, e.allDay ? (e.spansDays ? "All day · several days" : "All day") : L.hm(e.start, twelve()) + (len ? " · " + len : "")),
-      kind ? h("span", { "class": "kind" }, kind) : null,
-      o.clash ? h("span", { "class": "clash" }, "overlaps") : null
-    ]),
-    h("div", { "class": "ti" }, e.title || "(no title)")
-  ])
-}
 
 // ------------------------------------------------------------------ the event
 

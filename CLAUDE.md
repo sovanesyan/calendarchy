@@ -103,7 +103,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   `~/Work/rb/ghostwheel/kit/sync.sh`: change them there, never here
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
 - One view, the day (no month or Coming up on the phone, on purpose): the week strip, now/next,
-  then Work and Personal as one list with free gaps. An event in both calendars shows once
+  all-day chips, then the day as a timeline (hours down the side, Work and Personal as blocks by
+  their times, side by side where they overlap, free gaps dashed, a line at now; a new day opens
+  scrolled to now or its first event). An event in both calendars shows once
   (`merge`/`sameEvent` in `web/app.js`: same start and end, or both all day, and the same title
   ignoring case, punctuation and emoji, or one inside the other); the Work copy leads, so its
   Accept/Decline and link are the ones offered. Swipe for the next day, pull down to refetch. Alerts on the
