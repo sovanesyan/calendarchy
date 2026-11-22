@@ -102,9 +102,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   load. `kit.css`, `theme.js`, `sw.js` and `kit.d.ts` are copies of the kit, put there by
   `~/Work/rb/ghostwheel/kit/sync.sh`: change them there, never here
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
-- Views: Day (week strip, now/next, Work | Personal with free gaps), Month (six weeks plus the
-  selected week's heatmap), Coming up (two weeks). Swipe for the next day or month, pull down to
-  refetch. Alerts on the phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
+- One view, the day (no month or Coming up on the phone, on purpose): the week strip, now/next,
+  Work | Personal with free gaps. Swipe for the next day, pull down to refetch. Alerts on the
+  phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
 
 ## Committing
 

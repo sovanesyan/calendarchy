@@ -1,5 +1,5 @@
 // Calendarchy's phone page (served no-cache, so a change reaches the phone on its next load).
-// /api/agenda is `calendarchy --agenda`'s JSON; every display rule is the shell window's own
+// One view, the day. /api/agenda is `calendarchy --agenda`'s JSON; every display rule is the shell window's own
 // (/layout.js is shell/window/Layout.js, its functions global here, reached through L).
 // Everything from the calendars goes in through Kit.h's text nodes, never HTML.
 ;(function() {
@@ -10,8 +10,7 @@ var L = window
 var h = Kit.h
 var $ = function(id) { return /** @type {HTMLElement} */ (document.getElementById(id)) }
 
-var DAYS = 57 // six weeks from the month grid's first day, and Coming up past its end
-var UP_DAYS = 14
+var DAYS = 57 // six weeks from the month grid's first day, and a bit past (the week strip)
 
 /** @typedef {{id: string, title: string, allDay: boolean, start: number|null, end: number|null, spansDays: boolean,
  *   accepted: boolean, free: boolean, busy: number[]|null, meetingUrl: string|null, joinUrl: string|null,
@@ -23,7 +22,6 @@ var S = {
   /** @type {Record<string, any>} */ byDate: {},
   today: "", now: 0,
   selected: "",
-  tab: "day",
   loading: false, refreshing: false,
   /** @type {string|null} */ error: null,
   /** @type {{text: string, bad?: boolean}|null} */ status: null,
@@ -124,27 +122,20 @@ function say(text, bad) {
 
 // ------------------------------------------------------------------ navigation
 
-function select(date, tab) {
+function select(date) {
   var month = L.firstOfMonth(S.selected)
   S.selected = date
-  if (tab) S.tab = tab
   try { history.replaceState(null, "", "#" + (date === S.today ? "" : date)) } catch (_) {}
   render()
   if (L.firstOfMonth(date) !== month) { load(); ensureMonth() }
 }
 
-function step(n) {
-  if (S.tab === "month") {
-    var m = L.addMonths(S.selected, n)
-    select(L.sameMonth(m, S.today) ? S.today : m)
-  } else select(L.addDays(S.selected, n))
-}
+function step(n) { select(L.addDays(S.selected, n)) }
 
 // ------------------------------------------------------------------ drawing
 
 function render() {
   header()
-  tabs()
   var main = $("main")
   main.textContent = ""
   if (!S.agenda) {
@@ -152,9 +143,7 @@ function render() {
     return
   }
   if (S.error) main.appendChild(h("div", { "class": "msg bad" }, S.error))
-  if (S.tab === "month") month(main)
-  else if (S.tab === "up") upcoming(main)
-  else day(main)
+  day(main)
 }
 
 function header() {
@@ -172,11 +161,6 @@ function header() {
     t.appendChild(document.createTextNode(f.rest))
     t.title = f.label + f.title + f.rest
   }
-}
-
-function tabs() {
-  var bs = $("tabs").querySelectorAll("button")
-  for (var i = 0; i < bs.length; i++) bs[i].setAttribute("aria-selected", String(bs[i].getAttribute("data-tab") === S.tab))
 }
 
 function navButtons(onToday) {
@@ -202,7 +186,7 @@ function day(main) {
     var date = L.addDays(first, d)
     week.appendChild(h("button", {
       "class": "wd" + (date === S.today ? " today" : "") + (date === sel ? " sel" : "") + (L.isWeekend(date) ? " weekend" : ""),
-      type: "button", "aria-label": L.dayTitle(date), onclick: select.bind(null, date, null)
+      type: "button", "aria-label": L.dayTitle(date), onclick: select.bind(null, date)
     }, [h("small", null, letters[d]), h("b", null, String(Number(date.slice(8)))), heavyBar(date)]))
   }
   main.appendChild(week)
@@ -287,92 +271,6 @@ function eventRow(e, date, source, o) {
     ]),
     h("div", { "class": "ti" }, e.title || "(no title)")
   ])
-}
-
-// ---- Month
-
-function month(main) {
-  var sel = S.selected, m = L.firstOfMonth(sel), first = L.gridStart(m, sundayFirst())
-  main.appendChild(h("div", { "class": "sect big" }, [h("span", null, L.monthTitle(m)), navButtons(L.sameMonth(sel, S.today))]))
-  var grid = h("div", { "class": "grid" })
-  L.weekdayLetters(sundayFirst()).forEach(function(l) { grid.appendChild(h("div", { "class": "wl" }, l)) })
-  for (var i = 0; i < 42; i++) {
-    var date = L.addDays(first, i), d = L.dayOf(S.byDate, date)
-    var busy = L.busyMinutes(d), level = Math.min(1, busy / L.HEAVY_DAY_MINUTES)
-    var tint = busy ? "background:color-mix(in srgb,var(--work) " + Math.round(8 + level * 30) + "%,transparent)" : ""
-    grid.appendChild(h("button", {
-      "class": "md" + (L.sameMonth(date, m) ? "" : " out") + (busy >= L.HEAVY_DAY_MINUTES ? " heavy" : "") + (date === S.today ? " today" : "") + (date === sel ? " sel" : ""),
-      type: "button", style: tint, "aria-label": L.dayTitle(date) + (busy ? ", " + L.formatDuration(busy) + " busy" : ""),
-      onclick: select.bind(null, date, "day")
-    }, [String(Number(date.slice(8))), h("span", { "class": "dots" }, [
-      (d.google || []).length ? h("i") : null, (d.icloud || []).length ? h("i", { "class": "p" }) : null
-    ])]))
-  }
-  main.appendChild(grid)
-
-  // the selected week's heatmap, 8:00–20:00 in half hours (the window's)
-  var weekFirst = L.weekStart(sel, sundayFirst())
-  var days = L.heatmap(S.byDate, weekFirst, S.today, S.now, workingHours())
-  main.appendChild(h("div", { "class": "sect" }, "Week of " + L.shortDay(weekFirst)))
-  var heat = h("div", { "class": "heat" })
-  heat.appendChild(h("div"))
-  days.forEach(function(dd) {
-    heat.appendChild(h("div", { "class": "hd" + (dd.date === S.today ? " today" : "") + (dd.date === sel ? " sel" : ""), onclick: select.bind(null, dd.date, "day") }, L.shortDay(dd.date)))
-  })
-  var hours = h("div", { "class": "hours" })
-  for (var hr = L.HEAT_FIRST; hr <= L.HEAT_LAST + 1; hr += 2)
-    hours.appendChild(h("span", { style: "top:calc(" + (hr - L.HEAT_FIRST) * 2 + " * var(--slot))" }, String(hr)))
-  heat.appendChild(hours)
-  days.forEach(function(dd) {
-    var runs = L.heatRuns(dd.hours)
-    var col = h("div", { "class": "col", onclick: select.bind(null, dd.date, "day") })
-    var at = function(r) { return "top:calc(" + r.from + " * var(--slot));height:calc(" + (r.to - r.from) + " * var(--slot))" }
-    runs.work.forEach(function(r) { col.appendChild(h("div", { "class": "w", style: at(r) })) })
-    runs.busy.forEach(function(r) {
-      col.appendChild(h("div", { "class": "b" + (r.level >= 2 ? " l2" : "") + (r.past ? " past" : "") + (r.top ? " top" : "") + (r.bottom ? " bottom" : ""), style: at(r) }))
-    })
-    if (dd.marker) col.appendChild(h("div", { "class": "mk" }, dd.marker))
-    heat.appendChild(col)
-  })
-  main.appendChild(heat)
-}
-
-// ---- Coming up
-
-function upcoming(main) {
-  var from = S.selected
-  main.appendChild(h("div", { "class": "sect big" }, [
-    h("span", null, from === S.today ? "From today" : "From " + L.dayTitle(from)),
-    navButtons(from === S.today)
-  ]))
-  var wrap = h("div", { "class": "up" }), any = false
-  for (var d = 0; d < UP_DAYS; d++) {
-    var date = L.addDays(from, d), dd = L.dayOf(S.byDate, date), items = []
-    sources().forEach(function(src) {
-      (dd[src.key] || []).forEach(function(e) {
-        if (date === S.today && !e.allDay && endOf(e) <= S.now) return
-        items.push({ e: e, source: src.key })
-      })
-    })
-    if (!items.length) continue
-    any = true
-    items.sort(function(a, b) { return (a.e.allDay ? -1 : a.e.start) - (b.e.allDay ? -1 : b.e.start) })
-    var n = L.dayDiff(S.today, date)
-    var title = n === 0 ? "Today" : n === 1 ? "Tomorrow" : L.dayTitle(date)
-    var sect = h("section", null, h("div", { "class": "sect" }, [title, h("span", { "class": "r" }, busyText(dd))]))
-    items.forEach(function(it) {
-      var row = eventRow(it.e, date, it.source, {})
-      sect.appendChild(h("div", { "class": it.source }, row))
-    })
-    wrap.appendChild(sect)
-  }
-  if (!any) wrap.appendChild(h("div", { "class": "empty" }, "Nothing in the next two weeks"))
-  main.appendChild(wrap)
-}
-
-function busyText(dd) {
-  var m = L.busyMinutes(dd)
-  return m ? L.formatDuration(m) + " busy" : ""
 }
 
 // ------------------------------------------------------------------ the event
@@ -490,12 +388,6 @@ function start() {
   clock()
   var hash = location.hash.slice(1)
   S.selected = /^\d{4}-\d{2}-\d{2}$/.test(hash) ? hash : S.today
-  var bs = $("tabs").querySelectorAll("button")
-  for (var i = 0; i < bs.length; i++) bs[i].addEventListener("click", function(ev) {
-    S.tab = /** @type {HTMLElement} */ (ev.currentTarget).getAttribute("data-tab") || "day"
-    window.scrollTo(0, 0)
-    render()
-  })
   $("refresh").addEventListener("click", function() { refetch(L.firstOfMonth(S.selected), false) })
   Kit.pullToRefresh(function() { return refetch(L.firstOfMonth(S.selected), false) })
   swipe($("main"))
@@ -504,7 +396,6 @@ function start() {
     if (ev.key === "ArrowLeft" || ev.key === "h") step(-1)
     else if (ev.key === "ArrowRight" || ev.key === "l") step(1)
     else if (ev.key === "t") select(S.today)
-    else if (ev.key === "m") { S.tab = S.tab === "month" ? "day" : "month"; render() }
   })
   // the minute turns: the clock, and the cache read again (the sync job refreshes it)
   ;(function tick() {

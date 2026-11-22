@@ -16,19 +16,18 @@
   Calendarchy on the phone (calendarchy serve serves it): the shell window's
   layout for a touch screen. /api/agenda is the same JSON `calendarchy --agenda`
   prints; /layout.js is the window's own display rules (shell/window/Layout.js:
-  gaps, heatmap, current/next, Coming up), so the two can't drift. Dressed in the
+  gaps, current/next, busy time), so the two can't drift. Dressed in the
   kit (kit.css, theme.js from ~/Work/rb/ghostwheel/kit). Plain JS, no network but
   our own /api.
 
-  Day: the week strip, now/next, Work | Personal with free gaps. Month: the
-  six weeks and the selected week's heatmap. Coming up: the next two weeks.
+  One view, the day: the week strip, now/next, Work | Personal with free gaps.
   Tap an event for its details, Join, Accept or Decline. Swipe sideways for the
-  next day (month); pull down to refetch from Google and iCloud.
+  next day; pull down to refetch from Google and iCloud.
 -->
 <link rel="stylesheet" href="/kit.css">
 <style>
   :root{--work:var(--accent);--personal:var(--good)}
-  body{min-height:100vh;min-height:100dvh;padding-bottom:var(--kit-tabbar,0px)}
+  body{min-height:100vh;min-height:100dvh;padding-bottom:var(--safe-b)}
   @media (hover:hover){a:hover{text-decoration:underline}}
 
   header{position:sticky;top:0;z-index:5;padding:calc(.55rem + env(safe-area-inset-top,0px)) calc(1rem + var(--safe-r)) .55rem calc(1rem + var(--safe-l))}
@@ -98,39 +97,6 @@
   .none small{display:block;margin-top:.15rem;color:var(--dim);font-family:var(--sans);font-size:12.5px}
   @media (max-width:330px){.panels{--cols:1}.panel + .panel{border-left:0;border-top:1px solid var(--line)}}
 
-  /* month */
-  .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;padding:.3rem .8rem}
-  .grid .wl{text-align:center;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;padding-bottom:.2rem}
-  .md{appearance:none;border:1px solid transparent;border-radius:9px;background:var(--surface);color:var(--fg);cursor:pointer;aspect-ratio:1/1;max-height:64px;
-    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-variant-numeric:tabular-nums;font-size:14px;position:relative}
-  .md.out{color:var(--muted);background:transparent}
-  .md.today{color:var(--accent);font-weight:800}
-  .md.sel{border-color:var(--accent)}
-  .md.heavy{box-shadow:inset 0 -3px 0 var(--warn)}
-  .md .dots{display:flex;gap:3px;height:5px}
-  .md .dots i{width:5px;height:5px;border-radius:50%;background:var(--work)}
-  .md .dots i.p{background:var(--personal)}
-  .heat{display:grid;grid-template-columns:2rem repeat(7,1fr);gap:0 3px;padding:.2rem .8rem 1rem}
-  .heat .hd{text-align:center;font-size:10.5px;color:var(--muted);padding-bottom:.25rem;cursor:pointer}
-  .heat .hd.today{color:var(--accent);font-weight:700}
-  .heat .hd.sel{color:var(--fg);font-weight:700}
-  .heat .hours{position:relative;height:calc(24 * var(--slot))}
-  .heat .hours span{position:absolute;right:.3rem;font-size:10px;color:var(--muted);transform:translateY(-50%)}
-  .heat .col{position:relative;height:calc(24 * var(--slot));background:var(--surface);border-radius:6px;cursor:pointer}
-  .heat .col .w{position:absolute;left:0;right:0;background:var(--chip)}
-  .heat .col .b{position:absolute;left:2px;right:2px;background:var(--work)}
-  .heat .col .b.l2{background:var(--warn)}
-  .heat .col .b.past{opacity:.4}
-  .heat .col .b.top{border-top-left-radius:4px;border-top-right-radius:4px}
-  .heat .col .b.bottom{border-bottom-left-radius:4px;border-bottom-right-radius:4px}
-  .heat .col .mk{position:absolute;bottom:-1rem;left:0;right:0;text-align:center;font-size:10px;color:var(--muted)}
-  .heat{--slot:9px}
-
-  /* coming up */
-  .up .sect{padding-top:1rem}
-  .up .ev{padding-left:.9rem}
-  .up .ev .tm b{color:var(--fg);font-weight:600}
-
   .msg{margin:.6rem 1rem;padding:.5rem .7rem;border-radius:9px;font-size:12.5px;background:var(--chip);color:var(--dim)}
   .msg.bad{color:var(--urgent);background:color-mix(in srgb,var(--urgent) 10%,transparent)}
 
@@ -157,8 +123,6 @@
   @media (min-width:700px){
     body{font-size:15px}
     .ev .ti{font-size:15px}
-    .heat{--slot:12px}
-    .md{max-height:72px}
   }
 </style>
 </head>
@@ -171,13 +135,8 @@
 
 <main id="main"><div class="empty">Loading…</div></main>
 
-<nav class="tabs kit-tabbar" id="tabs" role="tablist">
-  <button type="button" role="tab" data-tab="day">Day</button>
-  <button type="button" role="tab" data-tab="month">Month</button>
-  <button type="button" role="tab" data-tab="up">Coming up</button>
-</nav>
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=1"></script>
+<script src="/app.js?v=2"></script>
 </body>
 </html>
