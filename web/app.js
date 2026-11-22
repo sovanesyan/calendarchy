@@ -268,8 +268,8 @@ function timeline(m, rows, sel, isToday) {
   // free gaps (the window's rule): the empty space says it, a quiet label says how long
   var g = L.gaps(m.day, sel, S.today, S.now, wh)
   g.google.concat(g.icloud).forEach(function(gp) {
-    var mid = (y(gp.from) + y(gp.from + gp.minutes)) / 2
-    area.appendChild(h("div", { "class": "free" + (gp.now ? " now" : ""), style: "top:" + Math.round(mid - 8) + "px" },
+    // at the top of the gap: an event that isn't busy (not accepted, marked free) can sit lower in it
+    area.appendChild(h("div", { "class": "free" + (gp.now ? " now" : ""), style: "top:" + (y(gp.from) + 4) + "px" },
       (gp.now ? "free now · " : "free ") + L.formatDuration(gp.minutes)))
   })
 
