@@ -549,8 +549,8 @@ function details(e, date, source, also) {
       e.location ? [h("div", { "class": "lab" }, "Where"), h("div", { "class": "txt" }, place(e.location))] : null,
       e.attendees.length ? attendees(e.attendees) : null,
       e.description ? [h("div", { "class": "lab" }, "Notes"), h("div", { "class": "txt" }, linkify(L.descriptionText(e.description)))] : null
-    ]),
-    h("button", { "class": "kit-sheet-act cancel", type: "button", onclick: close }, "Close")
+    ])
+    // no Close: it's dragged down, or a tap above it (Esc on a keyboard)
   ]
   var box = h("div", { "class": "kit-sheet-box" }, body)
   dlg.appendChild(box)
