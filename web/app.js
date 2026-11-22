@@ -10,9 +10,10 @@ var L = window
 var h = Kit.h
 var $ = function(id) { return /** @type {HTMLElement} */ (document.getElementById(id)) }
 
-// The selected week and two after it: the strip, the day, and "next" two weeks ahead.
+// The week before the selected one (a drag back from a Monday shows Sunday), the selected
+// week and two after it (the strip, the day, and "next" two weeks ahead).
 // Asked every minute with the last ETag, so an unchanged minute is a 304 with no body
-var DAYS = 21
+var DAYS = 28
 
 /** @typedef {{id: string, title: string, allDay: boolean, start: number|null, end: number|null, spansDays: boolean,
  *   accepted: boolean, free: boolean, busy: number[]|null, meetingUrl: string|null, joinUrl: string|null,
@@ -71,7 +72,7 @@ function post(path) {
 function rangeFrom() { return L.weekStart(S.selected, sundayFirst()) }
 
 function load() {
-  var seq = ++S.seq, from = rangeFrom(), url = "/api/agenda?from=" + from + "&days=" + DAYS
+  var seq = ++S.seq, from = rangeFrom(), url = "/api/agenda?from=" + L.addDays(from, -7) + "&days=" + DAYS
   S.loading = true
   /** @type {Record<string, string>} */
   var headers = {}
@@ -236,8 +237,10 @@ function heavyBar(date) {
 
 // ---- Day
 
-function day(main) {
-  var sel = S.selected, isToday = sel === S.today
+// The day `date` (the selected one by default) into `main`. A ghost is the neighbour drawn
+// beside it during a drag: the same, but it never scrolls the page or marks the day seen
+function day(main, date, ghost) {
+  var sel = date || S.selected, isToday = sel === S.today
   var next = S.agenda.next
   if (isToday && next) main.appendChild(nextCard(next))
 
@@ -252,11 +255,11 @@ function day(main) {
   // an empty day is a line, not an empty grid
   if (!timed.length) {
     var nu = nextUp(sel)
-    S.scrolledFor = sel
+    if (!ghost) S.scrolledFor = sel
     main.appendChild(h("div", { "class": "none" }, [allDay.length ? "Nothing at a set time" : "Nothing scheduled", nu ? h("small", null, "Next: " + nu) : null]))
     return
   }
-  main.appendChild(timeline(m, timed, sel, isToday))
+  main.appendChild(timeline(m, timed, sel, isToday, ghost))
 }
 
 // ---- The day as a timeline: hours down the side, events as blocks by their times
@@ -283,7 +286,7 @@ function columns(rows) {
   return out
 }
 
-function timeline(m, rows, sel, isToday) {
+function timeline(m, rows, sel, isToday, ghost) {
   // 8:00 to 19:00 at least, stretched to the day's first and last events
   var first = 8 * 60, last = 19 * 60
   rows.forEach(function(r) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) })
@@ -331,7 +334,7 @@ function timeline(m, rows, sel, isToday) {
   if (isToday && S.now >= from && S.now <= to) tl.appendChild(h("div", { "class": "nowline", style: "top:" + y(S.now) + "px" }))
 
   // a new day opens at now (today) or its first event, not at 08:00 every time
-  if (S.scrolledFor !== sel) {
+  if (!ghost && S.scrolledFor !== sel) {
     S.scrolledFor = sel
     var at = isToday ? S.now - 60 : rows.length ? rows[0].e.start - 30 : 8 * 60
     requestAnimationFrame(function() {
@@ -535,8 +538,50 @@ function act(verb, e, closeDetails) {
 // ------------------------------------------------------------------ wiring
 
 // A sideways swipe on `el` moves `by` days (the timeline a day, the week strip a week)
+// The neighbouring day during a drag: drawn beside the day, at the same height (so its hours
+// line up), moving with it. `dir` 1 is the next day (in from the right), -1 the one before
+/** @type {{el: HTMLElement, dir: number, width: number, date: string} | null} */
+var ghost = null
+function showGhost(dir) {
+  if (ghost && ghost.dir === dir) return ghost
+  dropGhost()
+  var main = $("main"), width = main.offsetWidth
+  var el = document.createElement("main")
+  el.className = "ghost"
+  el.setAttribute("aria-hidden", "true")
+  el.style.cssText = "position:absolute;margin:0;top:" + main.offsetTop + "px;left:" + main.offsetLeft + "px;width:" + width + "px"
+  day(el, L.addDays(S.selected, dir), true)
+  $("days").appendChild(el)
+  ghost = { el: el, dir: dir, width: width, date: L.addDays(S.selected, dir) }
+  return ghost
+}
+function dropGhost() { if (ghost) { ghost.el.remove(); ghost = null } }
+
+// The day and its neighbour at `dx` px from where they rest
+function dragTo(dx, ms) {
+  var main = $("main"), ease = "cubic-bezier(.2,.8,.2,1)"
+  setSlide(main, dx, 1, ms, ease)
+  if (ghost) setSlide(ghost.el, ghost.dir * ghost.width + dx, 1, ms, ease)
+}
+
+// Let go past the threshold: the neighbour comes all the way in and becomes the day, at the
+// same time of day (no jump to its first event)
+function finishDrag() {
+  if (!ghost) return
+  var g = ghost
+  sliding = true
+  dragTo(-g.dir * g.width, IN_MS)
+  setTimeout(function() {
+    S.scrolledFor = g.date
+    select(g.date)
+    setSlide($("main"), 0, 1, 0, "")
+    dropGhost()
+    sliding = false
+  }, IN_MS + 20)
+}
+
 function swipe(el, by) {
-  // `follow`: the element under the finger moves with it (the day); else a flick is enough
+  // `follow`: the day moves with the finger, its neighbour beside it; else a flick is enough
   var follow = by === 1
   var x0 = 0, y0 = 0, t0 = 0, dx = 0, on = false, axis = ""
   el.addEventListener("touchstart", function(ev) {
@@ -551,21 +596,23 @@ function swipe(el, by) {
     if (!axis && Math.abs(mx) + Math.abs(my) > 10) axis = Math.abs(mx) > Math.abs(my) * 1.2 ? "x" : "y"
     if (axis !== "x") return
     dx = mx
-    if (follow && !stillMotion()) setSlide(el, Math.round(dx * 0.92), 1, 0, "")
+    if (follow && !stillMotion() && dx) { showGhost(dx < 0 ? 1 : -1); dragTo(dx, 0) }
   }, { passive: true })
   el.addEventListener("touchend", function() {
     if (!on) return
     on = false
     if (axis !== "x") return
     var fast = Math.abs(dx) / Math.max(1, Date.now() - t0) > 0.5
-    if (Math.abs(dx) > 70 || (fast && Math.abs(dx) > 30)) {
-      Kit.tick()
-      if (follow) slideTo(L.addDays(S.selected, dx < 0 ? by : -by), true)
-      else step(dx < 0 ? by : -by)
-    } else if (follow) setSlide(el, 0, 1, 200, "cubic-bezier(.2,.8,.2,1)") // not far enough: back
+    var far = Math.abs(dx) > 70 || (fast && Math.abs(dx) > 30)
+    if (!follow) { if (far) { Kit.tick(); step(dx < 0 ? by : -by) } return }
+    if (far && ghost) { Kit.tick(); finishDrag(); return }
+    if (far) { Kit.tick(); step(dx < 0 ? 1 : -1); return } // Reduce Motion: no drag, just the day
+    // not far enough: both back where they were
+    dragTo(0, 200)
+    setTimeout(dropGhost, 220)
   }, { passive: true })
   el.addEventListener("touchcancel", function() {
-    if (on && follow) setSlide(el, 0, 1, 200, "ease-out")
+    if (on && follow) { dragTo(0, 200); setTimeout(dropGhost, 220) }
     on = false
   }, { passive: true })
 }

@@ -104,8 +104,10 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
 - One view, the day (no month or Coming up on the phone, on purpose). A sticky bar holds the
   day, Today (always scrolls back to now), refetch and the week strip (‹ › or a swipe on it moves
-  a week; a swipe on the timeline moves a day: the day follows the finger and the next slides in
-  from the side time goes, `slideTo`; taps get a short slide; none with Reduce Motion). Under it: today's Now/Next card, all-day chips,
+  a week; a swipe on the timeline moves a day: the day follows the finger with its neighbour
+  drawn beside it (`showGhost`, inside `.days`, which clips sideways so the page never widens),
+  and let go it becomes the day at the same time of day; taps get a short slide (`slideTo`); none
+  with Reduce Motion). The page asks for the week before too, for the drag back from a Monday. Under it: today's Now/Next card, all-day chips,
   and the day as a timeline at 72 px an hour (a half hour is a tap target): blocks by their
   times, side by side where they overlap, free time left empty with a grey label, a line at now,
   a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once
@@ -119,7 +121,7 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   "next" tag, faded past, dashed not accepted). Green is for now and Join; amber marks a heavy day
 - Light or dark follows the phone (`followThePhone`): the Omarchy theme as it is when its mode
   matches, else its accents on a ground for the phone's mode
-- The page asks for the selected week and two after it (`DAYS = 21`) every minute with the last
+- The page asks for the week before, the selected week and two after it (`DAYS = 28`) every minute with the last
   ETag; `serve.rs` tags the agenda without its `now`, so an unchanged minute is a 304 with no body
 - The page reloads itself when it changes (the kit's `Kit.autoUpdate()`): `serve.rs` serves it
   with `server::file_with`, which stamps it with a version of its files and `Layout.js`

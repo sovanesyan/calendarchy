@@ -70,8 +70,11 @@
 
   /* the day slides sideways between days (app.js slideTo): vertical scrolling stays the
      browser's, and nothing that slides out widens the page */
-  body{overflow-x:clip}
+  /* the day and, during a drag, its neighbour (main.ghost) slide inside .days, which clips them
+     sideways: nothing past the edge widens the page (a wider page re-zooms and loses its scroll) */
+  .days{position:relative;overflow-x:clip}
   main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l);touch-action:pan-y;will-change:transform}
+  main.ghost{pointer-events:none;z-index:1;background:var(--bg)}
 
   .toast{position:fixed;z-index:20;left:50%;bottom:calc(var(--safe-b) + 14px);transform:translate(-50%,20px);opacity:0;pointer-events:none;
     max-width:calc(100% - 2rem);padding:.45rem .9rem;border-radius:999px;background:var(--fg);color:var(--bg);font-size:12.5px;
@@ -178,11 +181,11 @@
   </div>
 </header>
 
-<main id="main"><div class="empty">Loading…</div></main>
+<div class="days" id="days"><main id="main"><div class="empty">Loading…</div></main></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=8"></script>
+<script src="/app.js?v=10"></script>
 </body>
 </html>
