@@ -379,7 +379,7 @@ function timeline(m, rows, sel, isToday, ghost) {
 
 // "8" … "19", or "8 AM" with 12-hour time
 function hourLabel(hr) {
-  if (!twelve()) return String(hr)
+  if (!twelve()) return (hr < 10 ? "0" : "") + hr + ":00"
   return (hr % 12 || 12) + (hr < 12 || hr === 24 ? " AM" : " PM")
 }
 
