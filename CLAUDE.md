@@ -120,6 +120,8 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   matches, else its accents on a ground for the phone's mode
 - The page asks for the selected week and two after it (`DAYS = 21`) every minute with the last
   ETag; `serve.rs` tags the agenda without its `now`, so an unchanged minute is a 304 with no body
+- The page reloads itself when it changes (the kit's `Kit.autoUpdate()`): `serve.rs` serves it
+  with `server::file_with`, which stamps it with a version of its files and `Layout.js`
 - Alerts on the phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
 
 ## Committing

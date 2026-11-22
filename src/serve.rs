@@ -205,7 +205,8 @@ pub fn handle(w: &Web, req: &Request) -> Response {
             Ok(js) => Response::new(200, "text/javascript; charset=utf-8", js.replacen(".pragma library", "", 1)).with("Cache-Control", "no-cache"),
             Err(e) => Response::error(500, &format!("{}: {e}", w.layout.display())),
         },
-        path => match server::file(&w.web, FILES, path) {
+        // the page's version covers Layout.js too, so a change to the window's rules reloads it
+        path => match server::file_with(&w.web, FILES, path, &[w.layout.as_path()]) {
             None => Response::text(404, "not here\n"),
             Some(Ok(r)) => r,
             Some(Err(e)) => {

@@ -584,6 +584,7 @@ function start() {
   })
   followThePhone()
   Kit.offline()
+  Kit.autoUpdate() // a changed page reloads itself (the page's X-Kit-Page against its meta)
   render()
   load().then(ensureMonth)
 }

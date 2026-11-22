@@ -58,6 +58,8 @@ interface KitApi {
 
   offline(onChange?: (offline: boolean, saved: number | null) => void): Promise<ServiceWorkerRegistration | null>
   fmtSaved(ms: number | null | undefined, now?: number): string
+  autoUpdate(opts?: { every?: number }): boolean
+  pageChanged(have: string | null | undefined, now: string | null | undefined, ok: boolean, reloadedFor: string | null | undefined): boolean
   push: {
     state(): Promise<KitPushState>
     enable(): Promise<KitPushState>

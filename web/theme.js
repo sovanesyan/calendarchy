@@ -23,6 +23,11 @@
 //   Kit.offline(onChange)   register /sw.js (kit/web/sw.js: the offline snapshot, push)
 //                     and show "Offline · as of 08:12" (.kit-offline) while answers come
 //                     from the snapshot; Kit.fmtSaved(ms, now) words it (pure)
+//   Kit.autoUpdate({every})   reload when the page changed on the server: a HEAD of it every
+//                     minute and when the app comes back to the front, its X-Kit-Page against
+//                     the page's <meta name="kit-page"> (the crate's server::file puts both
+//                     on); never while a dialog is open or a field has focus, and once per
+//                     version. Kit.pageChanged(have, now, ok, reloadedFor) decides (pure)
 //   Kit.push.state() / enable() / disable()   push to this phone through /api/push* (the
 //                     crate's push::Push::route); enable() from a tap. Kit.pushButton() is
 //                     a header .btn.icon (a bell) that shows and flips it
@@ -290,6 +295,41 @@ function offline(onChange) {
   })
   root.addEventListener("online", function() { if (down) set(false) })
   return nav.serviceWorker.register("/sw.js", { scope: "/" }).catch(function() { return null })
+}
+
+// Whether a page tagged `have` should reload for the tag `now` a HEAD of it answered (`ok`):
+// a different one, and not one it already reloaded for (`reloadedFor`), which a page that
+// comes back the same (an offline snapshot, a slow network) would otherwise loop on
+function pageChanged(have, now, ok, reloadedFor) {
+  return !!(ok && have && now && now !== have && now !== reloadedFor)
+}
+
+// Reload when the page has changed on the server (the module header). False when the page
+// carries no version (served by something that doesn't stamp it)
+function autoUpdate(opts) {
+  var doc = root.document, loc = root.location
+  var meta = doc && doc.querySelector('meta[name="kit-page"]')
+  if (!meta || !root.fetch) return false
+  var have = meta.getAttribute("content"), busy = false, key = "kit-page-reloaded"
+  function stored() { try { return root.sessionStorage.getItem(key) } catch (e) { return null } }
+  function engaged() {
+    if (doc.querySelector("dialog[open]")) return true
+    var a = /** @type {HTMLElement | null} */ (doc.activeElement)
+    return !!a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)
+  }
+  function check() {
+    if (busy || doc.visibilityState !== "visible") return
+    busy = true
+    root.fetch(loc.pathname + loc.search, { method: "HEAD", cache: "no-store" }).then(function(r) {
+      var now = r.headers.get("X-Kit-Page")
+      if (!pageChanged(have, now, r.ok, stored()) || engaged()) return
+      try { root.sessionStorage.setItem(key, String(now)) } catch (e) {}
+      loc.reload()
+    }).catch(function() {}).then(function() { busy = false })
+  }
+  root.setInterval(check, (opts && opts.every) || 60000)
+  doc.addEventListener("visibilitychange", check)
+  return true
 }
 
 function b64urlBytes(s) {
@@ -739,7 +779,7 @@ root.Kit = {
   pullToRefresh: pullToRefresh, pullTravel: pullTravel, PULL_AT: PULL_AT,
   loadTheme: loadTheme, applyTheme: applyTheme, themeVars: themeVars, goodColor: goodColor, warnColor: warnColor, urgentColor: urgentColor, onAccent: onAccent, readable: readable, contrastOf: contrastOf,
   rgbOf: rgbOf, hex: hex, mix: mix, luminance: luminance, contrast: contrast, isGreen: isGreen, isAmber: isAmber, h: h,
-  offline: offline, fmtSaved: fmtSaved, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
+  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, choice: choice, autogrow: autogrow,
   privacy: privacy, lock: lock, standalone: standalone
