@@ -332,22 +332,33 @@ function sameEvent(a, b) {
   return x === y || (Math.min(x.length, y.length) >= 4 && (x.indexOf(y) >= 0 || y.indexOf(x) >= 0))
 }
 
+// A Work event that came from the Personal calendar: an invitation sent from iCloud (its
+// organizer is iCloud's invitation relay, imip.me.com, or an iCloud address). It's Personal
+var ICLOUD_ORGANIZER = /@(imip\.me\.com|icloud\.com|me\.com|mac\.com)$/i
+function fromPersonal(e) {
+  return e.attendees.some(function(a) { return a.status === "organizer" && ICLOUD_ORGANIZER.test(a.email) })
+}
+
 // Both calendars as one list: rows {e, source, also: [{e, source}]}, all day first, then by
-// start (Work first on a tie); a Personal event that duplicates a Work one goes in its `also`
-// (the Work copy leads: it has the invite, the people and the link). `day` is the day with
-// each duplicate once, for gaps and overlaps
+// start (Work first on a tie). A Personal event that duplicates a Work one goes in its `also`
+// (the Work copy leads: it has the invite, the people and the link), unless the Work copy is
+// an invitation from the Personal calendar: then the Personal one stands alone, and so does
+// such an invitation with no copy (drawn as Personal). `day` is the day with each duplicate
+// once, for gaps and overlaps
 function merge(dayData) {
-  var rows = (dayData.google || []).map(function(e) { return { e: e, source: "google", also: [] } })
-  var kept = []
+  var rows = (dayData.google || []).map(function(e) { return { e: e, source: fromPersonal(e) ? "icloud" : "google", also: [], invite: fromPersonal(e) } })
+  var kept = [], dropped = []
   ;(dayData.icloud || []).forEach(function(e) {
-    var twin = rows.filter(function(r) { return r.source === "google" && !r.also.length && sameEvent(r.e, e) })[0]
-    if (twin) twin.also.push({ e: e, source: "icloud" })
+    var twin = rows.filter(function(r) { return r.e.id.indexOf("google:") === 0 && !r.also.length && sameEvent(r.e, e) })[0]
+    if (twin && twin.invite) { dropped.push(twin.e); twin.e = e; twin.invite = false; kept.push(e) }
+    else if (twin) twin.also.push({ e: e, source: "icloud" })
     else { rows.push({ e: e, source: "icloud", also: [] }); kept.push(e) }
   })
   var key = function(r) { return r.e.allDay ? -1 : r.e.start }
   rows.forEach(function(r, n) { r.n = n })
   rows.sort(function(a, b) { return key(a) - key(b) || a.n - b.n })
-  return { rows: rows, day: { date: dayData.date, google: dayData.google || [], icloud: kept } }
+  var google = (dayData.google || []).filter(function(e) { return dropped.indexOf(e) < 0 })
+  return { rows: rows, day: { date: dayData.date, google: google, icloud: kept } }
 }
 
 // "tmrw 09:00 Title": the first accepted timed event after `date` in either calendar, 14 days ahead
@@ -387,7 +398,7 @@ function nextCard(next) {
   return card
 }
 
-function sourceOf(e) { return e.id.indexOf("icloud:") === 0 ? "icloud" : "google" }
+function sourceOf(e) { return e.id.indexOf("icloud:") === 0 || fromPersonal(e) ? "icloud" : "google" }
 
 // ------------------------------------------------------------------ the event
 

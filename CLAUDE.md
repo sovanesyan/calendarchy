@@ -110,7 +110,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once
   (`merge`/`sameEvent` in `web/app.js`: same start and end, or both all day, and the same title
   ignoring case, punctuation and emoji, or one inside the other); the Work copy leads, so its
-  Accept/Decline and link are the ones offered
+  Accept/Decline and link are the ones offered. Except an invitation from the Personal calendar
+  (a Work event whose organizer is iCloud's relay `imip.me.com` or an iCloud address,
+  `fromPersonal`): that's Personal, drawn and acted on as Personal only
 - Colour roles: Work blue and Personal orange (`--work`/`--personal`, set in the page, a lighter
   pair under `data-scheme=dark`) and nothing else uses them; state is shape (the now line, the
   "next" tag, faded past, dashed not accepted). Green is for now and Join; amber marks a heavy day
