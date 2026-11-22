@@ -64,7 +64,7 @@
   .wd.today b{color:var(--accent)}
   /* the selected day is a pill over the strip that the days' scroll moves (app.js header):
      driven by the scroll itself (.days's scroll timeline), so it keeps up 1:1. Its --i is the
-     day it rests on, --back/--fwd how many days a screen's scroll each way moves it */
+     day it rests on, --o0…--o6 how many days off it is with each pane in view */
   .week{position:relative;overflow:hidden}
   .selpill{position:absolute;top:0;bottom:0;left:calc(var(--i) * ((100% - 12px) / 7 + 2px));width:calc((100% - 12px) / 7);
     border-radius:10px;background:var(--accent);overflow:hidden;pointer-events:none;
@@ -74,13 +74,14 @@
   .selpill .wd,.selpill .wd b,.selpill .wd small{color:var(--on-accent)}
   .selpill .wd i{background:color-mix(in srgb,var(--on-accent) 25%,transparent)}
   .selpill .wd i span{background:var(--on-accent)}
+  /* a stop for each of the seven panes (app.js SPAN): the pill as many days off as --oK */
   @keyframes pill-go{
-    from{transform:translateX(calc(var(--back,1) * -1 * (100% + 2px)))} 50%{transform:none} to{transform:translateX(calc(var(--fwd,1) * (100% + 2px)))}}
+    0%{transform:translateX(calc(var(--o0,-3) * (100% + 2px)))} 16.6667%{transform:translateX(calc(var(--o1,-2) * (100% + 2px)))} 33.3333%{transform:translateX(calc(var(--o2,-1) * (100% + 2px)))} 50%{transform:translateX(calc(var(--o3,0) * (100% + 2px)))} 66.6667%{transform:translateX(calc(var(--o4,1) * (100% + 2px)))} 83.3333%{transform:translateX(calc(var(--o5,2) * (100% + 2px)))} 100%{transform:translateX(calc(var(--o6,3) * (100% + 2px)))}}
   @keyframes pill-back{
-    from{transform:translateX(calc(var(--back,1) * ((100% - 12px) / 7 + 2px)))} 50%{transform:none} to{transform:translateX(calc(var(--fwd,1) * -1 * ((100% - 12px) / 7 + 2px)))}}
+    0%{transform:translateX(calc(var(--o0,-3) * -1 * ((100% - 12px) / 7 + 2px)))} 16.6667%{transform:translateX(calc(var(--o1,-2) * -1 * ((100% - 12px) / 7 + 2px)))} 33.3333%{transform:translateX(calc(var(--o2,-1) * -1 * ((100% - 12px) / 7 + 2px)))} 50%{transform:translateX(calc(var(--o3,0) * -1 * ((100% - 12px) / 7 + 2px)))} 66.6667%{transform:translateX(calc(var(--o4,1) * -1 * ((100% - 12px) / 7 + 2px)))} 83.3333%{transform:translateX(calc(var(--o5,2) * -1 * ((100% - 12px) / 7 + 2px)))} 100%{transform:translateX(calc(var(--o6,3) * -1 * ((100% - 12px) / 7 + 2px)))}}
   .wd.weekend small{color:var(--dim)}
 
-  /* the day before, the day and the day after, a screen each, in the browser's own sideways
+  /* three days before the day and three after (app.js SPAN), a screen each, in the browser's own sideways
      scroller (app.js go/settled): it follows the finger at the screen's rate and snaps a day at
      a time. Its height is set to the day's (centre), and vertical scrolling stays the page's */
   .days{scroll-timeline:--days x;display:flex;align-items:flex-start;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
@@ -198,14 +199,18 @@
 </header>
 
 <div class="days" id="days">
-  <div class="pane"><main id="before" inert></main></div>
+  <div class="pane"><main inert></main></div>
+  <div class="pane"><main inert></main></div>
+  <div class="pane"><main inert></main></div>
   <div class="pane"><main id="main"><div class="empty">Loading…</div></main></div>
-  <div class="pane"><main id="after" inert></main></div>
+  <div class="pane"><main inert></main></div>
+  <div class="pane"><main inert></main></div>
+  <div class="pane"><main inert></main></div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=14"></script>
+<script src="/app.js?v=15"></script>
 </body>
 </html>

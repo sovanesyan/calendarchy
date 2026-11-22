@@ -105,7 +105,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
 - One view, the day (no month or Coming up on the phone, on purpose). A sticky bar holds the
   day, Today (always scrolls back to now), refetch and the week strip (‹ › or a swipe on it moves
   a week; a swipe on the timeline moves a day: the days are the browser's own sideways scroller
-  (`.days`, three panes: the day before, the day, the day after, snapping one at a time), so the
+  (`.days`, seven panes: three days each side of the day, snapping one at a time; it re-centres
+  only once the finger is up and the scroll has stopped, so the spare days are the room for quick
+  swipes in a row), so the
   swipe runs at the screen's rate with native momentum, not as a JS transform; at rest on a
   neighbour it becomes the day (`settled`), drawn again in the middle, at the same time of day.
   Taps and keys draw the target in the side pane and smooth-scroll to it (`go`); a redraw waits

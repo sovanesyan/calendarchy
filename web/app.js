@@ -155,14 +155,17 @@ function step(n) { go(L.addDays(S.selected, n)) }
 
 // ------------------------------------------------------------------ moving between days
 
-// The days are the browser's own sideways scroller (.days): the day before, the day and the
-// day after, a screen each, snapping one at a time. So the browser moves them with the finger
+// The days are the browser's own sideways scroller (.days): SPAN days before the day and
+// SPAN after, a screen each, snapping one at a time. So the browser moves them with the finger
 // at the screen's own rate (120 Hz on a ProMotion iPhone) with its own momentum, where a
 // transform set from touch events gets 60 at best and drops frames when the page is busy.
-// Come to rest on a neighbour and that one is the day: the three are drawn again around it,
-// back in the middle, and nothing seen moves
+// Come to rest on another day and that one is the day: they're drawn again around it, back in
+// the middle, and nothing seen moves. That waits for the finger to lift and the scroll to stop,
+// so SPAN is the room for quick swipes one after another before it does (with one a side, a
+// second swipe that started while the first was settling hit the end and went nowhere)
+var SPAN = 3, MID = SPAN
 /** @type {string[]} */
-var panes = []          // the dates drawn in the three panes
+var panes = []          // the dates drawn in the panes, MID the selected one
 var touching = false    // a finger is on the days
 var settleTimer = 0     // scroll events still coming
 var renderLater = false // a redraw that waited for the days to stop moving
@@ -170,20 +173,23 @@ var going = ""          // the day a tap or a key is scrolling to
 
 function stillMotion() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches }
 function moving() { return touching || !!settleTimer }
+function sides() { return /** @type {HTMLElement[]} */ (Array.prototype.slice.call(document.querySelectorAll("#days > .pane > main"))) }
 
-// Go to `date`: drawn in the pane on the side time goes (later on the right), then scrolled to
+// Go to `date`: scrolled to where it's drawn, or first drawn in the pane next to the day on
+// the side time goes (later on the right)
 function go(date) {
   if (date === S.selected || !panes.length || !S.agenda || stillMotion()) { select(date); return }
-  var dir = date > S.selected ? 1 : -1, days = $("days")
-  if (panes[1 + dir] !== date) {
-    var side = $(dir > 0 ? "after" : "before")
-    side.textContent = ""
-    day(side, date, true)
-    panes[1 + dir] = date
+  var k = panes.indexOf(date), days = $("days")
+  if (k < 0) {
+    k = MID + (date > S.selected ? 1 : -1)
+    var pane = sides()[k]
+    pane.textContent = ""
+    day(pane, date, true)
+    panes[k] = date
     pillSpan()
   }
   going = date
-  days.scrollTo({ left: days.clientWidth * (1 + dir), behavior: "smooth" })
+  days.scrollTo({ left: days.clientWidth * k, behavior: "smooth" })
 }
 
 function scrolled() {
@@ -199,7 +205,7 @@ function settled() {
   var days = $("days"), w = days.clientWidth, i = Math.round(days.scrollLeft / w)
   if (Math.abs(days.scrollLeft - i * w) > 2) return // still on its way to a day
   var date = panes[i]
-  if (i === 1 || !date) { if (renderLater) render(); return }
+  if (i === MID || !date) { if (renderLater) render(); return }
   // swiped there: the same time of day (a tap opens it at now or its first event)
   if (going !== date) { Kit.tick(); S.scrolledFor = date }
   going = ""
@@ -211,7 +217,7 @@ function settled() {
 function centre() {
   var days = $("days"), head = document.querySelector("header")
   days.style.height = Math.max($("main").offsetHeight, window.innerHeight - (head ? head.offsetHeight : 0)) + "px"
-  days.scrollLeft = days.clientWidth
+  days.scrollLeft = days.clientWidth * MID
   pillFollow()
 }
 
@@ -222,18 +228,16 @@ function render() {
   // a swipe is under way: the days wait for it to come to rest
   if (moving()) { renderLater = true; return }
   renderLater = false
-  var main = $("main"), before = $("before"), after = $("after")
-  main.textContent = before.textContent = after.textContent = ""
-  panes = [L.addDays(S.selected, -1), S.selected, L.addDays(S.selected, 1)]
+  var all = sides(), main = $("main")
+  all.forEach(function(el) { el.textContent = "" })
+  panes = all.map(function(_, k) { return L.addDays(S.selected, k - MID) })
   pillSpan()
   if (!S.agenda) {
     main.appendChild(S.error ? h("div", { "class": "err" }, "Couldn't load the calendar: " + S.error) : h("div", { "class": "empty" }, "Loading…"))
     return centre()
   }
   if (S.error) main.appendChild(h("div", { "class": "msg bad" }, S.error))
-  day(main)
-  day(before, panes[0], true)
-  day(after, panes[2], true)
+  all.forEach(function(el, k) { if (k === MID) day(el); else day(el, panes[k], true) })
   centre()
 }
 
@@ -273,13 +277,12 @@ function header() {
   pillSpan()
 }
 
-// How many days the pill goes for a whole screen's scroll each way: one, or the distance to
-// a tapped day drawn in a side pane (go)
+// Where the pill is with each pane in view, in days from the selected one (--o0…): k - MID,
+// but for a tapped day drawn next to it (go)
 function pillSpan() {
   var pill = $("selpill")
-  if (!pill || panes.length !== 3) return
-  pill.style.setProperty("--back", String(dayGap(panes[0], panes[1])))
-  pill.style.setProperty("--fwd", String(dayGap(panes[1], panes[2])))
+  if (!pill || !panes.length) return
+  panes.forEach(function(d, k) { pill.style.setProperty("--o" + k, String(dayGap(S.selected, d))) })
 }
 function dayGap(a, b) { return Math.round((L.toDate(b).getTime() - L.toDate(a).getTime()) / 86400000) }
 
@@ -287,9 +290,11 @@ function dayGap(a, b) { return Math.round((L.toDate(b).getTime() - L.toDate(a).g
 var CSS_PILL = !!(window.CSS && CSS.supports && CSS.supports("animation-timeline: --days"))
 function pillFollow() {
   var pill = $("selpill"), days = $("days")
-  if (CSS_PILL || !pill) return
-  var w = days.clientWidth || 1, p = days.scrollLeft / w - 1
-  var n = p * Number(pill.style.getPropertyValue(p < 0 ? "--back" : "--fwd") || 1)
+  if (CSS_PILL || !pill || !panes.length) return
+  var at = Math.max(0, Math.min(panes.length - 1, days.scrollLeft / (days.clientWidth || 1)))
+  var k = Math.min(panes.length - 2, Math.floor(at)), f = at - k
+  var off = function(j) { return Number(pill.style.getPropertyValue("--o" + j)) || 0 }
+  var n = off(k) + (off(k + 1) - off(k)) * f
   pill.style.transform = n ? "translateX(calc(" + n + " * (100% + 2px)))" : ""
   var inner = /** @type {HTMLElement} */ (pill.firstChild)
   inner.style.transform = n ? "translateX(calc(" + (-n) + " * ((100% - 12px) / 7 + 2px)))" : ""
