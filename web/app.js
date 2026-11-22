@@ -558,7 +558,7 @@ function details(e, date, source, also) {
   dlg.addEventListener("click", function(ev) { if (ev.target === dlg) close() })
   dlg.addEventListener("cancel", function(ev) { ev.preventDefault(); close() })
   document.body.appendChild(dlg)
-  dlg.showModal()
+  Kit.sheetOpen(dlg)
 }
 
 function attendees(list) {

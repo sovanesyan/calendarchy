@@ -116,10 +116,14 @@
   .kit-fling-stamp[data-side=right]{left:1rem;transform:rotate(-12deg)}
   .kit-fling-stamp[data-side=left]{right:1rem;transform:rotate(12deg)}
   /* Kit.sheet(): actions in thumb reach */
-  .kit-sheet{position:fixed;inset:auto 0 0 0;margin:0 auto;width:100%;max-width:520px;max-height:none;padding:0;border:0;background:transparent;color:var(--fg)}
+  /* overflow visible: a dialog scrolls by default, and opening it focuses its first button and
+     scrolls that into view, which pulled the sheet up to mid-screen before it rose */
+  .kit-sheet{position:fixed;inset:auto 0 0 0;margin:0 auto;width:100%;max-width:520px;max-height:none;padding:0;border:0;background:transparent;color:var(--fg);overflow:visible}
   .kit-sheet::backdrop{background:rgba(0,0,0,.35);animation:kit-fade .18s ease}
   .kit-sheet-box{background:var(--bg);border:1px solid var(--line);border-bottom:0;border-radius:16px 16px 0 0;padding:.4rem .8rem calc(.8rem + var(--safe-b));
-    display:flex;flex-direction:column;gap:.4rem;animation:kit-rise .2s ease}
+    display:flex;flex-direction:column;gap:.4rem}
+  /* Kit.sheetOpen(): it waits below the screen until it's been drawn there, then rises */
+  .kit-sheet.kit-rising .kit-sheet-box{transform:translateY(100%)}
   .kit-sheet.kit-closing .kit-sheet-box{transform:translateY(100%);transition:transform .18s ease}
   .kit-sheet-grip{width:36px;height:4px;border-radius:2px;background:var(--line);margin:.2rem auto .4rem}
   .kit-sheet-title{font-weight:700;padding:0 .2rem}
@@ -127,7 +131,6 @@
   .kit-sheet-act{appearance:none;border:1px solid var(--line);background:var(--surface);border-radius:12px;min-height:46px;padding:0 1rem;text-align:left;cursor:pointer}
   .kit-sheet-act.danger{color:var(--urgent)}
   .kit-sheet-act.cancel{text-align:center;color:var(--dim);margin-top:.2rem}
-  @keyframes kit-rise{from{transform:translateY(100%)}}
   @keyframes kit-fade{from{opacity:0}}
   /* Kit.privacy() and Kit.lock(): nothing to read in the app switcher or behind the curtain */
   .kit-veil body>*,.kit-locked body>:not(.kit-lock){filter:blur(18px)}
@@ -136,5 +139,5 @@
   .kit-lock .btn{height:40px;padding:0 1.2rem;font-size:14px}
   /* Kit.transition(): a quick cross-fade unless motion is reduced */
   ::view-transition-old(root),::view-transition-new(root){animation-duration:.18s}
-  @media (prefers-reduced-motion:reduce){.kit-swipe>:not(.kit-swipe-under),.kit-dock,.kit-fling{transition:none}.kit-sheet-box{animation:none}}
+  @media (prefers-reduced-motion:reduce){.kit-swipe>:not(.kit-swipe-under),.kit-dock,.kit-fling{transition:none}}
 }

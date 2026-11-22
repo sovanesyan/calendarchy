@@ -49,7 +49,8 @@
 //                     Returns {go(side)}: the same fling from a key or a button. Kit.flingTilt (pure)
 //   Kit.sheet({title, text, actions: [{label, danger, run}]})   a bottom sheet of
 //                     actions; resolves to the label chosen, or null; dragged down it
-//                     closes. Kit.sheetDrag(box, close) gives a page's own sheet the same
+//                     closes. A page's own sheet gets the same from Kit.sheetDrag(box, close),
+//                     and Kit.sheetOpen(dlg) shows it rising from the bottom
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
@@ -740,6 +741,26 @@ function sheetDrag(box, close) {
   box.addEventListener("touchcancel", function() { if (owned) back(); y0 = null })
 }
 
+// Show a bottom sheet (`dlg`, a dialog.kit-sheet around a .kit-sheet-box): it rises from
+// below the screen once it's been drawn there. Started at once, the first frames went on
+// laying it out and it showed up already halfway (a rise of 0.2 s is half done by 50 ms)
+var SHEET_RISE = "transform .38s cubic-bezier(.32,.72,0,1)" // iOS's sheet curve
+function sheetOpen(dlg) {
+  var box = /** @type {HTMLElement | null} */ (dlg.querySelector(".kit-sheet-box"))
+  var still = root.matchMedia && root.matchMedia("(prefers-reduced-motion: reduce)").matches
+  if (box && !still) dlg.classList.add("kit-rising")
+  dlg.showModal()
+  if (!box || still) return
+  var el = box
+  root.requestAnimationFrame(function() {
+    root.requestAnimationFrame(function() {
+      el.style.transition = SHEET_RISE
+      dlg.classList.remove("kit-rising")
+      setTimeout(function() { if (el.style.transition === SHEET_RISE) el.style.transition = "" }, 420)
+    })
+  })
+}
+
 function sheet(o) {
   var doc = root.document
   return new Promise(function(done) {
@@ -769,7 +790,7 @@ function sheet(o) {
     dlg.addEventListener("click", function(e) { if (e.target === dlg) close(null) })
     dlg.addEventListener("cancel", function(e) { e.preventDefault(); close(null) })
     doc.body.appendChild(dlg)
-    dlg.showModal()
+    sheetOpen(dlg)
   })
 }
 
@@ -843,7 +864,7 @@ root.Kit = {
   pullToRefresh: pullToRefresh, pullTravel: pullTravel, PULL_AT: PULL_AT,
   loadTheme: loadTheme, applyTheme: applyTheme, themeVars: themeVars, goodColor: goodColor, warnColor: warnColor, urgentColor: urgentColor, onAccent: onAccent, readable: readable, contrastOf: contrastOf,
   rgbOf: rgbOf, hex: hex, mix: mix, luminance: luminance, contrast: contrast, isGreen: isGreen, isAmber: isAmber, h: h,
-  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
+  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, choice: choice, autogrow: autogrow,
   privacy: privacy, lock: lock, standalone: standalone

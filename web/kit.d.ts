@@ -61,6 +61,7 @@ interface KitApi {
   autoUpdate(opts?: { every?: number }): boolean
   updateNow(): Promise<boolean>
   sheetDrag(box: HTMLElement, close: () => void): void
+  sheetOpen(dlg: HTMLDialogElement): void
   pageChanged(have: string | null | undefined, now: string | null | undefined, ok: boolean, reloadedFor: string | null | undefined): boolean
   push: {
     state(): Promise<KitPushState>
