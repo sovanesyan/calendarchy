@@ -15,7 +15,8 @@
 //                     HTML; an attribute that's a function is a listener (onclick)
 //   Kit.pullToRefresh(onRefresh)   pull down from the top to call onRefresh (touch only:
 //                     a no-op on desktop); a ring under the safe area shows the pull and
-//                     turns until onRefresh's promise settles. Starts only when the page
+//                     turns until onRefresh's promise settles. With autoUpdate on it first asks for a
+//                     newer page (updateNow) and reloads instead when there is one. Starts only when the page
 //                     and every scroller under the finger are at their top, and never in
 //                     [data-no-pull]; kit.css's .kit-ptr draws it
 //   Kit.pullTravel(dy)   how far the ring follows a finger dy px down (pure)
@@ -27,7 +28,9 @@
 //                     minute and when the app comes back to the front, its X-Kit-Page against
 //                     the page's <meta name="kit-page"> (the crate's server::file puts both
 //                     on); never while a dialog is open or a field has focus, and once per
-//                     version. Kit.pageChanged(have, now, ok, reloadedFor) decides (pure)
+//                     version. Kit.pageChanged(have, now, ok, reloadedFor) decides (pure).
+//                     Kit.updateNow() asks at once (a pull to refresh does, first) and
+//                     resolves true when it's reloading
 //   Kit.push.state() / enable() / disable()   push to this phone through /api/push* (the
 //                     crate's push::Push::route); enable() from a tap. Kit.pushButton() is
 //                     a header .btn.icon (a bell) that shows and flips it
@@ -244,7 +247,8 @@ function pullToRefresh(onRefresh) {
     ring.classList.add("busy")
     show(PULL_AT * 0.75, true)
     var t0 = Date.now(), p
-    try { p = onRefresh() } catch (err) { p = null }
+    // a newer page first: then the pull reloads the app (the ring spins until it does)
+    p = updateNow().then(function(reloading) { return reloading ? new Promise(function() {}) : onRefresh() })
     Promise.resolve(p).catch(function() {}).then(function() {
       setTimeout(function() { busy = false; ring.classList.remove("busy"); show(0, true) }, Math.max(0, 500 - (Date.now() - t0)))
     })
@@ -306,6 +310,8 @@ function pageChanged(have, now, ok, reloadedFor) {
 
 // Reload when the page has changed on the server (the module header). False when the page
 // carries no version (served by something that doesn't stamp it)
+/** @type {((asked: boolean) => Promise<boolean>) | null} */
+var pageCheck = null
 function autoUpdate(opts) {
   var doc = root.document, loc = root.location
   var meta = doc && doc.querySelector('meta[name="kit-page"]')
@@ -317,20 +323,33 @@ function autoUpdate(opts) {
     var a = /** @type {HTMLElement | null} */ (doc.activeElement)
     return !!a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)
   }
-  function check() {
-    if (busy || doc.visibilityState !== "visible") return
+  // `asked`: from a pull or a button, so a version already reloaded for is tried again (a
+  // reload that came back stale, from the offline snapshot, isn't stuck until the next one)
+  function check(asked) {
+    if (busy || doc.visibilityState !== "visible") return Promise.resolve(false)
     busy = true
-    root.fetch(loc.pathname + loc.search, { method: "HEAD", cache: "no-store" }).then(function(r) {
+    return root.fetch(loc.pathname + loc.search, { method: "HEAD", cache: "no-store" }).then(function(r) {
       var now = r.headers.get("X-Kit-Page")
-      if (!pageChanged(have, now, r.ok, stored()) || engaged()) return
+      if (!pageChanged(have, now, r.ok, asked ? null : stored()) || (!asked && engaged())) return false
       try { root.sessionStorage.setItem(key, String(now)) } catch (e) {}
       loc.reload()
-    }).catch(function() {}).then(function() { busy = false })
+      return true
+    }).catch(function() { return false }).then(function(reloading) { busy = false; return reloading })
   }
-  root.setInterval(check, (opts && opts.every) || 60000)
-  doc.addEventListener("visibilitychange", check)
+  pageCheck = check
+  var auto = function() { check(false) }
+  root.setInterval(auto, (opts && opts.every) || 60000)
+  doc.addEventListener("visibilitychange", auto)
+  // an iPhone brings a home-screen app back with pageshow (from its page cache) or focus,
+  // not always a visibilitychange
+  root.addEventListener("pageshow", function(e) { if (e.persisted) auto() })
+  root.addEventListener("focus", auto)
   return true
 }
+
+// Ask now whether the page changed, and reload if it did: true when it's reloading. What
+// pullToRefresh does before its own refresh; also for a page's refresh button
+function updateNow() { return pageCheck ? pageCheck(true) : Promise.resolve(false) }
 
 function b64urlBytes(s) {
   var b = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4))
@@ -779,7 +798,7 @@ root.Kit = {
   pullToRefresh: pullToRefresh, pullTravel: pullTravel, PULL_AT: PULL_AT,
   loadTheme: loadTheme, applyTheme: applyTheme, themeVars: themeVars, goodColor: goodColor, warnColor: warnColor, urgentColor: urgentColor, onAccent: onAccent, readable: readable, contrastOf: contrastOf,
   rgbOf: rgbOf, hex: hex, mix: mix, luminance: luminance, contrast: contrast, isGreen: isGreen, isAmber: isAmber, h: h,
-  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
+  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, choice: choice, autogrow: autogrow,
   privacy: privacy, lock: lock, standalone: standalone

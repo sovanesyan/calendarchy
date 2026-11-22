@@ -641,7 +641,10 @@ function start() {
   clock()
   var hash = location.hash.slice(1)
   S.selected = /^\d{4}-\d{2}-\d{2}$/.test(hash) ? hash : S.today
-  $("refresh").addEventListener("click", function() { refetch(L.firstOfMonth(S.selected), false) })
+  // a newer page first (then it reloads), as a pull to refresh does
+  $("refresh").addEventListener("click", function() {
+    Kit.updateNow().then(function(reloading) { if (!reloading) refetch(L.firstOfMonth(S.selected), false) })
+  })
   $("today").addEventListener("click", function() { go(S.today) })
   $("prevwk").addEventListener("click", function() { step(-7) })
   $("nextwk").addEventListener("click", function() { step(7) })
