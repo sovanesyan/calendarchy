@@ -525,7 +525,19 @@ function followThePhone() {
   if (mq.addEventListener) mq.addEventListener("change", apply)
 }
 
+// The Home Screen icon: iOS takes the one the page links when you add it, and never swaps it
+// later, so offer the one for the phone's mode at that moment (or ?icon=light / ?icon=dark)
+function homeIcon() {
+  var asked = new URLSearchParams(location.search).get("icon")
+  var light = asked ? asked === "light" : !window.matchMedia("(prefers-color-scheme: dark)").matches
+  var link = /** @type {HTMLLinkElement | null} */ (document.querySelector('link[rel="apple-touch-icon"]'))
+  if (link) link.href = light ? "/apple-touch-icon-light.png" : "/apple-touch-icon.png"
+  var fav = /** @type {HTMLLinkElement | null} */ (document.querySelector('link[rel="icon"]'))
+  if (fav) fav.href = light ? "/icon-light.svg" : "/icon.svg"
+}
+
 function start() {
+  homeIcon()
   clock()
   var hash = location.hash.slice(1)
   S.selected = /^\d{4}-\d{2}-\d{2}$/.test(hash) ? hash : S.today
