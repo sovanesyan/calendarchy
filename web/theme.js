@@ -48,7 +48,8 @@
 //                     past Kit.FLING_AT px (or flicked) it flies off that way and runs.
 //                     Returns {go(side)}: the same fling from a key or a button. Kit.flingTilt (pure)
 //   Kit.sheet({title, text, actions: [{label, danger, run}]})   a bottom sheet of
-//                     actions; resolves to the label chosen, or null
+//                     actions; resolves to the label chosen, or null; dragged down it
+//                     closes. Kit.sheetDrag(box, close) gives a page's own sheet the same
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
@@ -220,7 +221,8 @@ function pullToRefresh(onRefresh) {
 
   doc.addEventListener("touchstart", function(e) {
     reset()
-    if (busy || e.touches.length !== 1 || !atTop(e.target)) return
+    // a sheet or dialog is up: a pull is for it (sheetDrag), not the page under it
+    if (busy || e.touches.length !== 1 || doc.querySelector("dialog[open]") || !atTop(e.target)) return
     x0 = e.touches[0].clientX; y0 = e.touches[0].clientY
   }, { passive: true })
   doc.addEventListener("touchmove", function(e) {
@@ -696,6 +698,48 @@ function autogrow(ta, max) {
 
 // A bottom sheet of actions, in thumb reach: {title, text, actions: [{label, danger, run}]}.
 // Resolves to the action's label (after its run), or null when dismissed
+// Drag a bottom sheet down to close it, as on iOS: `box` follows the finger down, from
+// anywhere on it while its content is scrolled to the top, and let go past a quarter of its
+// height (or flicked down) it carries on out and `close` runs; else it springs back. Up, or
+// in content scrolled down, stays the browser's scroll
+var SHEET_FLICK = 0.5 // px/ms
+function sheetDrag(box, close) {
+  /** @type {number | null} */
+  var y0 = null
+  var x0 = 0, t0 = 0, dy = 0, owned = false
+  function back() { box.style.transition = "transform .2s ease"; box.style.transform = "" }
+  box.addEventListener("touchstart", function(e) {
+    y0 = null
+    if (e.touches.length !== 1 || box.scrollTop > 0) return
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; t0 = Date.now(); dy = 0; owned = false
+  }, { passive: true })
+  box.addEventListener("touchmove", function(e) {
+    if (y0 == null) return
+    var d = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0
+    if (!owned) {
+      if (Math.abs(d) < 6 && Math.abs(dx) < 6) return
+      // up or sideways first: the content's scroll, not ours
+      if (d <= 0 || Math.abs(dx) >= d) { y0 = null; return }
+      owned = true
+      box.style.transition = "none"
+    }
+    if (e.cancelable) e.preventDefault() // no rubber band under the finger
+    dy = Math.max(0, d)
+    box.style.transform = dy ? "translateY(" + dy + "px)" : ""
+  }, { passive: false })
+  box.addEventListener("touchend", function() {
+    if (y0 == null || !owned) { y0 = null; return }
+    y0 = null
+    var fast = dy / Math.max(1, Date.now() - t0) > SHEET_FLICK
+    if (dy > box.offsetHeight / 4 || (fast && dy > 30)) {
+      box.style.transition = "transform .18s ease"
+      box.style.transform = "translateY(100%)"
+      close()
+    } else back()
+  })
+  box.addEventListener("touchcancel", function() { if (owned) back(); y0 = null })
+}
+
 function sheet(o) {
   var doc = root.document
   return new Promise(function(done) {
@@ -721,6 +765,7 @@ function sheet(o) {
       h("button", { "class": "kit-sheet-act cancel", type: "button", onclick: function() { close(null) } }, "Cancel")
     ])
     dlg.appendChild(box)
+    sheetDrag(box, function() { close(null) })
     dlg.addEventListener("click", function(e) { if (e.target === dlg) close(null) })
     dlg.addEventListener("cancel", function(e) { e.preventDefault(); close(null) })
     doc.body.appendChild(dlg)
@@ -798,7 +843,7 @@ root.Kit = {
   pullToRefresh: pullToRefresh, pullTravel: pullTravel, PULL_AT: PULL_AT,
   loadTheme: loadTheme, applyTheme: applyTheme, themeVars: themeVars, goodColor: goodColor, warnColor: warnColor, urgentColor: urgentColor, onAccent: onAccent, readable: readable, contrastOf: contrastOf,
   rgbOf: rgbOf, hex: hex, mix: mix, luminance: luminance, contrast: contrast, isGreen: isGreen, isAmber: isAmber, h: h,
-  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
+  offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, choice: choice, autogrow: autogrow,
   privacy: privacy, lock: lock, standalone: standalone

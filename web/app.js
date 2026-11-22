@@ -552,7 +552,9 @@ function details(e, date, source, also) {
     ]),
     h("button", { "class": "kit-sheet-act cancel", type: "button", onclick: close }, "Close")
   ]
-  dlg.appendChild(h("div", { "class": "kit-sheet-box" }, body))
+  var box = h("div", { "class": "kit-sheet-box" }, body)
+  dlg.appendChild(box)
+  Kit.sheetDrag(box, close) // dragged down, it goes
   dlg.addEventListener("click", function(ev) { if (ev.target === dlg) close() })
   dlg.addEventListener("cancel", function(ev) { ev.preventDefault(); close() })
   document.body.appendChild(dlg)
