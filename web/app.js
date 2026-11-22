@@ -151,55 +151,86 @@ function select(date) {
   if (L.firstOfMonth(date) !== month) ensureMonth()
 }
 
-function step(n) { slideTo(L.addDays(S.selected, n)) }
+function step(n) { go(L.addDays(S.selected, n)) }
 
-// ------------------------------------------------------------------ sliding between days
+// ------------------------------------------------------------------ moving between days
 
-var OUT_MS = 150, IN_MS = 240
-var sliding = false
+// The days are the browser's own sideways scroller (.days): the day before, the day and the
+// day after, a screen each, snapping one at a time. So the browser moves them with the finger
+// at the screen's own rate (120 Hz on a ProMotion iPhone) with its own momentum, where a
+// transform set from touch events gets 60 at best and drops frames when the page is busy.
+// Come to rest on a neighbour and that one is the day: the three are drawn again around it,
+// back in the middle, and nothing seen moves
+/** @type {string[]} */
+var panes = []          // the dates drawn in the three panes
+var touching = false    // a finger is on the days
+var settleTimer = 0     // scroll events still coming
+var renderLater = false // a redraw that waited for the days to stop moving
+var going = ""          // the day a tap or a key is scrolling to
+
 function stillMotion() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches }
-function setSlide(el, x, opacity, ms, ease) {
-  el.style.transition = ms ? "transform " + ms + "ms " + ease + ", opacity " + ms + "ms " + ease : "none"
-  el.style.transform = x ? "translate3d(" + x + "px,0,0)" : ""
-  el.style.opacity = opacity === 1 ? "" : String(opacity)
+function moving() { return touching || !!settleTimer }
+
+// Go to `date`: drawn in the pane on the side time goes (later on the right), then scrolled to
+function go(date) {
+  if (date === S.selected || !panes.length || !S.agenda || stillMotion()) { select(date); return }
+  var dir = date > S.selected ? 1 : -1, days = $("days")
+  if (panes[1 + dir] !== date) {
+    var side = $(dir > 0 ? "after" : "before")
+    side.textContent = ""
+    day(side, date, true)
+    panes[1 + dir] = date
+  }
+  going = date
+  days.scrollTo({ left: days.clientWidth * (1 + dir), behavior: "smooth" })
 }
 
-// Go to `date` with the day sliding the way time goes: a later day comes in from the right,
-// an earlier one from the left. From a swipe (`dragged`) the day already follows the finger,
-// so it leaves the whole width from where it was let go; from a tap it moves a little and fades
-function slideTo(date, dragged) {
-  var main = $("main"), dir = date > S.selected ? 1 : date < S.selected ? -1 : 0
-  if (!dir || sliding || stillMotion()) {
-    if (main.style.transform) setSlide(main, 0, 1, 180, "ease-out")
-    select(date)
-    return
-  }
-  sliding = true
-  var far = dragged ? main.offsetWidth : Math.round(main.offsetWidth * 0.3)
-  var fade = dragged ? 1 : 0
-  setSlide(main, -dir * far, fade, OUT_MS, "cubic-bezier(.4,0,1,1)")
-  setTimeout(function() {
-    select(date)
-    // the new day waits off to the side, scrolled to its hours, then comes in
-    setSlide(main, dir * far, fade, 0, "")
-    void main.offsetWidth // that position applies now, so the next one is a transition from it
-    setSlide(main, 0, 1, IN_MS, "cubic-bezier(.2,.8,.2,1)")
-    setTimeout(function() { setSlide(main, 0, 1, 0, ""); sliding = false }, IN_MS + 30)
-  }, OUT_MS)
+function scrolled() {
+  clearTimeout(settleTimer)
+  settleTimer = setTimeout(settled, 120)
+}
+
+function settled() {
+  clearTimeout(settleTimer)
+  settleTimer = 0
+  if (touching) return
+  var days = $("days"), w = days.clientWidth, i = Math.round(days.scrollLeft / w)
+  if (Math.abs(days.scrollLeft - i * w) > 2) return // still on its way to a day
+  var date = panes[i]
+  if (i === 1 || !date) { if (renderLater) render(); return }
+  // swiped there: the same time of day (a tap opens it at now or its first event)
+  if (going !== date) { Kit.tick(); S.scrolledFor = date }
+  going = ""
+  select(date)
+}
+
+// The middle pane in view, and the days as tall as the day (at least the screen), so a
+// taller neighbour doesn't leave the page scrolling on past an empty day
+function centre() {
+  var days = $("days"), head = document.querySelector("header")
+  days.style.height = Math.max($("main").offsetHeight, window.innerHeight - (head ? head.offsetHeight : 0)) + "px"
+  days.scrollLeft = days.clientWidth
 }
 
 // ------------------------------------------------------------------ drawing
 
 function render() {
   header()
-  var main = $("main")
-  main.textContent = ""
+  // a swipe is under way: the days wait for it to come to rest
+  if (moving()) { renderLater = true; return }
+  renderLater = false
+  var main = $("main"), before = $("before"), after = $("after")
+  main.textContent = before.textContent = after.textContent = ""
+  panes = [L.addDays(S.selected, -1), S.selected, L.addDays(S.selected, 1)]
   if (!S.agenda) {
     main.appendChild(S.error ? h("div", { "class": "err" }, "Couldn't load the calendar: " + S.error) : h("div", { "class": "empty" }, "Loading…"))
-    return
+    return centre()
   }
   if (S.error) main.appendChild(h("div", { "class": "msg bad" }, S.error))
   day(main)
+  day(before, panes[0], true)
+  day(after, panes[2], true)
+  centre()
 }
 
 var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
@@ -224,7 +255,7 @@ function header() {
     var date = L.addDays(first, i)
     week.appendChild(h("button", {
       "class": "wd" + (date === S.today ? " today" : "") + (date === sel ? " sel" : "") + (L.isWeekend(date) ? " weekend" : ""),
-      type: "button", "aria-label": L.dayTitle(date), "aria-pressed": String(date === sel), onclick: slideTo.bind(null, date, false)
+      type: "button", "aria-label": L.dayTitle(date), "aria-pressed": String(date === sel), onclick: go.bind(null, date)
     }, [h("small", null, letters[i]), h("b", null, String(Number(date.slice(8)))), heavyBar(date)]))
   }
 }
@@ -237,8 +268,8 @@ function heavyBar(date) {
 
 // ---- Day
 
-// The day `date` (the selected one by default) into `main`. A ghost is the neighbour drawn
-// beside it during a drag: the same, but it never scrolls the page or marks the day seen
+// The day `date` (the selected one by default) into `main`. A ghost is a neighbour in a side
+// pane: the same, but it never scrolls the page or marks the day seen
 function day(main, date, ghost) {
   var sel = date || S.selected, isToday = sel === S.today
   var next = S.agenda.next
@@ -537,55 +568,25 @@ function act(verb, e, closeDetails) {
 
 // ------------------------------------------------------------------ wiring
 
-// A sideways swipe on `el` moves `by` days (the timeline a day, the week strip a week)
-// The neighbouring day during a drag: drawn beside the day, at the same height (so its hours
-// line up), moving with it. `dir` 1 is the next day (in from the right), -1 the one before
-/** @type {{el: HTMLElement, dir: number, width: number, date: string} | null} */
-var ghost = null
-function showGhost(dir) {
-  if (ghost && ghost.dir === dir) return ghost
-  dropGhost()
-  var main = $("main"), width = main.offsetWidth
-  var el = document.createElement("main")
-  el.className = "ghost"
-  el.setAttribute("aria-hidden", "true")
-  el.style.cssText = "position:absolute;margin:0;top:" + main.offsetTop + "px;left:" + main.offsetLeft + "px;width:" + width + "px"
-  day(el, L.addDays(S.selected, dir), true)
-  $("days").appendChild(el)
-  ghost = { el: el, dir: dir, width: width, date: L.addDays(S.selected, dir) }
-  return ghost
-}
-function dropGhost() { if (ghost) { ghost.el.remove(); ghost = null } }
-
-// The day and its neighbour at `dx` px from where they rest
-function dragTo(dx, ms) {
-  var main = $("main"), ease = "cubic-bezier(.2,.8,.2,1)"
-  setSlide(main, dx, 1, ms, ease)
-  if (ghost) setSlide(ghost.el, ghost.dir * ghost.width + dx, 1, ms, ease)
+// The days follow the finger by themselves (.days scrolls); this only knows when a finger is on
+// them, so nothing redraws under it
+function holdDays() {
+  var days = $("days")
+  days.addEventListener("scroll", scrolled, { passive: true })
+  if ("onscrollend" in window) days.addEventListener("scrollend", settled)
+  days.addEventListener("touchstart", function() { touching = true }, { passive: true })
+  var up = function() { touching = false; scrolled() }
+  days.addEventListener("touchend", up, { passive: true })
+  days.addEventListener("touchcancel", up, { passive: true })
+  if (window.ResizeObserver) new ResizeObserver(function() { if (!moving()) centre() }).observe($("main"))
+  window.addEventListener("resize", function() { if (!moving()) centre() })
 }
 
-// Let go past the threshold: the neighbour comes all the way in and becomes the day, at the
-// same time of day (no jump to its first event)
-function finishDrag() {
-  if (!ghost) return
-  var g = ghost
-  sliding = true
-  dragTo(-g.dir * g.width, IN_MS)
-  setTimeout(function() {
-    S.scrolledFor = g.date
-    select(g.date)
-    setSlide($("main"), 0, 1, 0, "")
-    dropGhost()
-    sliding = false
-  }, IN_MS + 20)
-}
-
-function swipe(el, by) {
-  // `follow`: the day moves with the finger, its neighbour beside it; else a flick is enough
-  var follow = by === 1
+// A flick sideways on the week strip moves a week
+function flick(el, by) {
   var x0 = 0, y0 = 0, t0 = 0, dx = 0, on = false, axis = ""
   el.addEventListener("touchstart", function(ev) {
-    if (ev.touches.length !== 1 || sliding || document.querySelector("dialog[open]")) { on = false; return }
+    if (ev.touches.length !== 1 || document.querySelector("dialog[open]")) { on = false; return }
     on = true; axis = ""; dx = 0
     x0 = ev.touches[0].clientX; y0 = ev.touches[0].clientY; t0 = Date.now()
   }, { passive: true })
@@ -594,27 +595,15 @@ function swipe(el, by) {
     var t = ev.touches[0], mx = t.clientX - x0, my = t.clientY - y0
     // the first few pixels decide: a scroll up or down is left alone
     if (!axis && Math.abs(mx) + Math.abs(my) > 10) axis = Math.abs(mx) > Math.abs(my) * 1.2 ? "x" : "y"
-    if (axis !== "x") return
-    dx = mx
-    if (follow && !stillMotion() && dx) { showGhost(dx < 0 ? 1 : -1); dragTo(dx, 0) }
+    if (axis === "x") dx = mx
   }, { passive: true })
   el.addEventListener("touchend", function() {
     if (!on) return
     on = false
-    if (axis !== "x") return
     var fast = Math.abs(dx) / Math.max(1, Date.now() - t0) > 0.5
-    var far = Math.abs(dx) > 70 || (fast && Math.abs(dx) > 30)
-    if (!follow) { if (far) { Kit.tick(); step(dx < 0 ? by : -by) } return }
-    if (far && ghost) { Kit.tick(); finishDrag(); return }
-    if (far) { Kit.tick(); step(dx < 0 ? 1 : -1); return } // Reduce Motion: no drag, just the day
-    // not far enough: both back where they were
-    dragTo(0, 200)
-    setTimeout(dropGhost, 220)
+    if (axis === "x" && (Math.abs(dx) > 70 || (fast && Math.abs(dx) > 30))) { Kit.tick(); step(dx < 0 ? by : -by) }
   }, { passive: true })
-  el.addEventListener("touchcancel", function() {
-    if (on && follow) { dragTo(0, 200); setTimeout(dropGhost, 220) }
-    on = false
-  }, { passive: true })
+  el.addEventListener("touchcancel", function() { on = false }, { passive: true })
 }
 
 // The theme: the desktop's Omarchy colours, in the phone's light or dark. When the Omarchy
@@ -653,17 +642,17 @@ function start() {
   var hash = location.hash.slice(1)
   S.selected = /^\d{4}-\d{2}-\d{2}$/.test(hash) ? hash : S.today
   $("refresh").addEventListener("click", function() { refetch(L.firstOfMonth(S.selected), false) })
-  $("today").addEventListener("click", function() { slideTo(S.today, false) })
+  $("today").addEventListener("click", function() { go(S.today) })
   $("prevwk").addEventListener("click", function() { step(-7) })
   $("nextwk").addEventListener("click", function() { step(7) })
-  swipe($("strip"), 7)
+  flick($("strip"), 7)
   Kit.pullToRefresh(function() { return refetch(L.firstOfMonth(S.selected), false) })
-  swipe($("main"), 1)
+  holdDays()
   document.addEventListener("keydown", function(ev) {
     if (document.querySelector("dialog[open]") || ev.ctrlKey || ev.metaKey || ev.altKey) return
     if (ev.key === "ArrowLeft" || ev.key === "h") step(-1)
     else if (ev.key === "ArrowRight" || ev.key === "l") step(1)
-    else if (ev.key === "t") slideTo(S.today, false)
+    else if (ev.key === "t") go(S.today)
   })
   // the minute turns: the clock, and the cache read again (the sync job refreshes it)
   ;(function tick() {

@@ -68,13 +68,14 @@
   .wd.sel i span{background:var(--on-accent)}
   .wd.weekend small{color:var(--dim)}
 
-  /* the day slides sideways between days (app.js slideTo): vertical scrolling stays the
-     browser's, and nothing that slides out widens the page */
-  /* the day and, during a drag, its neighbour (main.ghost) slide inside .days, which clips them
-     sideways: nothing past the edge widens the page (a wider page re-zooms and loses its scroll) */
-  .days{position:relative;overflow-x:clip}
-  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l);touch-action:pan-y;will-change:transform}
-  main.ghost{pointer-events:none;z-index:1;background:var(--bg)}
+  /* the day before, the day and the day after, a screen each, in the browser's own sideways
+     scroller (app.js go/settled): it follows the finger at the screen's rate and snaps a day at
+     a time. Its height is set to the day's (centre), and vertical scrolling stays the page's */
+  .days{display:flex;align-items:flex-start;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
+    overscroll-behavior-x:contain;scrollbar-width:none}
+  .days::-webkit-scrollbar{display:none}
+  .pane{flex:0 0 100%;min-width:0;scroll-snap-align:start;scroll-snap-stop:always}
+  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l)}
 
   .toast{position:fixed;z-index:20;left:50%;bottom:calc(var(--safe-b) + 14px);transform:translate(-50%,20px);opacity:0;pointer-events:none;
     max-width:calc(100% - 2rem);padding:.45rem .9rem;border-radius:999px;background:var(--fg);color:var(--bg);font-size:12.5px;
@@ -181,11 +182,15 @@
   </div>
 </header>
 
-<div class="days" id="days"><main id="main"><div class="empty">Loading…</div></main></div>
+<div class="days" id="days">
+  <div class="pane"><main id="before" inert></main></div>
+  <div class="pane"><main id="main"><div class="empty">Loading…</div></main></div>
+  <div class="pane"><main id="after" inert></main></div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=10"></script>
+<script src="/app.js?v=11"></script>
 </body>
 </html>

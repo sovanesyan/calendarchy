@@ -104,10 +104,12 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
 - One view, the day (no month or Coming up on the phone, on purpose). A sticky bar holds the
   day, Today (always scrolls back to now), refetch and the week strip (‹ › or a swipe on it moves
-  a week; a swipe on the timeline moves a day: the day follows the finger with its neighbour
-  drawn beside it (`showGhost`, inside `.days`, which clips sideways so the page never widens),
-  and let go it becomes the day at the same time of day; taps get a short slide (`slideTo`); none
-  with Reduce Motion). The page asks for the week before too, for the drag back from a Monday. Under it: today's Now/Next card, all-day chips,
+  a week; a swipe on the timeline moves a day: the days are the browser's own sideways scroller
+  (`.days`, three panes: the day before, the day, the day after, snapping one at a time), so the
+  swipe runs at the screen's rate with native momentum, not as a JS transform; at rest on a
+  neighbour it becomes the day (`settled`), drawn again in the middle, at the same time of day.
+  Taps and keys draw the target in the side pane and smooth-scroll to it (`go`); a redraw waits
+  while the days move; none with Reduce Motion). The page asks for the week before too, for the drag back from a Monday. Under it: today's Now/Next card, all-day chips,
   and the day as a timeline at 72 px an hour (a half hour is a tap target): blocks by their
   times, side by side where they overlap, free time left empty with a grey label, a line at now,
   a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once
