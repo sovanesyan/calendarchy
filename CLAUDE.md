@@ -120,7 +120,9 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   `fromPersonal`): that's Personal, drawn and acted on as Personal only
 - Colour roles: Work blue and Personal orange (`--work`/`--personal`, set in the page, a lighter
   pair under `data-scheme=dark`) and nothing else uses them; state is shape (the now line, the
-  "next" tag, faded past, dashed not accepted). Green is for now and Join; amber marks a heavy day
+  "next" tag, faded past, dashed not accepted). Events are soft islands: a light fill of their
+  colour and the title in a deep shade of it, rounded, no bar (chosen from five in
+  `~/html-plans/calendarchy-two/2026-11-22-event-styles.html`). Green is for now and Join; amber marks a heavy day
 - Light or dark follows the phone (`followThePhone`): the Omarchy theme as it is when its mode
   matches, else its accents on a ground for the phone's mode
 - The page asks for the week before, the selected week and two after it (`DAYS = 28`) every minute with the last

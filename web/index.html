@@ -100,11 +100,13 @@
 
   /* all-day events */
   .chips{display:flex;flex-wrap:wrap;gap:.35rem;padding:.6rem 1rem .1rem}
-  .chip{appearance:none;border:0;border-left:4px solid var(--work);border-radius:7px;background:color-mix(in srgb,var(--work) 22%,var(--bg));
-    color:var(--fg);font-family:var(--sans);font-size:13px;font-weight:600;padding:.4rem .7rem;min-height:36px;cursor:pointer;text-align:left;max-width:100%}
-  .chip.icloud{border-left-color:var(--personal);background:color-mix(in srgb,var(--personal) 22%,var(--bg))}
-  .chip.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1}
-  .chip.unaccepted{background:transparent;outline:1px dashed color-mix(in srgb,var(--work) 60%,transparent);outline-offset:-1px;font-style:italic;color:var(--dim)}
+  /* events are soft islands: the calendar's colour is in a light fill and the title's shade, no bar */
+  .chip{appearance:none;border:0;border-radius:11px;background:color-mix(in srgb,var(--work) 15%,var(--bg));color:color-mix(in srgb,var(--work) 72%,var(--fg));
+    font-family:var(--sans);font-size:13px;font-weight:600;padding:.4rem .8rem;min-height:36px;cursor:pointer;text-align:left;max-width:100%}
+  .chip.icloud{background:color-mix(in srgb,var(--personal) 17%,var(--bg));color:color-mix(in srgb,var(--personal) 72%,var(--fg))}
+  .chip.both{background:linear-gradient(105deg,color-mix(in srgb,var(--work) 15%,var(--bg)) 55%,color-mix(in srgb,var(--personal) 20%,var(--bg)) 55%)}
+  .chip.unaccepted{background:transparent;border:1.5px dashed color-mix(in srgb,var(--work) 55%,transparent);font-style:italic;color:var(--dim)}
+  .chip.unaccepted.icloud{border-color:color-mix(in srgb,var(--personal) 55%,transparent)}
   .chip small{font-weight:400;color:var(--dim)}
 
   /* the timeline */
@@ -114,23 +116,24 @@
   .tl .hr span{position:absolute;left:-2.9rem;width:2.4rem;top:-.6em;text-align:right;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
   .tl .work{position:absolute;left:2.9rem;right:0;background:var(--surface)}
   .tl .area{position:absolute;top:0;bottom:0;left:2.9rem;right:0}
-  .blk{position:absolute;appearance:none;border:0;margin:0;text-align:left;cursor:pointer;overflow:hidden;color:var(--fg);
-    border-radius:7px;padding:5px 7px 3px 8px;display:flex;flex-direction:column;z-index:2;
-    background:color-mix(in srgb,var(--work) 26%,var(--bg));border-left:4px solid var(--work);
+  .blk{position:absolute;appearance:none;border:0;margin:0;text-align:left;cursor:pointer;overflow:hidden;color:color-mix(in srgb,var(--work) 72%,var(--fg));
+    border-radius:11px;padding:5px 10px 3px;display:flex;flex-direction:column;z-index:2;background:color-mix(in srgb,var(--work) 15%,var(--bg));
     transition:transform .08s ease,filter .08s ease;-webkit-tap-highlight-color:transparent}
-  .blk.icloud{background:color-mix(in srgb,var(--personal) 26%,var(--bg));border-left-color:var(--personal)}
-  .blk.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1;border-radius:0 7px 7px 0}
+  .blk.icloud{background:color-mix(in srgb,var(--personal) 17%,var(--bg));color:color-mix(in srgb,var(--personal) 72%,var(--fg))}
+  .blk.both{background:linear-gradient(105deg,color-mix(in srgb,var(--work) 15%,var(--bg)) 55%,color-mix(in srgb,var(--personal) 20%,var(--bg)) 55%)}
   .blk .t{font-family:var(--sans);font-size:13px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
-  .blk .nx{display:inline-block;margin-right:.35rem;padding:0 .3rem;border-radius:4px;background:var(--fg);color:var(--bg);font-family:var(--mono);
+  .blk .nx{display:inline-block;margin-right:.35rem;padding:0 .3rem;border-radius:4px;background:color-mix(in srgb,var(--work) 72%,var(--fg));color:var(--bg);font-family:var(--mono);
     font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:1px}
+  .blk.icloud .nx{background:color-mix(in srgb,var(--personal) 72%,var(--fg))}
   .blk.short,.blk.narrow{justify-content:center;padding-top:0;padding-bottom:0}
   .blk.short .t,.blk.narrow .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
   .blk.narrow{justify-content:flex-start;padding-top:5px}
   .blk.past{opacity:.45}
-  .blk.unaccepted{background:var(--bg);border:1px dashed color-mix(in srgb,var(--work) 70%,transparent);border-left:4px dashed var(--work)}
-  .blk.unaccepted.icloud{border-color:color-mix(in srgb,var(--personal) 70%,transparent);border-left-color:var(--personal)}
+  .blk.unaccepted{background:var(--bg);border:1.5px dashed color-mix(in srgb,var(--work) 55%,transparent)}
+  .blk.unaccepted.icloud{border-color:color-mix(in srgb,var(--personal) 55%,transparent)}
   .blk.unaccepted .t{font-style:italic;font-weight:500;color:var(--dim)}
-  .blk.freeev{background:transparent;border:1px solid color-mix(in srgb,var(--work) 45%,transparent);border-left:4px solid var(--work)}
+  .blk.freeev{background:transparent;border:1.5px solid color-mix(in srgb,var(--work) 40%,transparent)}
+  .blk.freeev.icloud{border-color:color-mix(in srgb,var(--personal) 40%,transparent)}
   .blk:active,.chip:active{transform:scale(.985);filter:brightness(.92)}
   @media (hover:hover){.blk:hover{filter:brightness(.97)}}
   .free{position:absolute;right:6px;z-index:1;color:var(--muted);font-size:11px;font-style:italic;line-height:16px;pointer-events:none}
