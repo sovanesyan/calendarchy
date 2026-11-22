@@ -293,7 +293,7 @@ function render() {
 // ---- the iPad's columns
 
 // Every pane a timeline on the same hours (8:00 to 19:00 at least, stretched to the earliest
-// and latest event drawn), the hours once in the gutter, the all-day events in the bar
+// and latest event in view: one off screen is cut to them), the hours once in the gutter, the all-day events in the bar
 // (header). A new day opens at now (today in view) or the first event in view; a swipe keeps
 // the time of day at the top (`keep`)
 var saidError = ""
@@ -302,7 +302,7 @@ function columnsView(all, keep) {
   saidError = S.error || ""
   var first = 8 * 60, last = 19 * 60
   var days = panes.map(function(date) { return merge(L.dayOf(S.byDate, date)) })
-  days.forEach(function(m) { m.rows.forEach(function(r) { if (!r.e.allDay) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) } }) })
+  days.slice(MID, MID + N).forEach(function(m) { m.rows.forEach(function(r) { if (!r.e.allDay) { first = Math.min(first, r.e.start); last = Math.max(last, blockEnd(r.e)) } }) })
   var range = S.range = { from: Math.floor(first / 60) * 60, to: Math.min(L.DAY_MINUTES, Math.ceil(last / 60) * 60) }
   all.forEach(function(el, k) {
     var date = panes[k], pane = /** @type {HTMLElement} */ (el.parentNode)
@@ -541,6 +541,7 @@ function timeline(m, rows, sel, isToday, ghost, range) {
   // free gaps (the window's rule): the empty space says it, a quiet label says how long
   var g = L.gaps(m.day, sel, S.today, S.now, wh)
   g.google.concat(g.icloud).forEach(function(gp) {
+    if (gp.from < from || gp.from >= to) return
     // at the top of the gap: an event that isn't busy (not accepted, marked free) can sit lower in it
     area.appendChild(h("div", { "class": "free" + (gp.now ? " now" : ""), style: "top:" + (y(gp.from) + 4) + "px" },
       (gp.now ? "free now · " : "free ") + L.formatDuration(gp.minutes)))
@@ -549,7 +550,8 @@ function timeline(m, rows, sel, isToday, ghost, range) {
   var cn = L.currentNext(rows.map(function(r) { return r.e }), isToday, S.now)
   columns(rows).forEach(function(c) {
     var r = c.r, e = r.e, i = rows.indexOf(r), srcs = sourcesOf(r)
-    var top = y(e.start), hgt = Math.max(20, y(blockEnd(e)) - top - 2)
+    if (blockEnd(e) <= from || e.start >= to) return // the iPad: outside the hours in view
+    var top = y(Math.max(e.start, from)), hgt = Math.max(20, y(Math.min(blockEnd(e), to)) - top - 2)
     var past = sel < S.today || (isToday && endOf(e) <= S.now)
     var url = e.meetingUrl || r.also.map(function(a) { return a.e.meetingUrl }).filter(Boolean)[0] || null
     var kind = L.meetingKind(url), len = L.formatLength(e)
