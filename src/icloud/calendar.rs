@@ -129,7 +129,7 @@ impl CalDavClient {
         // guaranteed to be "<uid>.ics", so that's only a fallback
         let event_url = match href {
             Some(href) => href.to_string(),
-            None => format!("{}/{}.ics", calendar_url.trim_end_matches('/'), event_uid),
+            None => event_url(calendar_url, event_uid),
         };
 
         log_request("DELETE", &event_url);
@@ -151,6 +151,23 @@ impl CalDavClient {
             return Ok(());
         }
         check(response, "Failed to delete event", CalendarchyError::CalDav).await.map(drop)
+    }
+
+    /// Create or replace the event at `<calendar>/<uid>.ics` with `ics` (a
+    /// whole VCALENDAR); the same uid again overwrites it
+    pub async fn put_event(&self, calendar_url: &str, uid: &str, ics: String) -> Result<()> {
+        let event_url = event_url(calendar_url, uid);
+        log_request("PUT", &event_url);
+        let response = self
+            .client
+            .put(&event_url)
+            .basic_auth(&self.apple_id, Some(&self.app_password))
+            .header("Content-Type", "text/calendar; charset=utf-8")
+            .body(ics)
+            .send()
+            .await?;
+        log_response(response.status().as_u16(), &event_url);
+        check(response, "Failed to save event", CalendarchyError::CalDav).await.map(drop)
     }
 
     /// One WebDAV request with an XML body; the response body on success
@@ -190,6 +207,11 @@ impl CalDavClient {
         );
         self.dav("PROPFIND", url, "0", body, &format!("PROPFIND {} failed", what)).await
     }
+}
+
+/// Where an event we name ourselves lives: `<calendar>/<uid>.ics`
+fn event_url(calendar_url: &str, uid: &str) -> String {
+    format!("{}/{}.ics", calendar_url.trim_end_matches('/'), uid)
 }
 
 /// Resolve an href against the URL of the request it came back from:

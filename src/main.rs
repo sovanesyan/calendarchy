@@ -17,6 +17,7 @@ mod term_bg;
 mod ui;
 mod update;
 mod utils;
+mod write;
 
 use std::io::stdout;
 use std::time::{Duration, Instant};
@@ -46,6 +47,9 @@ usage: calendarchy [--date YYYY-MM-DD]          the calendar (a TUI: needs a ter
                                                 days as JSON from the cache (no network)
        calendarchy --refresh [--month YYYY-MM]  fetch into the cache, no TUI
        calendarchy --event accept|decline|delete <id>
+       calendarchy put --calendar NAME --uid UID --start WHEN --end WHEN --title TEXT [--notes TEXT] [--alarm MINUTES]
+                                                create or replace an iCloud event we own (by uid)
+       calendarchy remove --calendar NAME --uid UID
        calendarchy --version | --help";
 
 #[tokio::main]
@@ -62,6 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("events") {
         std::process::exit(events::print(&args[2..]).await);
+    }
+    if let Some(verb @ ("put" | "remove")) = args.get(1).map(String::as_str) {
+        std::process::exit(write::run(verb, &args[2..]).await);
     }
 
     let date_arg = |name: &str| arg_value(name).and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());

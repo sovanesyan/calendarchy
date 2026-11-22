@@ -25,7 +25,7 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 
 ### Module Structure
 
-- **`main.rs`** - CLI dispatch (`--version`, `--help`, `events`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open"; with no terminal it prints the usage and exits 2 instead of starting the TUI) and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
+- **`main.rs`** - CLI dispatch (`--version`, `--help`, `events`, `put`, `remove`, `--refresh`, `--agenda`, `--event`; `--date YYYY-MM-DD` opens the TUI on that day, used by the shell window's "open"; with no terminal it prints the usage and exits 2 instead of starting the TUI) and the runtime: event-driven loop (input thread, results channel, timer, theme-switch check), executes `Effect`s
 - **`app.rs`** - `App` state and navigation
 - **`update.rs`** - Pure update logic: `handle_key` / `handle_msg` → `Effect`s, fetch scheduling (no I/O; unit-tested)
 - **`keymap.rs`** - Bindings table: keys → `Action` per mode (Bulgarian phonetic keys normalised); also generates the help overlay and applies `"keys"` overrides from config
@@ -33,6 +33,7 @@ Calendarchy is a terminal calendar app that displays Google Calendar and iCloud 
 - **`headless.rs`** - `--refresh [--month YYYY-MM]`: fetch this month and the next (or one month) into the disk cache, no TUI (used by the shell plugins and the TRMNL job); `--event accept|decline|delete <id>`: one action by agenda id, then refetch its month
 - **`agenda.rs`** - `--agenda [--from YYYY-MM-DD] [--days N]`: days as JSON from the disk cache only (no network): events with details, attendees and busy ranges, display prefs, the effective key bindings (after `"keys"` overrides), and the event that's on now or next (always from now, 8 days ahead; `find_next`, which the TUI's status bar shares); read by the shell plugins. The JSON shape is documented at the top of the file
 - **`events.rs`** - `events [--since DATE] [--until DATE] [--json]`: the Google calendar's events for agents (Dossier's `/stress`, `/grade`), fetched live with the saved login, never via the cache (the TUI rewrites the cache whole, so it can't hold history). Its JSON follows the connector contract's record shape (`~/Work/my/connectors/README.md`); documented at the top of the file
+- **`write.rs`** - `put --calendar NAME --uid UID --start --end --title [--notes] [--alarm MIN]` and `remove --calendar NAME --uid UID`: create, replace or delete an iCloud event we own at `<calendar>/<uid>.ics` (CalDAV `PUT`/`DELETE`), for jobs such as the eBag deliveries on Family (`~/Work/my/ebag/bin/ebag-calendar`). Never touches an event it didn't name; test it on `Home`, not the shared `Family`
 - **`ui.rs`** - Rendering into a ratatui buffer (via a small cursor-style `Pen`), event panels, calendar grid, modals, setup wizard; palette follows the Omarchy theme's `colors.toml`
 - **`cache.rs`** - `DisplayEvent` (unified event type), `SourceCache` (per-source), `EventCache` (disk persistence), `CacheWriter` (writes the cache on its own thread)
 - **`term_bg.rs`** - The terminal's background colour (OSC 11), remembered per terminal across runs so terminals that never answer aren't asked again
