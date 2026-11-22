@@ -102,14 +102,23 @@ release build. Only the `--allow` Tailscale login (and this machine) gets an ans
   load. `kit.css`, `theme.js`, `sw.js` and `kit.d.ts` are copies of the kit, put there by
   `~/Work/rb/ghostwheel/kit/sync.sh`: change them there, never here
 - Type check: `~/Work/rb/ghostwheel/node_modules/.bin/tsc -p web/jsconfig.json`
-- One view, the day (no month or Coming up on the phone, on purpose): the week strip, now/next,
-  all-day chips, then the day as a timeline (hours down the side, Work and Personal as blocks by
-  their times, side by side where they overlap, free gaps dashed, a line at now; a new day opens
-  scrolled to now or its first event). An event in both calendars shows once
+- One view, the day (no month or Coming up on the phone, on purpose). A sticky bar holds the
+  day, Today (always scrolls back to now), refetch and the week strip (‹ › or a swipe on it moves
+  a week; a swipe on the timeline moves a day). Under it: today's Now/Next card, all-day chips,
+  and the day as a timeline at 72 px an hour (a half hour is a tap target): blocks by their
+  times, side by side where they overlap, free time left empty with a grey label, a line at now,
+  a "next" tag. An empty day is one line, not a grid. An event in both calendars shows once
   (`merge`/`sameEvent` in `web/app.js`: same start and end, or both all day, and the same title
   ignoring case, punctuation and emoji, or one inside the other); the Work copy leads, so its
-  Accept/Decline and link are the ones offered. Swipe for the next day, pull down to refetch. Alerts on the
-  phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
+  Accept/Decline and link are the ones offered
+- Colour roles: Work blue and Personal orange (`--work`/`--personal`, set in the page, a lighter
+  pair under `data-scheme=dark`) and nothing else uses them; state is shape (the now line, the
+  "next" tag, faded past, dashed not accepted). Green is for now and Join; amber marks a heavy day
+- Light or dark follows the phone (`followThePhone`): the Omarchy theme as it is when its mode
+  matches, else its accents on a ground for the phone's mode
+- The page asks for the selected week and two after it (`DAYS = 21`) every minute with the last
+  ETag; `serve.rs` tags the agenda without its `now`, so an unchanged minute is a 304 with no body
+- Alerts on the phone aren't done yet (they'd be the kit's Web Push, as Lumon's)
 
 ## Committing
 

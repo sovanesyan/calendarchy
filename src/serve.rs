@@ -20,7 +20,8 @@
 //! ```text
 //! GET  /  /app.js  /theme.js  /sw.js  /icon.svg  /apple-touch-icon.png  /manifest.webmanifest
 //! GET  /layout.js                          shell/window/Layout.js, the window's display rules
-//! GET  /api/agenda?from=YYYY-MM-DD&days=N  agenda::build from the disk cache (--agenda's JSON)
+//! GET  /api/agenda?from=YYYY-MM-DD&days=N  agenda::build from the disk cache (--agenda's JSON), with an
+//!                                          ETag that ignores `now`: If-None-Match gets a 304 until it changes
 //! GET  /api/theme                          the Omarchy theme's colors.toml as {key: "#hex"}
 //! POST /api/refresh?month=YYYY-MM          `calendarchy --refresh --month` (months the sync job skips)
 //! POST /api/event?verb=accept|decline&id=ID  `calendarchy --event` (delete stays on the desktop)
@@ -128,12 +129,25 @@ fn id_ok(id: &str) -> bool {
     (id.starts_with("google:") || id.starts_with("icloud:")) && id.len() < 2048 && !id.chars().any(char::is_control)
 }
 
-fn agenda_json(from: Option<NaiveDate>, days: u32) -> String {
+/// The agenda's JSON and its ETag. The tag leaves out `now` (the minute it was made), so
+/// the page's every-minute check is a 304 until something it shows has changed
+fn agenda_json(from: Option<NaiveDate>, days: u32) -> (String, String) {
     let config = Config::load().unwrap_or_default();
     let mut cache = EventCache::default();
     cache.load_from_disk();
-    let agenda = crate::agenda::build(&cache, &config, Local::now(), from, days);
-    serde_json::to_string(&agenda).unwrap_or_else(|e| json!({"error": e.to_string()}).to_string())
+    let mut agenda = crate::agenda::build(&cache, &config, Local::now(), from, days);
+    let now = agenda.now;
+    agenda.now = 0;
+    let tag = etag(&serde_json::to_string(&agenda).unwrap_or_default());
+    agenda.now = now;
+    let body = serde_json::to_string(&agenda).unwrap_or_else(|e| json!({"error": e.to_string()}).to_string());
+    (body, tag)
+}
+
+/// A strong ETag for `body`: its 64-bit FNV-1a, quoted
+fn etag(body: &str) -> String {
+    let hash = body.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("\"{hash:016x}\"")
 }
 
 pub fn handle(w: &Web, req: &Request) -> Response {
@@ -171,7 +185,14 @@ pub fn handle(w: &Web, req: &Request) -> Response {
     }
     match req.path.as_str() {
         "/api/agenda" => match (from_param(req.param("from")), days_param(req.param("days"))) {
-            (Some(from), Some(days)) => Response::json_text(200, agenda_json(from, days)),
+            (Some(from), Some(days)) => {
+                let (body, tag) = agenda_json(from, days);
+                if req.header("If-None-Match") == Some(tag.as_str()) {
+                    Response::new(304, "application/json; charset=utf-8", Vec::new()).with("ETag", &tag).with("Cache-Control", "no-store")
+                } else {
+                    Response::json_text(200, body).with("ETag", &tag)
+                }
+            }
             _ => Response::error(400, &format!("from: YYYY-MM-DD, days: 1 to {MAX_DAYS}")),
         },
         "/api/theme" => server::theme("CALENDARCHY_THEME_DIR"),
@@ -308,6 +329,19 @@ mod tests {
         assert_eq!(handle(&w, &req("POST", "/api/event?verb=delete&id=google:primary:x", &both)).status, 400);
         assert_eq!(handle(&w, &req("POST", "/api/event?verb=accept&id=--help", &both)).status, 400);
         assert_eq!(handle(&w, &req("POST", "/api/event?verb=accept&id=google:primary:x", &both)).status, 502);
+    }
+
+    #[test]
+    fn an_unchanged_agenda_is_a_304() {
+        let w = web();
+        let first = handle(&w, &req("GET", "/api/agenda?from=2026-01-05&days=7", &[]));
+        assert_eq!(first.status, 200);
+        let tag = first.header("ETag").expect("an ETag").to_string();
+        let again = handle(&w, &req("GET", "/api/agenda?from=2026-01-05&days=7", &[("If-None-Match", &tag)]));
+        assert_eq!(again.status, 304);
+        assert!(again.body.is_empty());
+        let other = handle(&w, &req("GET", "/api/agenda?from=2026-01-05&days=7", &[("If-None-Match", "\"stale\"")]));
+        assert_eq!(other.status, 200);
     }
 
     #[test]

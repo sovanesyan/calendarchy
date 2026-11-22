@@ -20,46 +20,61 @@
   kit (kit.css, theme.js from ~/Work/rb/ghostwheel/kit). Plain JS, no network but
   our own /api.
 
-  One view, the day: the week strip, now/next, all-day chips, then the day as a
-  timeline (hours down the side, Work and Personal as blocks by their times, side
-  by side where they overlap, free gaps dashed, a line at now). An event in both
-  calendars is drawn once, with a dot for each.
+  One view, the day. A sticky bar with the day, Today, refetch and the week strip
+  (‹ › or a swipe on it moves a week); then today's now/next card, all-day chips
+  and the day as a timeline (hours down the side, Work blue and Personal orange as
+  blocks by their times, side by side where they overlap, free time left empty
+  with a label, a line at now). An event in both calendars is drawn once, with a
+  dot for each. Light or dark follows the phone.
   Tap an event for its details, Join, Accept or Decline. Swipe sideways for the
   next day; pull down to refetch from Google and iCloud.
 -->
 <link rel="stylesheet" href="/kit.css">
 <style>
-  :root{--work:var(--accent);--personal:var(--good)}
+  /* Work and Personal own one hue each, and nothing else uses them. State is shape: the now
+     line, a "next" tag, faded past, dashed not-accepted. Green is for now and Join */
+  :root{--work:#2f6fdc;--personal:#d4731f}
+  :root[data-scheme=dark]{--work:#6f9cf2;--personal:#f0a058}
   body{min-height:100vh;min-height:100dvh;padding-bottom:var(--safe-b)}
   @media (hover:hover){a:hover{text-decoration:underline}}
 
-  header{position:sticky;top:0;z-index:5;padding:calc(.55rem + env(safe-area-inset-top,0px)) calc(1rem + var(--safe-r)) .55rem calc(1rem + var(--safe-l))}
-  header .brand svg{flex:none}
-  header .tally b{color:var(--fg)}
-  header .tally .soon{color:var(--warn);font-weight:600}
-  .refresh{appearance:none;border:1px solid var(--line);background:transparent;border-radius:8px;width:32px;height:30px;display:grid;place-items:center;cursor:pointer;flex:none;color:var(--fg)}
-  .refresh svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+  /* the sticky bar: the day, Today, refetch, and the week strip */
+  header{position:sticky;top:0;z-index:5;display:block;padding:calc(.5rem + env(safe-area-inset-top,0px)) calc(.8rem + var(--safe-r)) .35rem calc(.8rem + var(--safe-l))}
+  header .row{display:flex;align-items:center;gap:.5rem;max-width:760px;margin:0 auto;padding:0 .2rem}
+  header .title{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.2}
+  header .title b{font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  header .title small{font-size:11.5px;color:var(--dim)}
+  .pill{appearance:none;border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:999px;height:32px;padding:0 .9rem;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+  .pill[hidden]{display:none}
+  .refresh{appearance:none;border:1px solid var(--line);background:transparent;border-radius:999px;width:32px;height:32px;display:grid;place-items:center;cursor:pointer;flex:none;color:var(--fg)}
+  .refresh svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
   .refresh.spin svg{animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
-  @media (pointer:coarse){.refresh{width:44px;height:40px}}
+  @media (pointer:coarse){.refresh{width:40px;height:40px}.pill{height:40px}}
 
-  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l)}
-  .sect > .r{margin-left:auto;display:flex;gap:.35rem;text-transform:none;letter-spacing:0}
-  .nav{appearance:none;border:1px solid var(--line);background:transparent;border-radius:8px;min-width:32px;height:30px;padding:0 .55rem;font-size:13px;cursor:pointer;color:var(--fg)}
-  @media (pointer:coarse){.nav{min-width:42px;height:36px;font-size:14px}}
-  .sect.big{font-size:13px;color:var(--fg);text-transform:none;letter-spacing:0;font-weight:700;align-items:center}
-
-  /* the week strip */
-  .week{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;padding:.7rem .8rem .2rem}
-  .wd{appearance:none;border:1px solid transparent;background:transparent;border-radius:10px;padding:.3rem 0 .35rem;cursor:pointer;color:var(--fg);display:flex;flex-direction:column;align-items:center;gap:2px}
-  .wd small{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .strip{display:flex;align-items:center;gap:2px;max-width:760px;margin:.35rem auto 0}
+  .wk{appearance:none;border:0;background:transparent;color:var(--muted);font-size:18px;width:24px;height:44px;cursor:pointer;flex:none;padding:0}
+  .week{flex:1;display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+  .wd{appearance:none;border:0;background:transparent;border-radius:10px;padding:.25rem 0 .3rem;min-height:48px;cursor:pointer;color:var(--fg);display:flex;flex-direction:column;align-items:center;gap:2px}
+  .wd small{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
   .wd b{font-size:15px;font-variant-numeric:tabular-nums}
-  .wd i{display:block;width:70%;height:4px;border-radius:2px;background:var(--chip);overflow:hidden}
-  .wd i span{display:block;height:100%;background:var(--work)}
+  .wd i{display:block;width:60%;height:3px;border-radius:2px;background:var(--chip);overflow:hidden}
+  .wd i span{display:block;height:100%;background:var(--muted)}
   .wd i span.heavy{background:var(--warn)}
   .wd.today b{color:var(--accent)}
-  .wd.sel{background:var(--sel);border-color:var(--accent)}
+  .wd.sel{background:var(--accent);color:var(--on-accent)}
+  .wd.sel b,.wd.sel small{color:var(--on-accent)}
+  .wd.sel i{background:color-mix(in srgb,var(--on-accent) 25%,transparent)}
+  .wd.sel i span{background:var(--on-accent)}
   .wd.weekend small{color:var(--dim)}
+
+  main{max-width:760px;margin:0 auto;padding:0 var(--safe-r) 1.5rem var(--safe-l)}
+
+  .toast{position:fixed;z-index:20;left:50%;bottom:calc(var(--safe-b) + 14px);transform:translate(-50%,20px);opacity:0;pointer-events:none;
+    max-width:calc(100% - 2rem);padding:.45rem .9rem;border-radius:999px;background:var(--fg);color:var(--bg);font-size:12.5px;
+    box-shadow:0 4px 14px rgba(0,0,0,.2);transition:opacity .18s,transform .18s}
+  .toast.on{opacity:1;transform:translate(-50%,0)}
+  .toast.bad{background:var(--urgent);color:#fff}
 
   /* now / next */
   .upnext{display:flex;align-items:center;gap:.7rem;margin:.6rem 1rem .2rem;padding:.6rem .8rem;border-radius:12px;background:var(--surface);border:1px solid var(--line);cursor:pointer}
@@ -71,49 +86,52 @@
   .join{appearance:none;border:0;border-radius:9px;background:var(--good);color:var(--on-accent);font-weight:700;padding:0 .9rem;height:36px;display:inline-flex;align-items:center;cursor:pointer;flex:none;font-size:13px}
   a.join:hover{text-decoration:none}
 
+  /* only on an event that's in both calendars */
   .srcs{display:inline-flex;gap:3px;align-self:center;margin-right:.3rem;vertical-align:1px}
   .srcs i{width:7px;height:7px;border-radius:50%;background:var(--work)}
   .srcs i.icloud{background:var(--personal)}
 
   /* all-day events */
-  .chips{display:flex;flex-wrap:wrap;gap:.35rem;padding:.5rem 1rem .1rem}
-  .chip{appearance:none;border:0;border-left:3px solid var(--work);border-radius:7px;background:color-mix(in srgb,var(--work) 14%,transparent);
-    color:var(--fg);font-family:var(--sans);font-size:12.5px;font-weight:600;padding:.3rem .6rem;cursor:pointer;text-align:left;max-width:100%}
-  .chip.icloud{border-left-color:var(--personal);background:color-mix(in srgb,var(--personal) 14%,transparent)}
+  .chips{display:flex;flex-wrap:wrap;gap:.35rem;padding:.6rem 1rem .1rem}
+  .chip{appearance:none;border:0;border-left:4px solid var(--work);border-radius:7px;background:color-mix(in srgb,var(--work) 22%,var(--bg));
+    color:var(--fg);font-family:var(--sans);font-size:13px;font-weight:600;padding:.4rem .7rem;min-height:36px;cursor:pointer;text-align:left;max-width:100%}
+  .chip.icloud{border-left-color:var(--personal);background:color-mix(in srgb,var(--personal) 22%,var(--bg))}
   .chip.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1}
-  .chip.unaccepted{font-style:italic;color:var(--dim)}
-  .chip small{font-weight:400;color:var(--muted)}
+  .chip.unaccepted{background:transparent;outline:1px dashed color-mix(in srgb,var(--work) 60%,transparent);outline-offset:-1px;font-style:italic;color:var(--dim)}
+  .chip small{font-weight:400;color:var(--dim)}
 
   /* the timeline */
-  .tl{position:relative;margin:.8rem 1rem 1.5rem 0}
-  .tl .hr{position:absolute;left:3.4rem;right:0;border-top:1px solid var(--line)}
-  .tl .hr.half{border-top-style:dotted;opacity:.6}
-  .tl .hr span{position:absolute;left:-3.4rem;width:2.9rem;top:-.6em;text-align:right;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-  .tl .work{position:absolute;left:3.4rem;right:0;background:var(--surface)}
-  .tl .area{position:absolute;top:0;bottom:0;left:3.4rem;right:0}
+  .tl{position:relative;margin:1rem 1rem 1.5rem 0}
+  .tl .hr{position:absolute;left:2.4rem;right:0;border-top:1px solid var(--line)}
+  .tl .hr.half{border-top-style:dotted;opacity:.5}
+  .tl .hr span{position:absolute;left:-2.4rem;width:1.9rem;top:-.6em;text-align:right;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .tl .work{position:absolute;left:2.4rem;right:0;background:var(--surface)}
+  .tl .area{position:absolute;top:0;bottom:0;left:2.4rem;right:0}
   .blk{position:absolute;appearance:none;border:0;margin:0;text-align:left;cursor:pointer;overflow:hidden;color:var(--fg);
-    border-radius:6px;padding:3px 6px 2px 7px;display:flex;flex-direction:column;gap:1px;z-index:2;
-    background:color-mix(in srgb,var(--work) 20%,var(--bg));border-left:3px solid var(--work)}
-  .blk.icloud{background:color-mix(in srgb,var(--personal) 20%,var(--bg));border-left-color:var(--personal)}
-  .blk.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1;border-radius:0 6px 6px 0}
-  .blk .t{font-family:var(--sans);font-size:12.5px;font-weight:600;line-height:1.2;overflow-wrap:anywhere}
-  .blk.short{justify-content:center;padding-top:0;padding-bottom:0}
-  .blk.short .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-  .blk.past{opacity:.5}
-  .blk.current{box-shadow:0 0 0 2px var(--good) inset}
-  .blk.next{box-shadow:0 0 0 2px var(--accent) inset}
-  .blk.unaccepted{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--work) 12%,var(--bg)) 0 6px,var(--bg) 6px 12px);border-left-style:dashed}
-  .blk.unaccepted.icloud{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--personal) 12%,var(--bg)) 0 6px,var(--bg) 6px 12px)}
-  .blk.unaccepted .t{font-style:italic;color:var(--dim)}
-  .blk.freeev{background:transparent;outline:1px solid color-mix(in srgb,var(--work) 40%,transparent);outline-offset:-1px}
-  @media (hover:hover){.blk:hover{filter:brightness(.96)}}
-  .free{position:absolute;left:2px;right:2px;border:1px dashed color-mix(in srgb,var(--good) 45%,transparent);border-radius:6px;z-index:1;
-    background:color-mix(in srgb,var(--good) 6%,transparent);color:var(--good);font-size:10.5px;padding:2px 8px;line-height:1.3;overflow:hidden;text-align:right}
-  .free.now{font-weight:700}
-  .nowline{position:absolute;left:3.1rem;right:0;border-top:2px solid var(--urgent);z-index:3;pointer-events:none}
+    border-radius:7px;padding:5px 7px 3px 8px;display:flex;flex-direction:column;z-index:2;
+    background:color-mix(in srgb,var(--work) 26%,var(--bg));border-left:4px solid var(--work);
+    transition:transform .08s ease,filter .08s ease;-webkit-tap-highlight-color:transparent}
+  .blk.icloud{background:color-mix(in srgb,var(--personal) 26%,var(--bg));border-left-color:var(--personal)}
+  .blk.both{border-image:linear-gradient(var(--work) 50%,var(--personal) 50%) 1;border-radius:0 7px 7px 0}
+  .blk .t{font-family:var(--sans);font-size:13px;font-weight:600;line-height:1.25;overflow-wrap:anywhere}
+  .blk .nx{display:inline-block;margin-right:.35rem;padding:0 .3rem;border-radius:4px;background:var(--fg);color:var(--bg);font-family:var(--mono);
+    font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:1px}
+  .blk.short,.blk.narrow{justify-content:center;padding-top:0;padding-bottom:0}
+  .blk.short .t,.blk.narrow .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .blk.narrow{justify-content:flex-start;padding-top:5px}
+  .blk.past{opacity:.45}
+  .blk.unaccepted{background:var(--bg);border:1px dashed color-mix(in srgb,var(--work) 70%,transparent);border-left:4px dashed var(--work)}
+  .blk.unaccepted.icloud{border-color:color-mix(in srgb,var(--personal) 70%,transparent);border-left-color:var(--personal)}
+  .blk.unaccepted .t{font-style:italic;font-weight:500;color:var(--dim)}
+  .blk.freeev{background:transparent;border:1px solid color-mix(in srgb,var(--work) 45%,transparent);border-left:4px solid var(--work)}
+  .blk:active,.chip:active{transform:scale(.985);filter:brightness(.92)}
+  @media (hover:hover){.blk:hover{filter:brightness(.97)}}
+  .free{position:absolute;right:6px;z-index:1;color:var(--muted);font-size:11px;font-style:italic;line-height:16px;pointer-events:none}
+  .free.now{color:var(--good);font-style:normal;font-weight:700}
+  .nowline{position:absolute;left:2.1rem;right:0;border-top:2px solid var(--urgent);z-index:3;pointer-events:none}
   .nowline::before{content:"";position:absolute;left:-5px;top:-6px;width:10px;height:10px;border-radius:50%;background:var(--urgent)}
-  .none{padding:.4rem .8rem;color:var(--muted);font-size:12.5px}
-  .none small{display:block;margin-top:.15rem;color:var(--dim);font-family:var(--sans);font-size:12.5px}
+  .none{margin:1.2rem 1rem;padding:1rem;border-radius:12px;background:var(--surface);color:var(--dim);font-size:13px;text-align:center}
+  .none small{display:block;margin-top:.3rem;color:var(--fg);font-family:var(--sans);font-size:13.5px}
 
   .msg{margin:.6rem 1rem;padding:.5rem .7rem;border-radius:9px;font-size:12.5px;background:var(--chip);color:var(--dim)}
   .msg.bad{color:var(--urgent);background:color-mix(in srgb,var(--urgent) 10%,transparent)}
@@ -145,15 +163,23 @@
 </head>
 <body>
 <header>
-  <span class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="23" rx="3" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M3 13h26M10.5 3v6M21.5 3v6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>Calendarchy</span>
-  <span class="tally" id="tally"></span>
-  <button class="refresh" id="refresh" type="button" aria-label="Refetch from Google and iCloud" title="Refetch from Google and iCloud"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
+  <div class="row">
+    <div class="title" id="title"></div>
+    <button class="pill" id="today" type="button" hidden>Today</button>
+    <button class="refresh" id="refresh" type="button" aria-label="Refetch from Google and iCloud" title="Refetch from Google and iCloud"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
+  </div>
+  <div class="strip" id="strip">
+    <button class="wk" id="prevwk" type="button" aria-label="Previous week">‹</button>
+    <div class="week" id="week"></div>
+    <button class="wk" id="nextwk" type="button" aria-label="Next week">›</button>
+  </div>
 </header>
 
 <main id="main"><div class="empty">Loading…</div></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="/theme.js"></script>
 <script src="/layout.js"></script>
-<script src="/app.js?v=5"></script>
+<script src="/app.js?v=6"></script>
 </body>
 </html>
