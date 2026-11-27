@@ -5,7 +5,8 @@
 //   is off, this machine sleeps), the kept answer comes back instead, and the page is told
 //   ({kit: "offline", saved}) so Kit.offline() shows "Offline · as of 08:12" until an
 //   answer comes from the network again ({kit: "online"}). Never kept: event streams, ranges
-//   (audio), /api/push*, anything not 200. The URL is the key, query and all: a cache-buster
+//   (audio), /api/push* (under a mount too: /lumon/api/push), anything not 200, and an
+//   answer marked Cache-Control: no-store. The URL is the key, query and all: a cache-buster
 //   (?fresh=1) gets a snapshot of its own, so send it as a header instead. A page opened
 //   offline that was never kept (the home-screen icon's /, which redirects) gets the last
 //   page that was.
@@ -27,7 +28,7 @@ function keepable(req, url) {
   if (req.method !== "GET" || url.origin !== self.location.origin) return false
   if (req.headers.has("range") || /text\/event-stream/.test(req.headers.get("accept") || "")) return false
   if (req.destination === "audio" || req.destination === "video") return false
-  return !/^\/api\/push(\/|$)/.test(url.pathname)
+  return !/(^|\/)api\/push(\/|$)/.test(url.pathname)
 }
 
 function tell(e, msg) {
@@ -61,8 +62,9 @@ self.addEventListener("fetch", function(e) {
   if (!keepable(req, url)) return
   var net = fetch(req).then(function(res) {
     if (res.ok && res.type === "basic") {
-      e.waitUntil(keep(req, res))
-      if (url.pathname.indexOf("/api/") === 0 || req.mode === "navigate") tell(e, { kit: "online" })
+      // no-store means kept nowhere: a health record (Здраве) is never in the snapshot
+      if (!/no-store/i.test(res.headers.get("Cache-Control") || "")) e.waitUntil(keep(req, res))
+      if (/\/api\//.test(url.pathname) || req.mode === "navigate") tell(e, { kit: "online" })
     }
     return res
   })

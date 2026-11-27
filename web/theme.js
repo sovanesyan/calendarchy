@@ -54,6 +54,11 @@
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
+//   Kit.home()        {href, label} of the app this page is mounted in (Дом: <meta
+//                     name="kit-home">), else null. Then a ‹ Дом chip leads the header, and
+//                     offline() and push leave the worker and the subscription to that app
+// Every URL here is relative (api/theme, sw.js, api/push…), so a page works at its app's
+// own address and mounted under a path alike.
 // Plain script, no build: the page loads /theme.js before its own script (or has it inline:
 // so no closing script tag in here).
 //
@@ -162,7 +167,7 @@ function applyTheme(t) {
 }
 
 function loadTheme(url) {
-  return fetch(url || "/api/theme", { cache: "no-store" })
+  return fetch(url || "api/theme", { cache: "no-store" })
     .then(function(r) { return r.ok ? r.json() : null })
     .then(function(t) { var th = applyTheme(t); return th ? { theme: t, dark: th.dark } : null })
     .catch(function() { return null })
@@ -301,7 +306,10 @@ function offline(onChange) {
     else if (m.kit === "online" && down) set(false)
   })
   root.addEventListener("online", function() { if (down) set(false) })
-  return nav.serviceWorker.register("/sw.js", { scope: "/" }).catch(function() { return null })
+  // mounted under another app (Kit.home()): that app's worker already answers for us
+  if (home()) return nav.serviceWorker.getRegistration().then(function(r) { return r || null }, function() { return null })
+  // relative: at the app's own address it's /sw.js, scope /
+  return nav.serviceWorker.register("sw.js", { scope: "./" }).catch(function() { return null })
 }
 
 // Whether a page tagged `have` should reload for the tag `now` a HEAD of it answered (`ok`):
@@ -383,7 +391,8 @@ function standalone() {
 var push = {
   state: function() {
     var nav = root.navigator
-    if (!nav || !("serviceWorker" in nav)) return Promise.resolve("unsupported")
+    // mounted: the app it's in owns the one subscription this origin has
+    if (!nav || !("serviceWorker" in nav) || home()) return Promise.resolve("unsupported")
     if (!("PushManager" in root) || !("Notification" in root)) {
       return Promise.resolve(/iPhone|iPad/.test(nav.userAgent || "") && !standalone() ? "install" : "unsupported")
     }
@@ -396,20 +405,20 @@ var push = {
     var nav = root.navigator, sub
     return root.Notification.requestPermission().then(function(p) {
       if (p !== "granted") return "denied"
-      return Promise.all([nav.serviceWorker.ready, api("GET", "/api/push")]).then(function(x) {
+      return Promise.all([nav.serviceWorker.ready, api("GET", "api/push")]).then(function(x) {
         return x[0].pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlBytes(x[1].key) })
       }).then(function(s) {
         sub = s.toJSON()
-        return api("POST", "/api/push/subscribe", sub)
+        return api("POST", "api/push/subscribe", sub)
       }).then(function() {
-        return api("POST", "/api/push/test", { endpoint: sub.endpoint }).catch(function() {})
+        return api("POST", "api/push/test", { endpoint: sub.endpoint }).catch(function() {})
       }).then(function() { return "on" })
     })
   },
   refresh: function() {
     return root.navigator.serviceWorker.ready
       .then(function(reg) { return reg.pushManager.getSubscription() })
-      .then(function(s) { return s ? api("POST", "/api/push/subscribe", s.toJSON()).then(function() { return true }) : false })
+      .then(function(s) { return s ? api("POST", "api/push/subscribe", s.toJSON()).then(function() { return true }) : false })
       .catch(function() { return false })
   },
   disable: function() {
@@ -418,7 +427,7 @@ var push = {
       .then(function(s) {
         if (!s) return "off"
         var endpoint = s.endpoint
-        return s.unsubscribe().then(function() { return api("POST", "/api/push/unsubscribe", { endpoint: endpoint }).catch(function() {}) }).then(function() { return "off" })
+        return s.unsubscribe().then(function() { return api("POST", "api/push/unsubscribe", { endpoint: endpoint }).catch(function() {}) }).then(function() { return "off" })
       })
   }
 }
@@ -448,6 +457,33 @@ function pushButton() {
   })
   push.state().then(function(st) { show(st); if (st === "on") push.refresh() })
   return b
+}
+
+// The app this page is mounted in, when it is: Дом serves the family's apps under one origin
+// (/kodiaq/, /lumon/, …) and puts <meta name="kit-home" content="/" data-label="Дом"> in each
+// page it passes on. Then theme.js puts a ‹ Дом chip (a.kit-home) first in the page's
+// <header>, the way back in a home-screen app with no back button, and the page leaves the
+// worker and push to that app. null at the app's own address
+function home() {
+  var doc = root.document
+  var m = doc && doc.querySelector ? doc.querySelector('meta[name="kit-home"]') : null
+  if (!m) return null
+  return { href: m.getAttribute("content") || "/", label: m.getAttribute("data-label") || "Дом" }
+}
+
+// The ‹ Дом chip, once the page's header is there
+function homeChip() {
+  var at = home(), doc = root.document
+  if (!at || !doc) return null
+  var header = doc.querySelector("header")
+  if (!header || header.querySelector(".kit-home")) return null
+  var a = h("a", { "class": "kit-home", href: at.href, title: at.label }, "‹ " + at.label)
+  header.insertBefore(a, header.firstChild)
+  return a
+}
+if (root.document && typeof root.document.querySelector === "function") {
+  if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", homeChip)
+  else homeChip()
 }
 
 // The number on the app's icon (0 or null clears it); quietly nothing where there's no badge
@@ -783,7 +819,7 @@ function sheet(o) {
           Promise.resolve(a.run && a.run()).then(function() { close(a.label) })
         } }, a.label)
       }),
-      h("button", { "class": "kit-sheet-act cancel", type: "button", onclick: function() { close(null) } }, "Cancel")
+      h("button", { "class": "kit-sheet-act cancel", type: "button", onclick: function() { close(null) } }, o.cancel || "Cancel")
     ])
     dlg.appendChild(box)
     sheetDrag(box, function() { close(null) })
@@ -933,6 +969,6 @@ root.Kit = {
   offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, popover: popover, popoverPlace: popoverPlace, choice: choice, autogrow: autogrow,
-  privacy: privacy, lock: lock, standalone: standalone
+  privacy: privacy, lock: lock, standalone: standalone, home: home
 }
 })(typeof window !== "undefined" ? window : this)

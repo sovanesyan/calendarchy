@@ -85,12 +85,13 @@ interface KitApi {
   FLING_AT: number
   choice(o: { options: { value: string; label: string; hint?: string }[]; value: string; onChange?(value: string): void }): { el: HTMLElement; set(value: string): void; readonly value: string }
   autogrow(ta: HTMLTextAreaElement, max?: number): () => void
-  sheet(o: { title?: string; text?: string; actions?: KitSheetAction[] }): Promise<string | null>
+  sheet(o: { title?: string; text?: string; actions?: KitSheetAction[]; cancel?: string }): Promise<string | null>
   popover(anchor: Element | null, content: KitKid, opts?: { onClose?(): void }): { close(): void; dialog: HTMLDialogElement }
   popoverPlace(a: KitRect | null, w: number, ht: number, vw: number, vh: number): KitPlace
   privacy(): void
   lock(opts?: { app?: string; after?: number }): Promise<boolean>
   standalone(): boolean
+  home(): { href: string; label: string } | null
 }
 
 interface Window { Kit: KitApi }
