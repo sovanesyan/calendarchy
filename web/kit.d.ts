@@ -97,6 +97,9 @@ interface KitApi {
   zoom(frame: HTMLElement, opts?: { target?: string; state?: Partial<KitZoom>; max?: number }): { apply(): void; reset(): void }
   zoomFit(v: KitZoom, w: number, h: number): KitZoom
   zoomAt(v: KitZoom, s: number, px: number, py: number, w: number, h: number, max?: number): KitZoom
+  split(box: HTMLElement, opts?: { dir?: "row" | "col"; fracs?: number[] | null; min?: number; onChange?(fracs: number[]): void }): { fracs(): number[] }
+  splitFit(fracs: number[] | null | undefined, n: number, min?: number): number[]
+  splitDrag(fracs: number[], i: number, d: number, min?: number): number[]
 }
 
 /** A picture's zoom in its frame (Kit.zoom): the scale, and where its top left is */

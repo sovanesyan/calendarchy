@@ -78,6 +78,18 @@
   .kit-zoom.kit-zoomed:active{cursor:grabbing}
   .kit-zoom img{-webkit-user-drag:none}
 
+  /* .kit-split (Kit.split): panes sharing a box, a .kit-split-h handle between each two */
+  .kit-split{display:flex}
+  .kit-split-row{flex-direction:row} .kit-split-col{flex-direction:column}
+  .kit-split>*{min-width:0;min-height:0}
+  .kit-split-h{flex:none;display:flex;align-items:center;justify-content:center;touch-action:none;-webkit-user-select:none;user-select:none}
+  .kit-split-row>.kit-split-h{width:14px;cursor:col-resize}
+  .kit-split-col>.kit-split-h{height:14px;cursor:row-resize}
+  .kit-split-h::after{content:"";border-radius:2px;background:var(--line);transition:background .15s}
+  .kit-split-row>.kit-split-h::after{width:4px;height:40px}
+  .kit-split-col>.kit-split-h::after{width:40px;height:4px}
+  .kit-split-h:hover::after,.kit-split-h.on::after{background:var(--accent)}
+
   /* .kit-tiles of .kit-tile: a board you read across a room. .k the label (a second span on
      the right: when), .v the big value, .s a line under it, .rows time-and-text lines (.done,
      .next). .wide takes two columns, .alert needs doing, .locked is behind a lock, .stale

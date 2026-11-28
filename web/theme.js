@@ -54,6 +54,9 @@
 //   Kit.zoom(frame, {target, state, max})   pinch, double-tap and drag a picture in its
 //                     frame (client side; an iPad's pinch natively, the page never zooms);
 //                     {apply, reset}. Kit.zoomAt, Kit.zoomFit (pure)
+//   Kit.split(box, {dir, fracs, min, onChange})   panes sharing a box, a handle between
+//                     each two to drag (a double tap: even again); {fracs}. Kit.splitFit,
+//                     Kit.splitDrag (pure)
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
@@ -997,6 +1000,92 @@ function zoom(frame, opts) {
   return { apply: function() { apply() }, reset: function() { set({ s: 1, x: 0, y: 0 }, true) } }
 }
 
+// Panes side by side ("row") or one under another ("col") that share a box, with a handle
+// between each two to drag the space from one to the other; a double tap on a handle shares
+// it evenly again. The box's element children are the panes (a page may draw them again and
+// call it again); opts.fracs their shares (evenly when there are none or the count changed),
+// opts.min the least a pane has (0.15), opts.onChange(fracs) when a drag ends. Returns {fracs}
+function split(box, opts) {
+  opts = opts || {}
+  var dir = opts.dir === "col" ? "col" : "row", min = opts.min || 0.15, doc = root.document
+  var old = box.querySelectorAll(":scope > .kit-split-h")
+  for (var i = 0; i < old.length; i++) old[i].remove()
+  var panes = Array.prototype.slice.call(box.children)
+  var fracs = splitFit(opts.fracs, panes.length, min)
+  box.classList.add("kit-split")
+  box.classList.toggle("kit-split-row", dir === "row")
+  box.classList.toggle("kit-split-col", dir === "col")
+  function size() { panes.forEach(function(p, j) { p.style.flex = fracs[j] + " 1 0px" }) }
+  panes.forEach(function(p, j) {
+    if (j === 0) return
+    var hd = doc.createElement("div")
+    hd.className = "kit-split-h"
+    hd.setAttribute("role", "separator")
+    hd.setAttribute("aria-orientation", dir === "row" ? "vertical" : "horizontal")
+    var drag = null, lastUp = 0
+    hd.addEventListener("pointerdown", function(e) {
+      e.preventDefault()
+      var r = box.getBoundingClientRect()
+      drag = { at: dir === "row" ? e.clientX : e.clientY, total: (dir === "row" ? r.width : r.height) || 1, fracs: fracs.slice(), moved: false }
+      try { hd.setPointerCapture(e.pointerId) } catch (x) {}
+      hd.classList.add("on")
+    })
+    hd.addEventListener("pointermove", function(e) {
+      if (!drag) return
+      var d = ((dir === "row" ? e.clientX : e.clientY) - drag.at) / drag.total
+      if (Math.abs(d) * drag.total > 2) drag.moved = true
+      fracs = splitDrag(drag.fracs, j - 1, d, min)
+      size()
+    })
+    function end() {
+      if (!drag) return
+      var moved = drag.moved
+      drag = null
+      hd.classList.remove("on")
+      var now = Date.now()
+      if (!moved && now - lastUp < 350) { fracs = splitFit(null, panes.length, min); size(); lastUp = 0 }
+      else lastUp = moved ? 0 : now
+      if (opts.onChange) opts.onChange(fracs.slice())
+    }
+    hd.addEventListener("pointerup", end)
+    hd.addEventListener("pointercancel", end)
+    box.insertBefore(hd, p)
+  })
+  size()
+  return { fracs: function() { return fracs.slice() } }
+}
+
+// n panes' shares (pure): the ones given when there are n of them, each at least min, summing
+// to 1; else even
+function splitFit(fracs, n, min) {
+  if (!n) return []
+  if (!Array.isArray(fracs) || fracs.length !== n || fracs.some(function(f) { return !(f > 0) })) {
+    var even = []; for (var i = 0; i < n; i++) even.push(1 / n); return even
+  }
+  var lo = Math.min(min || 0, 1 / n), out = fracs.slice(), held = fracs.map(function() { return false })
+  // the ones under the least held at it, the rest sharing what's left as they were, until none is under
+  for (var pass = 0; pass < n; pass++) {
+    var free = 0, left = 1
+    out.forEach(function(f, j) { if (held[j]) left -= lo; else free += f })
+    out = out.map(function(f, j) { return held[j] ? lo : f / free * left })
+    var more = false
+    out.forEach(function(f, j) { if (!held[j] && f < lo) { held[j] = true; more = true } })
+    if (!more) break
+  }
+  return out
+}
+
+// The handle after pane i dragged by d (a share of the whole; pure): pane i grows by d and
+// pane i + 1 shrinks by it, neither under min
+function splitDrag(fracs, i, d, min) {
+  var out = fracs.slice(), a = out[i], b = out[i + 1]
+  if (a == null || b == null) return out
+  var lo = Math.min(min || 0, (a + b) / 2)
+  d = Math.max(lo - a, Math.min(b - lo, d))
+  out[i] = a + d; out[i + 1] = b - d
+  return out
+}
+
 // A zoom {s, x, y} kept inside a w × h frame (pure): never under 1×, never past an edge
 function zoomFit(v, w, h) {
   var s = Math.max(1, v.s)
@@ -1107,6 +1196,6 @@ root.Kit = {
   offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, popover: popover, popoverPlace: popoverPlace, choice: choice, autogrow: autogrow,
-  privacy: privacy, lock: lock, standalone: standalone, home: home, places: places, placeOf: placeOf, zoom: zoom, zoomFit: zoomFit, zoomAt: zoomAt
+  privacy: privacy, lock: lock, standalone: standalone, home: home, places: places, placeOf: placeOf, zoom: zoom, zoomFit: zoomFit, zoomAt: zoomAt, split: split, splitFit: splitFit, splitDrag: splitDrag
 }
 })(typeof window !== "undefined" ? window : this)
