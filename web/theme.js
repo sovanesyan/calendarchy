@@ -978,6 +978,17 @@ function zoom(frame, opts) {
     if (e.ctrlKey) { e.preventDefault(); set(zoomAt(z, z.s * Math.exp(-e.deltaY * 0.01), p.x, p.y, p.w, p.h, max)) }
     else if (z.s > 1) { e.preventDefault(); set(zoomFit({ s: z.s, x: z.x - e.deltaX, y: z.y - e.deltaY }, p.w, p.h)) }
   }, { passive: false })
+  // iOS Safari zooms the page on a pinch or a double tap whatever touch-action says: its touch
+  // events, cancelled, keep two fingers (and one, while zoomed) and a second tap the picture's.
+  // The pointer events above still come (they're sent first), so the zoom itself is theirs
+  var lastEnd = 0
+  frame.addEventListener("touchstart", function(e) { if (e.touches.length > 1) e.preventDefault() }, { passive: false })
+  frame.addEventListener("touchmove", function(e) { if (e.touches.length > 1 || z.s > 1) e.preventDefault() }, { passive: false })
+  frame.addEventListener("touchend", function(e) {
+    var now = Date.now()
+    if (e.touches.length === 0 && e.changedTouches.length === 1 && now - lastEnd < 320) e.preventDefault()
+    lastEnd = e.touches.length === 0 ? now : 0
+  }, { passive: false })
   // Safari: its own pinch (a trackpad's; a touch pinch is the pointers'), never the page's zoom
   frame.addEventListener("gesturestart", function(e) { e.preventDefault(); gest = n >= 2 ? null : { p: box(e), z: { s: z.s, x: z.x, y: z.y } } })
   frame.addEventListener("gesturechange", function(e) { e.preventDefault(); if (gest && n < 2) set(zoomAt(gest.z, gest.z.s * e.scale, gest.p.x, gest.p.y, gest.p.w, gest.p.h, max)) })
