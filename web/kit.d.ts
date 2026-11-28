@@ -94,7 +94,13 @@ interface KitApi {
   home(): { href: string; label: string; places: KitPlaceLink[] } | null
   places(json: string | null): KitPlaceLink[]
   placeOf(places: KitPlaceLink[], path: string): string | null
+  zoom(frame: HTMLElement, opts?: { target?: string; state?: Partial<KitZoom>; max?: number }): { apply(): void; reset(): void }
+  zoomFit(v: KitZoom, w: number, h: number): KitZoom
+  zoomAt(v: KitZoom, s: number, px: number, py: number, w: number, h: number, max?: number): KitZoom
 }
+
+/** A picture's zoom in its frame (Kit.zoom): the scale, and where its top left is */
+interface KitZoom { s: number; x: number; y: number }
 
 /** One of the home app's places (Kit.home()): its key, its label, its link, and the other paths that are it */
 interface KitPlaceLink { key: string; label: string; href: string; also: string[] }

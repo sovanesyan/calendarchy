@@ -51,6 +51,9 @@
 //                     actions; resolves to the label chosen, or null; dragged down it
 //                     closes. A page's own sheet gets the same from Kit.sheetDrag(box, close),
 //                     and Kit.sheetOpen(dlg) shows it rising from the bottom
+//   Kit.zoom(frame, {target, state, max})   pinch, double-tap and drag a picture in its
+//                     frame (client side; an iPad's pinch natively, the page never zooms);
+//                     {apply, reset}. Kit.zoomAt, Kit.zoomFit (pure)
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
@@ -902,6 +905,100 @@ function popover(anchor, content, opts) {
   return { close: close, dialog: dlg }
 }
 
+// A picture zoomed in its frame, client side only (a transform on the frame's img or video,
+// clipped by the frame): pinch with two fingers, or an iPad's or a Mac's trackpad (Safari's
+// gesture events; ⌃wheel elsewhere), double-tap for 2.5× there and again for all of it, drag
+// to move it while zoomed. The page itself never zooms under it. opts.target ("img, video") is
+// looked for at each apply(), so the picture may be replaced; opts.state ({s, x, y}) keeps the
+// zoom across redraws; opts.max (5). Returns {apply, reset}
+function zoom(frame, opts) {
+  opts = opts || {}
+  var max = opts.max || 5, sel = opts.target || "img, video"
+  var z = opts.state || {}
+  if (!(z.s >= 1)) { z.s = 1; z.x = 0; z.y = 0 }
+  frame.classList.add("kit-zoom")
+  var pts = {}, n = 0, pinch = null, pan = null, gest = null, tap = null, moved = false, doubled = 0
+  function box(e) { var r = frame.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height } }
+  function apply(animate) {
+    var t = frame.querySelector(sel)
+    frame.classList.toggle("kit-zoomed", z.s > 1)
+    if (!t) return
+    t.style.transformOrigin = "0 0"
+    t.style.transition = animate ? "transform .22s ease" : ""
+    t.style.transform = z.s > 1 ? "translate(" + z.x + "px," + z.y + "px) scale(" + z.s + ")" : ""
+  }
+  function set(v, animate) { z.s = v.s; z.x = v.x; z.y = v.y; apply(animate) }
+  function two() { var a = []; for (var k in pts) a.push(pts[k]); return a }
+  function startPan(p) { pan = { x: p.x, y: p.y, z: { s: z.s, x: z.x, y: z.y } } }
+  frame.addEventListener("pointerdown", function(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return
+    pts[e.pointerId] = box(e); n++
+    moved = false
+    if (n === 2) {
+      var a = two()
+      pinch = { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) || 1, mx: (a[0].x + a[1].x) / 2, my: (a[0].y + a[1].y) / 2, z: { s: z.s, x: z.x, y: z.y } }
+      pan = null
+    } else if (n === 1 && z.s > 1) { startPan(pts[e.pointerId]); try { frame.setPointerCapture(e.pointerId) } catch (x) {} }
+  })
+  frame.addEventListener("pointermove", function(e) {
+    if (!(e.pointerId in pts)) return
+    var p = pts[e.pointerId] = box(e)
+    if (pinch && n >= 2) {
+      var a = two(), d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), mx = (a[0].x + a[1].x) / 2, my = (a[0].y + a[1].y) / 2
+      // the point under the fingers stays under them, scaled and carried along
+      var s = Math.min(max, Math.max(1, pinch.z.s * d / pinch.d))
+      var cx = (pinch.mx - pinch.z.x) / pinch.z.s, cy = (pinch.my - pinch.z.y) / pinch.z.s
+      set(zoomFit({ s: s, x: mx - cx * s, y: my - cy * s }, p.w, p.h))
+      moved = true
+    } else if (pan) {
+      if (Math.abs(p.x - pan.x) + Math.abs(p.y - pan.y) > 3) moved = true
+      set(zoomFit({ s: z.s, x: pan.z.x + p.x - pan.x, y: pan.z.y + p.y - pan.y }, p.w, p.h))
+    }
+  })
+  function up(e) {
+    if (!(e.pointerId in pts)) return
+    var p = pts[e.pointerId]
+    delete pts[e.pointerId]; n--
+    if (n < 2) pinch = null
+    if (n === 1 && z.s > 1) { for (var k in pts) startPan(pts[k]) } else if (n === 0) pan = null
+    // a double tap (a finger or a pen; the mouse's is dblclick): 2.5× there, or all of it again
+    if (e.type === "pointerup" && e.pointerType !== "mouse" && n === 0 && !moved) {
+      var now = Date.now()
+      if (tap && now - tap.t < 320 && Math.abs(tap.x - p.x) + Math.abs(tap.y - p.y) < 30) { tap = null; double(p) }
+      else tap = { t: now, x: p.x, y: p.y }
+    }
+  }
+  frame.addEventListener("pointerup", up)
+  frame.addEventListener("pointercancel", up)
+  function double(p) { doubled = Date.now(); set(z.s > 1 ? { s: 1, x: 0, y: 0 } : zoomAt(z, 2.5, p.x, p.y, p.w, p.h, max), true) }
+  frame.addEventListener("dblclick", function(e) { if (Date.now() - doubled > 500) double(box(e)) }) // a tap's own was just done
+  // a trackpad's pinch: ⌃wheel (Chrome, Firefox); zoomed, the wheel moves the picture
+  frame.addEventListener("wheel", function(e) {
+    var p = box(e)
+    if (e.ctrlKey) { e.preventDefault(); set(zoomAt(z, z.s * Math.exp(-e.deltaY * 0.01), p.x, p.y, p.w, p.h, max)) }
+    else if (z.s > 1) { e.preventDefault(); set(zoomFit({ s: z.s, x: z.x - e.deltaX, y: z.y - e.deltaY }, p.w, p.h)) }
+  }, { passive: false })
+  // Safari: its own pinch (a trackpad's; a touch pinch is the pointers'), never the page's zoom
+  frame.addEventListener("gesturestart", function(e) { e.preventDefault(); gest = n >= 2 ? null : { p: box(e), z: { s: z.s, x: z.x, y: z.y } } })
+  frame.addEventListener("gesturechange", function(e) { e.preventDefault(); if (gest && n < 2) set(zoomAt(gest.z, gest.z.s * e.scale, gest.p.x, gest.p.y, gest.p.w, gest.p.h, max)) })
+  frame.addEventListener("gestureend", function(e) { e.preventDefault(); gest = null })
+  apply()
+  return { apply: function() { apply() }, reset: function() { set({ s: 1, x: 0, y: 0 }, true) } }
+}
+
+// A zoom {s, x, y} kept inside a w × h frame (pure): never under 1×, never past an edge
+function zoomFit(v, w, h) {
+  var s = Math.max(1, v.s)
+  return { s: s, x: Math.min(0, Math.max(w - w * s, v.x)), y: Math.min(0, Math.max(h - h * s, v.y)) }
+}
+
+// Zoom `v` to scale s (1 … max) about the point px, py of a w × h frame, which stays where it is (pure)
+function zoomAt(v, s, px, py, w, h, max) {
+  s = Math.min(max || 5, Math.max(1, s))
+  var cx = (px - v.x) / v.s, cy = (py - v.y) / v.s
+  return zoomFit({ s: s, x: px - cx * s, y: py - cy * s }, w, h)
+}
+
 // Where a popover w × ht goes for an anchor rect {left, top, right, bottom} on a vw × vh
 // screen: {left, top, side, arrow}, `side` being where it sits ("right", "left", "below",
 // "above", or "none": centred) and `arrow` how far along its edge the arrow points (down the
@@ -999,6 +1096,6 @@ root.Kit = {
   offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, popover: popover, popoverPlace: popoverPlace, choice: choice, autogrow: autogrow,
-  privacy: privacy, lock: lock, standalone: standalone, home: home, places: places, placeOf: placeOf
+  privacy: privacy, lock: lock, standalone: standalone, home: home, places: places, placeOf: placeOf, zoom: zoom, zoomFit: zoomFit, zoomAt: zoomAt
 }
 })(typeof window !== "undefined" ? window : this)

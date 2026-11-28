@@ -71,6 +71,13 @@
   .kit-mounted .tabs.kit-tabbar:not(.kit-places){display:none}
   .kit-mounted body::after{content:"";display:block;flex:none;height:var(--kit-tabbar,0px)}
 
+  /* .kit-zoom (Kit.zoom): a frame whose picture pinches. The page scrolls under one finger
+     until it's zoomed (.kit-zoomed), then the finger moves the picture */
+  .kit-zoom{overflow:hidden;touch-action:pan-x pan-y;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  .kit-zoom.kit-zoomed{touch-action:none;cursor:grab}
+  .kit-zoom.kit-zoomed:active{cursor:grabbing}
+  .kit-zoom img{-webkit-user-drag:none}
+
   /* .kit-tiles of .kit-tile: a board you read across a room. .k the label (a second span on
      the right: when), .v the big value, .s a line under it, .rows time-and-text lines (.done,
      .next). .wide takes two columns, .alert needs doing, .locked is behind a lock, .stale
