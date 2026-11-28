@@ -54,9 +54,11 @@
 //   Kit.privacy()     blur the page while the app is in the background (the app switcher)
 //   Kit.lock({app, after})   Face ID before the page shows, and after `after` min away
 //   Kit.standalone()  whether it runs as the home-screen app
-//   Kit.home()        {href, label} of the app this page is mounted in (Дом: <meta
-//                     name="kit-home">), else null. Then a ‹ Дом chip leads the header, and
-//                     offline() and push leave the worker and the subscription to that app
+//   Kit.home()        {href, label, places} of the app this page is mounted in (Дом: <meta
+//                     name="kit-home">), else null. Then that app's places are the bar on
+//                     the bottom edge (.kit-places, <html class="kit-mounted">), and
+//                     offline() and push leave the worker and the subscription to that app.
+//                     Kit.places(json), Kit.placeOf(places, path): the pure parts
 // Every URL here is relative (api/theme, sw.js, api/push…), so a page works at its app's
 // own address and mounted under a path alike.
 // Plain script, no build: the page loads /theme.js before its own script (or has it inline:
@@ -460,30 +462,58 @@ function pushButton() {
 }
 
 // The app this page is mounted in, when it is: Дом serves the family's apps under one origin
-// (/kodiaq/, /lumon/, …) and puts <meta name="kit-home" content="/" data-label="Дом"> in each
-// page it passes on. Then theme.js puts a ‹ Дом chip (a.kit-home) first in the page's
-// <header>, the way back in a home-screen app with no back button, and the page leaves the
-// worker and push to that app. null at the app's own address
+// (/kodiaq/, /lumon/, …) and puts <meta name="kit-home" content="/" data-label="Дом"
+// data-places='[[key, label, href, [other paths]], …]'> in each page it passes on. Then the
+// page leaves the worker and push to that app, and theme.js puts that app's places along the
+// bottom edge (placesBar): the same bar on every page under it, the way between them in a
+// home-screen app with no back button. null at the app's own address
 function home() {
   var doc = root.document
   var m = doc && doc.querySelector ? doc.querySelector('meta[name="kit-home"]') : null
   if (!m) return null
-  return { href: m.getAttribute("content") || "/", label: m.getAttribute("data-label") || "Дом" }
+  return { href: m.getAttribute("content") || "/", label: m.getAttribute("data-label") || "Дом", places: places(m.getAttribute("data-places")) }
 }
 
-// The ‹ Дом chip, once the page's header is there
-function homeChip() {
-  var at = home(), doc = root.document
-  if (!at || !doc) return null
-  var header = doc.querySelector("header")
-  if (!header || header.querySelector(".kit-home")) return null
-  var a = h("a", { "class": "kit-home", href: at.href, title: at.label }, "‹ " + at.label)
-  header.insertBefore(a, header.firstChild)
-  return a
+// The places in data-places (pure): [key, label, href, [other paths that are this place]]
+function places(json) {
+  var v
+  try { v = JSON.parse(json || "[]") } catch (e) { return [] }
+  if (!Array.isArray(v)) return []
+  return v.filter(function(p) { return Array.isArray(p) && typeof p[0] === "string" && typeof p[1] === "string" && typeof p[2] === "string" })
+    .map(function(p) { return { key: p[0], label: p[1], href: p[2], also: Array.isArray(p[3]) ? p[3].filter(function(x) { return typeof x === "string" }) : [] } })
 }
-if (root.document && typeof root.document.querySelector === "function") {
-  if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", homeChip)
-  else homeChip()
+
+// The place a path is in (pure): the one whose href's path, or one of its other paths, the
+// path starts with; "/" (the home app's own page) is no app's
+function placeOf(list, path) {
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i], bases = [p.href.split(/[?#]/)[0]].concat(p.also)
+    for (var j = 0; j < bases.length; j++) if (bases[j] !== "/" && path.indexOf(bases[j]) === 0) return p.key
+  }
+  return null
+}
+
+// The home app's places along the bottom (.tabs.kit-tabbar.kit-places), the one this page is
+// in lit. A place's link may be one the home app chose for this device (localStorage
+// "kit-place:<key>", under the same path: Дом's Глас link carries ?device=). <html> gets
+// .kit-mounted at once, so a page's own bottom bar can give way before it's drawn
+var mounted = home()
+if (mounted && mounted.places.length) root.document.documentElement.classList.add("kit-mounted")
+function placesBar() {
+  var at = home(), doc = root.document
+  if (!at || !at.places.length || !doc || !doc.body || doc.querySelector(".kit-places")) return null
+  var here = placeOf(at.places, root.location.pathname)
+  var nav = h("nav", { "class": "tabs kit-tabbar kit-places", "aria-label": at.label }, at.places.map(function(p) {
+    var to = p.href, base = p.href.split(/[?#]/)[0]
+    try { var o = root.localStorage.getItem("kit-place:" + p.key); if (o && o.indexOf(base) === 0) to = o } catch (e) {}
+    return h("a", { href: to, "data-place": p.key, "class": p.key === here ? "on" : null, "aria-current": p.key === here ? "page" : null }, p.label)
+  }))
+  doc.body.appendChild(nav)
+  return nav
+}
+if (mounted && root.document && typeof root.document.querySelector === "function") {
+  if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", placesBar)
+  else placesBar()
 }
 
 // The number on the app's icon (0 or null clears it); quietly nothing where there's no badge
@@ -969,6 +999,6 @@ root.Kit = {
   offline: offline, fmtSaved: fmtSaved, autoUpdate: autoUpdate, updateNow: updateNow, sheetDrag: sheetDrag, sheetOpen: sheetOpen, pageChanged: pageChanged, push: push, pushButton: pushButton, badge: badge, tick: tick, share: share,
   transition: transition, keyboard: keyboard, swipe: swipe, swipeTravel: swipeTravel, SWIPE_AT: SWIPE_AT,
   fling: fling, flingTilt: flingTilt, FLING_AT: FLING_AT, sheet: sheet, popover: popover, popoverPlace: popoverPlace, choice: choice, autogrow: autogrow,
-  privacy: privacy, lock: lock, standalone: standalone, home: home
+  privacy: privacy, lock: lock, standalone: standalone, home: home, places: places, placeOf: placeOf
 }
 })(typeof window !== "undefined" ? window : this)

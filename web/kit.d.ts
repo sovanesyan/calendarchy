@@ -91,8 +91,13 @@ interface KitApi {
   privacy(): void
   lock(opts?: { app?: string; after?: number }): Promise<boolean>
   standalone(): boolean
-  home(): { href: string; label: string } | null
+  home(): { href: string; label: string; places: KitPlaceLink[] } | null
+  places(json: string | null): KitPlaceLink[]
+  placeOf(places: KitPlaceLink[], path: string): string | null
 }
+
+/** One of the home app's places (Kit.home()): its key, its label, its link, and the other paths that are it */
+interface KitPlaceLink { key: string; label: string; href: string; also: string[] }
 
 interface Window { Kit: KitApi }
 /** iOS Safari: whether the page runs as the home-screen app */
