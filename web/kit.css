@@ -94,6 +94,25 @@
   .kit-tile.locked{border-style:dashed}
   .kit-tile.stale .v{font-size:14px;font-weight:400;color:var(--warn)}
 
+  /* .kit-tile.dev: a thing worked from its tile (Дом's Вкъщи). .top holds its .kit-glyph and
+     its one quick control (a .kit-switch, a .btn.icon); then .v a reading, .n the name (a
+     button: the tile's keyboard way in), .s its state. .on lit while it's on; .alert and
+     .gone (no connection) as ever. A tap anywhere but the control opens the rest, in
+     Kit.popover. Each is as tall as one with a reading, so tiles side by side line up */
+  .kit-tile.dev{display:flex;flex-direction:column;gap:.1rem;min-height:7.75rem;padding:.6rem .7rem .55rem;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  .kit-tile.dev:hover{border-color:color-mix(in srgb,var(--fg) 25%,transparent)}
+  .kit-tile.dev:active:not(:has(.top :active)){background:var(--sel)}
+  .kit-tile.dev .top{display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;margin-bottom:auto;padding-bottom:.35rem}
+  .kit-tile.dev .top .btn.icon{border-radius:50%;width:32px;height:32px}
+  .kit-tile.dev .v{margin:0;font-size:20px;line-height:1.15}
+  .kit-tile.dev .n{appearance:none;border:0;background:none;padding:0;margin:0;font:inherit;font-weight:700;font-size:13.5px;color:inherit;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kit-tile.dev .s{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kit-tile.dev.on{background:color-mix(in srgb,var(--accent) 9%,var(--bg));border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+  .kit-tile.dev.gone .s{color:var(--warn)}
+  .kit-glyph{flex:none;width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:var(--chip);color:var(--dim);font-size:16px;line-height:1}
+  .on>.top>.kit-glyph,.kit-glyph.on{background:var(--sel);color:var(--accent)}
+  .alert>.top>.kit-glyph{background:color-mix(in srgb,var(--urgent) 12%,transparent);color:var(--urgent)}
+
   /* .kit-switch: <input type="checkbox" switch class="kit-switch">, a switch that looks like
      one everywhere (Safari's own `switch` gives the haptic tick) */
   .kit-switch{appearance:none;-webkit-appearance:none;flex:none;position:relative;width:42px;height:24px;margin:0;border-radius:12px;background:var(--line);cursor:pointer;transition:background .15s;vertical-align:middle}
